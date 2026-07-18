@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18-alpine
+    image: postgres:17-alpine
     container_name: algo-trading-postgres
     restart: unless-stopped
     environment:

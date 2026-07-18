@@ -5,9 +5,12 @@ description = "Algo Trading Backend"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "arq>=0.25.0",
     "asyncer>=0.0.18",
     "asyncpg>=0.31.0",
     "fastapi[standard]>=0.139.0",
+    "fyers-apiv3>=3.1.14",
+    "pandas>=3.0.3",
     "pydantic-settings>=2.14.2",
     "redis>=8.0.1",
     "sqlalchemy>=2.0.51",

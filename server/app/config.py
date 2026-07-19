@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     fyers_app_id: str = ""
     fyers_secret_key: str = ""
     fyers_redirect_uri: str = "http://127.0.0.1:3000/callback"
+
+    scheduler_timezone: str = "Asia/Kolkata"
+    eod_sync_enabled: bool = True
+    eod_sync_hour: int = Field(default=18, ge=0, le=23)
+    eod_sync_minute: int = Field(default=30, ge=0, le=59)
 
     @field_validator("database_url", mode="before")
     @classmethod
@@ -23,4 +28,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-

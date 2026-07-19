@@ -22,6 +22,7 @@ import {
   Search,
   ListFilter,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 const BACKEND_URL = "http://localhost:8000";
 const queryClient = new QueryClient();
@@ -144,7 +145,6 @@ function Callback({ navigate }: { navigate: (to: string) => void }) {
 
 // Dashboard component displays active states, metrics, and progress logs
 function Dashboard() {
-  const [syncYears, setSyncYears] = useState(1);
   const [validationYears, setValidationYears] = useState(2);
   const [terminalTab, setTerminalTab] = useState<"sync" | "validation">("sync");
   const [activeTab, setActiveTab] = useState<"admin" | "screener">("admin");
@@ -163,7 +163,7 @@ function Dashboard() {
   });
 
   // 2. Sync Status query
-  const { data: syncStatus, refetch: refetchSync } = useQuery({
+  const { data: syncStatus } = useQuery({
     queryKey: ["syncStatus"],
     queryFn: async () => {
       const response = await fetch(`${BACKEND_URL}/api/v1/historical/status`);
@@ -191,7 +191,7 @@ function Dashboard() {
   });
 
   // 2c. Technical Scan Runs query
-  const { data: scanRuns, refetch: refetchScanRuns } = useQuery({
+  const { data: scanRuns } = useQuery({
     queryKey: ["scanRuns"],
     queryFn: async () => {
       const response = await fetch(`${BACKEND_URL}/api/v1/screening/runs`);
@@ -200,6 +200,8 @@ function Dashboard() {
     },
     refetchInterval: 5000, // Poll every 5 seconds for status updates
   });
+
+  const activeRun = scanRuns?.find((run: any) => run.id === selectedRunId);
 
   // 2d. Technical Scan Results query
   const { data: scanResults, isPending: isLoadingResults } = useQuery({
@@ -210,7 +212,7 @@ function Dashboard() {
       if (!response.ok) throw new Error("Failed to load scan results");
       return response.json();
     },
-    enabled: !!selectedRunId,
+    enabled: !!selectedRunId && activeRun?.status === "succeeded",
   });
 
   // 3. Initiate Fyers login redirect
@@ -228,11 +230,11 @@ function Dashboard() {
 
   // 4. Trigger historical sync mutation
   const triggerSync = useMutation({
-    mutationFn: async (years: number) => {
+    mutationFn: async () => {
       const response = await fetch(`${BACKEND_URL}/api/v1/historical/sync`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ years }),
+        body: JSON.stringify({ backfill_years: 1 }),
       });
       if (!response.ok) {
         const errData = await response.json();
@@ -241,11 +243,8 @@ function Dashboard() {
       return response.json();
     },
     onSuccess: () => {
-      refetchSync();
+      queryClient.invalidateQueries({ queryKey: ["syncStatus"] });
       setTerminalTab("sync");
-    },
-    onError: (err: any) => {
-      alert("Error triggering sync: " + err.message);
     },
   });
 
@@ -282,7 +281,7 @@ function Dashboard() {
       return response.json();
     },
     onSuccess: () => {
-      refetchSync();
+      queryClient.invalidateQueries({ queryKey: ["syncStatus"] });
     },
   });
 
@@ -330,7 +329,7 @@ function Dashboard() {
       return response.json();
     },
     onSuccess: (data) => {
-      refetchScanRuns();
+      queryClient.invalidateQueries({ queryKey: ["scanRuns"] });
       setSelectedRunId(data.scan_run_id);
       setActiveTab("screener");
     },
@@ -353,20 +352,21 @@ function Dashboard() {
 
   const [symbolFilter, setSymbolFilter] = useState("");
 
-  const isRunning = syncStatus?.is_running;
+  const isRunning = syncStatus?.state === "queued" || syncStatus?.is_running;
   const progressPercent =
     syncStatus?.total_symbols > 0
       ? Math.round((syncStatus.current_index / syncStatus.total_symbols) * 100)
       : 0;
 
-  const isScanRunning = scanRuns?.some((r: any) => r.status === "running" || r.status === "queued");
+  const latestScanRun = scanRuns?.[0];
+  const isScanRunning = latestScanRun?.status === "running" || latestScanRun?.status === "queued";
+  const isLoadingActiveRunResults = activeRun?.status === "succeeded" && isLoadingResults;
+  const isVcpShortlistRun = activeRun?.technical_config?.pipeline_version === "vcp_shortlist_v1";
   
   // Filter scan results in the frontend by symbol search
   const filteredResults = scanResults
     ? scanResults.filter((r: any) => r.symbol.toLowerCase().includes(symbolFilter.toLowerCase()))
     : [];
-
-  const activeRun = scanRuns?.find((r: any) => r.id === selectedRunId);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans antialiased p-6 md:p-12 selection:bg-emerald-500/30">
@@ -514,11 +514,26 @@ function Dashboard() {
                     Historical Sync
                   </h3>
                   <p className="text-zinc-400 text-sm leading-relaxed">
-                    Sync historical daily candles from Fyers. Automatically respects API rate limits (10 req/s, 200 req/m).
+                    Fetch only the EOD candles missing after each stock&apos;s last saved trading date.
                   </p>
 
+                  <div className="flex flex-col gap-1 rounded-xl border border-zinc-800/60 bg-zinc-950/40 p-3 text-xs">
+                    <span className="text-zinc-500">Latest stored EOD</span>
+                    <strong className="font-mono text-zinc-200">
+                      {syncStatus?.db_metrics?.latest_candle_date ?? "No data yet"}
+                    </strong>
+                    <span className="text-zinc-500">
+                      {syncStatus?.db_metrics?.symbols_at_latest_date ?? 0} /{" "}
+                      {syncStatus?.db_metrics?.nifty500_instruments ?? 0} symbols current
+                    </span>
+                    <span className="text-zinc-500">
+                      Auto-sync: {syncStatus?.schedule?.weekdays ?? "Monday-Friday"} at{" "}
+                      {syncStatus?.schedule?.time ?? "18:30"} {syncStatus?.schedule?.timezone ?? "Asia/Kolkata"}
+                    </span>
+                  </div>
+
                   {isRunning ? (
-                    <div className="space-y-2 mt-2">
+                    <div className="flex flex-col gap-2 mt-2">
                       <div className="flex justify-between text-xs text-zinc-400">
                         <span>Syncing: <strong className="text-zinc-200">{syncStatus.current_symbol}</strong></span>
                         <span>{syncStatus.current_index} / {syncStatus.total_symbols}</span>
@@ -534,41 +549,36 @@ function Dashboard() {
                         <span>~{Math.round((syncStatus.total_symbols - syncStatus.current_index) * 0.35)}s left</span>
                       </div>
                     </div>
-                  ) : (
-                    <div className="flex items-center gap-3 mt-2">
-                      <span className="text-sm text-zinc-400 font-medium">Data range:</span>
-                      <select
-                        value={syncYears}
-                        onChange={(e) => setSyncYears(Number(e.target.value))}
-                        className="bg-zinc-950 border border-zinc-800 text-zinc-200 rounded-lg px-3 py-1.5 text-xs font-medium focus:border-zinc-700 outline-none cursor-pointer"
-                      >
-                        <option value={1}>1 Year (Recommended)</option>
-                        <option value={2}>2 Years</option>
-                      </select>
-                    </div>
-                  )}
+                  ) : null}
                 </div>
 
                 {isRunning ? (
-                  <button
+                  <Button
+                    variant="destructive"
+                    size="lg"
+                    className="mt-6 w-full"
                     onClick={() => cancelSync.mutate()}
                     disabled={cancelSync.isPending}
-                    className="w-full mt-6 py-2.5 bg-red-950 hover:bg-red-900 border border-red-800 text-red-200 font-semibold rounded-xl transition text-sm cursor-pointer flex items-center justify-center gap-2"
                   >
-                    <Square className="h-4 w-4" /> Stop Sync Run
-                  </button>
+                    <Square data-icon="inline-start" /> Stop Sync Run
+                  </Button>
                 ) : (
-                  <button
-                    onClick={() => triggerSync.mutate(syncYears)}
+                  <Button
+                    size="lg"
+                    className="mt-6 w-full"
+                    onClick={() => triggerSync.mutate()}
                     disabled={!authStatus?.authenticated || triggerSync.isPending}
-                    className={`w-full mt-6 py-2.5 font-semibold rounded-xl transition text-sm flex items-center justify-center gap-2 cursor-pointer ${
-                      authStatus?.authenticated
-                        ? "bg-blue-500 hover:bg-blue-400 active:bg-blue-600 text-zinc-950"
-                        : "bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-800"
-                    }`}
                   >
-                    <Play className="h-4 w-4" /> Trigger Historical Sync
-                  </button>
+                    {triggerSync.isPending ? (
+                      <Loader2 data-icon="inline-start" className="animate-spin" />
+                    ) : (
+                      <RefreshCw data-icon="inline-start" />
+                    )}
+                    Sync Latest EOD Data
+                  </Button>
+                )}
+                {triggerSync.isError && (
+                  <p className="mt-2 text-xs text-red-400">{triggerSync.error.message}</p>
                 )}
               </div>
 
@@ -944,7 +954,7 @@ function Dashboard() {
                     </>
                   ) : (
                     <>
-                      <Play className="h-3.5 w-3.5" /> Run Technical Scan
+                      <Play className="h-3.5 w-3.5" /> Build VCP Shortlist
                     </>
                   )}
                 </button>
@@ -990,7 +1000,7 @@ function Dashboard() {
                           <div className="text-xs font-semibold text-zinc-300 mt-1.5 flex justify-between">
                             <span>{new Date(run.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
                             {run.status === "succeeded" && (
-                              <strong className="text-indigo-400 font-bold">{run.passing_count} hits</strong>
+                              <strong className="text-indigo-400 font-bold">{run.passing_count} shortlisted</strong>
                             )}
                           </div>
                         </div>
@@ -1018,7 +1028,7 @@ function Dashboard() {
                   <div>
                     <h3 className="text-lg font-bold text-zinc-200 flex items-center gap-2">
                       <TrendingUp className="h-5 w-5 text-indigo-400" />
-                      Scan Results: Nifty 500 Universe
+                      VCP Manual Review Shortlist: Nifty 500
                     </h3>
                     <p className="text-xs text-zinc-500 mt-0.5 font-mono">
                       {activeRun 
@@ -1045,7 +1055,7 @@ function Dashboard() {
 
                 {/* Results Table Area */}
                 <div className="flex-1 overflow-y-auto custom-scrollbar pr-1">
-                  {isLoadingResults ? (
+                  {isLoadingActiveRunResults ? (
                     <div className="flex flex-col items-center justify-center h-full py-12 space-y-3">
                       <Loader2 className="h-8 w-8 text-indigo-400 animate-spin" />
                       <span className="text-xs text-zinc-500 font-medium">Loading filtered symbols...</span>
@@ -1064,7 +1074,7 @@ function Dashboard() {
                       <div className="text-center">
                         <h4 className="text-sm font-bold text-zinc-200">Executing Technical Scan</h4>
                         <p className="text-xs text-zinc-400 mt-1 max-w-xs leading-relaxed">
-                          Checking SMA ordering, slope checks, and 52w bounds across Nifty 500. This takes about 2 seconds.
+                          Applying liquidity, Stage 2, pivot proximity, squeeze, volume dry-up, and RS ranking across Nifty 500.
                         </p>
                       </div>
                     </div>
@@ -1077,10 +1087,11 @@ function Dashboard() {
                             <th className="py-2.5 px-3">Symbol</th>
                             <th className="py-2.5 px-3 text-right">Price (₹)</th>
                             <th className="py-2.5 px-3 text-center">SMA (50/150/200)</th>
-                            <th className="py-2.5 px-3 text-center">52w High / Low</th>
-                            <th className="py-2.5 px-3 text-right">20d Avg Vol</th>
+                            <th className="py-2.5 px-3 text-right">ADTV (₹ Cr)</th>
+                            <th className="py-2.5 px-3 text-center">Squeeze (ATR / BB)</th>
+                            <th className="py-2.5 px-3 text-center">Vol 10d / 50d</th>
                             <th className="py-2.5 px-3 text-center w-20">RS Rating</th>
-                            <th className="py-2.5 px-3 text-right w-24">Near 52w High</th>
+                            <th className="py-2.5 px-3 text-right w-24">Pivot Distance</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-zinc-850">
@@ -1103,20 +1114,23 @@ function Dashboard() {
                                   <span className="text-blue-400">{row.sma_200.toFixed(1)}</span>
                                 </div>
                               </td>
-                              <td className="py-3 px-3 text-center font-mono text-[10px]">
-                                <div className="flex justify-center gap-3">
-                                  <div>
-                                    <span className="text-zinc-500 mr-1">Hi:</span>
-                                    <span className="text-zinc-300">{row.high_52w.toFixed(1)}</span>
-                                  </div>
-                                  <div>
-                                    <span className="text-zinc-500 mr-1">Lo:</span>
-                                    <span className="text-zinc-300">{row.low_52w.toFixed(1)}</span>
-                                  </div>
-                                </div>
+                              <td className="py-3 px-3 text-right font-mono font-bold text-emerald-400">
+                                {isVcpShortlistRun ? row.adtv_crore.toFixed(1) : "—"}
                               </td>
-                              <td className="py-3 px-3 text-right font-mono text-zinc-400">
-                                {row.avg_volume_20.toLocaleString()}
+                              <td className="py-3 px-3 text-center font-mono text-[10px]">
+                                {isVcpShortlistRun ? (
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className="text-indigo-300">
+                                      ATR {row.atr_ratio.toFixed(3)} / low {row.atr_ratio_3m_low.toFixed(3)}
+                                    </span>
+                                    <span className="text-blue-300">
+                                      BB {(row.bb_width * 100).toFixed(2)}% / p20 {(row.bb_width_20th_pct * 100).toFixed(2)}%
+                                    </span>
+                                  </div>
+                                ) : "Legacy run"}
+                              </td>
+                              <td className="py-3 px-3 text-center font-mono font-bold text-emerald-400">
+                                {isVcpShortlistRun ? row.volume_dry_up_ratio.toFixed(2) : "—"}
                               </td>
                               <td className="py-3 px-3 text-center font-mono">
                                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -1144,7 +1158,7 @@ function Dashboard() {
                       <p className="text-xs text-zinc-500">
                         {symbolFilter 
                           ? `No stocks match filter "${symbolFilter}" for this run.` 
-                          : "No stocks in Nifty 500 met all the technical criteria."
+                          : "No stocks met every shortlist gate. This is valid when the market has no tight, dry-volume setups."
                         }
                       </p>
                     </div>
@@ -1154,7 +1168,12 @@ function Dashboard() {
               </div>
               
               <div className="mt-4 text-[10px] text-zinc-500 flex justify-between border-t border-zinc-800/40 pt-3 shrink-0">
-                <span>Minervini Trend Template: Price &gt; 150 & 200 SMA | 150 &gt; 200 SMA | 200 SMA Rising (1M+) | 50 &gt; 150 & 200 SMA | Price &gt; 50 SMA | &ge; 30% from 52w Low | &le; 25% from 52w High | RS Rating &ge; 70</span>
+                <span>
+                  {isVcpShortlistRun
+                    ? "ADTV > ₹10 Cr → Stage 2 (8 rules) → ≤15% from 52w high → ATR + BB squeeze → Vol 10d/50d ≤0.80 → RS desc → top 20"
+                    : "Legacy Stage 2 scan — run a new shortlist to apply the VCP contraction pipeline"
+                  }
+                </span>
                 {activeRun?.status === "succeeded" && (
                   <span>Showing {filteredResults.length} / {scanResults?.length} hits</span>
                 )}

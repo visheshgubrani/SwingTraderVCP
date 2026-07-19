@@ -1,232 +1,361 @@
 import asyncio
 import datetime
 import json
-from typing import Dict, Any, List, Optional
+import logging
+from dataclasses import asdict, dataclass, field
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from arq.connections import ArqRedis
+from fyers_apiv3 import fyersModel
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.config import settings
 from app.database import async_session
 from app.security import get_fyers_token
-from fyers_apiv3 import fyersModel
 
+logger = logging.getLogger(__name__)
+
+SYNC_STATUS_KEY = "historical:eod_sync:status"
+SYNC_LOCK_KEY = "historical:eod_sync:lock"
+SYNC_CANCEL_KEY = "historical:eod_sync:cancel"
+SYNC_LOCK_SECONDS = 60 * 60
+INDIA_TZ = ZoneInfo("Asia/Kolkata")
+EOD_AVAILABLE_AFTER = datetime.time(hour=18, minute=0)
+
+
+@dataclass
 class SyncProgress:
-    def __init__(self):
-        self.is_running = False
-        self.total_symbols = 0
-        self.current_index = 0
-        self.current_symbol = ""
-        self.errors: List[Dict[str, Any]] = []
-        self.logs: List[str] = []
-        self.started_at: Optional[datetime.datetime] = None
-        self.completed_at: Optional[datetime.datetime] = None
+    run_id: str = ""
+    state: str = "idle"
+    triggered_by: str | None = None
+    is_running: bool = False
+    total_symbols: int = 0
+    current_index: int = 0
+    current_symbol: str = ""
+    successful_symbols: int = 0
+    skipped_symbols: int = 0
+    candles_upserted: int = 0
+    error_count: int = 0
+    errors: list[dict[str, str]] = field(default_factory=list)
+    logs: list[str] = field(default_factory=list)
+    started_at: str | None = None
+    completed_at: str | None = None
 
-    def reset(self, total_symbols: int):
-        self.is_running = True
-        self.total_symbols = total_symbols
-        self.current_index = 0
-        self.current_symbol = ""
-        self.errors = []
-        self.logs = []
-        self.started_at = datetime.datetime.now(datetime.timezone.utc)
-        self.completed_at = None
-        self.log(f"Started sync of {total_symbols} symbols.")
-
-    def log(self, message: str):
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    def log(self, message: str) -> None:
+        timestamp = datetime.datetime.now(INDIA_TZ).strftime("%H:%M:%S")
         self.logs.append(f"[{timestamp}] {message}")
-        # Keep only the last 300 logs
-        if len(self.logs) > 300:
-            self.logs = self.logs[-300:]
+        self.logs = self.logs[-300:]
 
-    def add_error(self, symbol: str, error_message: str):
-        self.errors.append({
-            "symbol": symbol,
-            "error": error_message,
-            "timestamp": datetime.datetime.now().isoformat()
-        })
+    def add_error(self, symbol: str, error_message: str) -> None:
+        self.error_count += 1
+        if len(self.errors) < 100:
+            self.errors.append(
+                {
+                    "symbol": symbol,
+                    "error": error_message,
+                    "timestamp": datetime.datetime.now(INDIA_TZ).isoformat(),
+                }
+            )
         self.log(f"ERROR ({symbol}): {error_message}")
 
-    def complete(self):
+    def finish(self, state: str, message: str) -> None:
+        self.state = state
         self.is_running = False
-        self.completed_at = datetime.datetime.now(datetime.timezone.utc)
-        self.log(f"Sync completed. Successful: {self.current_index - len(self.errors)}/{self.total_symbols}. Errors: {len(self.errors)}.")
+        self.completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.current_symbol = ""
+        self.log(message)
 
-    def cancel(self, reason: str):
-        self.is_running = False
-        self.completed_at = datetime.datetime.now(datetime.timezone.utc)
-        self.log(f"Sync cancelled: {reason}")
 
-# Global singleton to hold current sync progress
-sync_progress = SyncProgress()
+def empty_sync_status() -> dict[str, Any]:
+    return asdict(SyncProgress())
 
-async def run_historical_sync(years: int = 1):
-    """
-    Background worker task to fetch and save daily historical candles for the Nifty 500.
-    """
-    global sync_progress
-    
-    # Calculate dates
-    today = datetime.date.today()
-    start_date = today - datetime.timedelta(days=365 * years)
-    
-    # 1. Fetch symbols from DB
-    async with async_session() as session:
-        # Check active token first
-        token_data = await get_fyers_token(session)
-        if not token_data:
-            sync_progress.is_running = False
-            sync_progress.log("Sync failed: No active Fyers token in database. Please authenticate.")
-            return
 
-        access_token = token_data["access_token"]
-        expires_at = token_data["expires_at"]
-        if expires_at < datetime.datetime.now(datetime.timezone.utc):
-            sync_progress.is_running = False
-            sync_progress.log("Sync failed: Fyers token is expired. Please re-authenticate.")
-            return
-
-        # Fetch Nifty 500 instruments
-        query = text("""
-            SELECT i.id, i.symbol, i.fyers_symbol, i.trading_symbol, i.name
-            FROM instruments i
-            JOIN universe_memberships m ON i.id = m.instrument_id
-            WHERE m.universe_code = 'NIFTY500' AND m.member_to IS NULL AND i.active = true
-            ORDER BY i.symbol ASC
-        """)
-        result = await session.execute(query)
-        instruments = result.all()
-
-    if not instruments:
-        sync_progress.is_running = False
-        sync_progress.log("Sync aborted: No active Nifty 500 instruments found in database.")
-        return
-
-    # Initialize progress
-    sync_progress.reset(len(instruments))
-    
-    # Initialize Fyers client in async mode
-    fyers = fyersModel.FyersModel(
-        is_async=True,
-        client_id=settings.fyers_app_id,
-        token=access_token,
-        log_path=""
-    )
-
-    upsert_query = text("""
-        INSERT INTO market_candles (
-            instrument_id,
-            timeframe,
-            candle_start,
-            open_price,
-            high_price,
-            low_price,
-            close_price,
-            volume,
-            source,
-            raw_payload
-        )
-        VALUES (
-            :instrument_id,
-            '1d',
-            :candle_start,
-            :open_price,
-            :high_price,
-            :low_price,
-            :close_price,
-            :volume,
-            'fyers',
-            CAST(:raw_payload AS jsonb)
-        )
-        ON CONFLICT (instrument_id, timeframe, candle_start) DO UPDATE SET
-            open_price = EXCLUDED.open_price,
-            high_price = EXCLUDED.high_price,
-            low_price = EXCLUDED.low_price,
-            close_price = EXCLUDED.close_price,
-            volume = EXCLUDED.volume,
-            fetched_at = now(),
-            raw_payload = EXCLUDED.raw_payload
-    """)
-
+async def get_sync_status(redis: ArqRedis) -> dict[str, Any]:
+    raw_status = await redis.get(SYNC_STATUS_KEY)
+    if not raw_status:
+        return empty_sync_status()
+    if isinstance(raw_status, bytes):
+        raw_status = raw_status.decode()
     try:
-        for idx, inst in enumerate(instruments, start=1):
-            if not sync_progress.is_running:
-                sync_progress.log("Sync interrupted by user or system.")
-                break
-                
-            sync_progress.current_index = idx
-            sync_progress.current_symbol = inst.symbol
-            
-            # Divide historical range into chunks of maximum 365 days (Fyers limit is 366 days for "D")
-            chunks = []
-            current_start = start_date
-            while current_start < today:
-                current_end = min(current_start + datetime.timedelta(days=365), today)
-                chunks.append((current_start.strftime("%Y-%m-%d"), current_end.strftime("%Y-%m-%d")))
-                current_start = current_end + datetime.timedelta(days=1)
-            
-            sync_progress.log(f"Syncing {inst.symbol} in {len(chunks)} chunks...")
-            
-            for chunk_from, chunk_to in chunks:
-                if not sync_progress.is_running:
-                    break
-                
-                # Fetch candle data for this chunk
-                data = {
-                    "symbol": inst.fyers_symbol,
+        return json.loads(raw_status)
+    except (TypeError, json.JSONDecodeError):
+        logger.warning("Ignoring malformed historical sync status in Redis")
+        return empty_sync_status()
+
+
+async def save_sync_status(redis: ArqRedis, progress: SyncProgress) -> None:
+    await redis.set(SYNC_STATUS_KEY, json.dumps(asdict(progress)))
+
+
+def build_date_chunks(
+    start_date: datetime.date,
+    end_date: datetime.date,
+) -> list[tuple[datetime.date, datetime.date]]:
+    """Split an inclusive date range into Fyers-safe chunks of at most 365 days."""
+    chunks: list[tuple[datetime.date, datetime.date]] = []
+    current_start = start_date
+    while current_start <= end_date:
+        current_end = min(current_start + datetime.timedelta(days=364), end_date)
+        chunks.append((current_start, current_end))
+        current_start = current_end + datetime.timedelta(days=1)
+    return chunks
+
+
+def next_sync_date(
+    latest_candle_date: datetime.date | None,
+    today: datetime.date,
+    backfill_years: int,
+) -> datetime.date:
+    if latest_candle_date is not None:
+        return latest_candle_date + datetime.timedelta(days=1)
+    return today - datetime.timedelta(days=365 * backfill_years)
+
+
+def latest_completed_eod_date(
+    now: datetime.datetime | None = None,
+) -> datetime.date:
+    """Return the latest date for which a daily candle can reasonably be final."""
+    current = now or datetime.datetime.now(INDIA_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=INDIA_TZ)
+    else:
+        current = current.astimezone(INDIA_TZ)
+
+    candidate = current.date()
+    if current.timetz().replace(tzinfo=None) < EOD_AVAILABLE_AFTER:
+        candidate -= datetime.timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= datetime.timedelta(days=1)
+    return candidate
+
+
+def _token_is_expired(expires_at: datetime.datetime) -> bool:
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+    return expires_at <= datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=5)
+
+
+async def run_historical_sync(
+    ctx: dict[str, Any],
+    triggered_by: str = "scheduled",
+    backfill_years: int = 1,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Incrementally fetch daily Nifty 500 candles as an arq worker job."""
+    redis: ArqRedis = ctx["redis"]
+    effective_run_id = run_id or str(ctx.get("job_id", "scheduled"))
+    lock_owner = effective_run_id
+    lock_acquired = await redis.set(
+        SYNC_LOCK_KEY,
+        lock_owner,
+        ex=SYNC_LOCK_SECONDS,
+        nx=True,
+    )
+    if not lock_acquired:
+        logger.info("Skipping historical sync because another sync owns the lock")
+        return {"status": "already_running"}
+
+    progress = SyncProgress(
+        run_id=effective_run_id,
+        state="running",
+        triggered_by=triggered_by,
+        is_running=True,
+        started_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    progress.log(f"Started {triggered_by} incremental EOD sync.")
+    await save_sync_status(redis, progress)
+
+    fyers = None
+    try:
+        if await redis.get(SYNC_CANCEL_KEY):
+            progress.finish("cancelled", "Sync cancelled before it started.")
+            await save_sync_status(redis, progress)
+            return {"status": "cancelled"}
+
+        async with async_session() as session:
+            token_data = await get_fyers_token(session)
+            if not token_data or _token_is_expired(token_data["expires_at"]):
+                progress.finish(
+                    "authentication_required",
+                    "Fyers authentication is required before EOD data can be synced.",
+                )
+                await save_sync_status(redis, progress)
+                return {"status": "authentication_required"}
+
+            instruments_result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        i.id,
+                        i.symbol,
+                        i.fyers_symbol,
+                        (MAX(c.candle_start) AT TIME ZONE 'Asia/Kolkata')::date
+                            AS latest_candle_date
+                    FROM instruments i
+                    JOIN universe_memberships m ON i.id = m.instrument_id
+                    LEFT JOIN market_candles c
+                        ON c.instrument_id = i.id AND c.timeframe = '1d'
+                    WHERE m.universe_code = 'NIFTY500'
+                      AND m.member_to IS NULL
+                      AND i.active = true
+                    GROUP BY i.id, i.symbol, i.fyers_symbol
+                    ORDER BY i.symbol ASC
+                    """
+                )
+            )
+            instruments = instruments_result.all()
+            access_token = token_data["access_token"]
+
+        if not instruments:
+            progress.finish("failed", "No active Nifty 500 instruments were found.")
+            await save_sync_status(redis, progress)
+            return {"status": "failed"}
+
+        progress.total_symbols = len(instruments)
+        await save_sync_status(redis, progress)
+
+        target_date = latest_completed_eod_date()
+        fyers = fyersModel.FyersModel(
+            is_async=True,
+            client_id=settings.fyers_app_id,
+            token=access_token,
+            log_path="",
+        )
+
+        upsert_query = text(
+            """
+            INSERT INTO market_candles (
+                instrument_id, timeframe, candle_start, open_price, high_price,
+                low_price, close_price, volume, source, raw_payload
+            )
+            VALUES (
+                :instrument_id, '1d', :candle_start, :open_price, :high_price,
+                :low_price, :close_price, :volume, 'fyers', CAST(:raw_payload AS jsonb)
+            )
+            ON CONFLICT (instrument_id, timeframe, candle_start) DO UPDATE SET
+                open_price = EXCLUDED.open_price,
+                high_price = EXCLUDED.high_price,
+                low_price = EXCLUDED.low_price,
+                close_price = EXCLUDED.close_price,
+                volume = EXCLUDED.volume,
+                fetched_at = now(),
+                raw_payload = EXCLUDED.raw_payload
+            """
+        )
+
+        for index, instrument in enumerate(instruments, start=1):
+            if await redis.get(SYNC_CANCEL_KEY):
+                progress.finish("cancelled", "Sync cancelled by the user.")
+                await save_sync_status(redis, progress)
+                return {"status": "cancelled"}
+
+            progress.current_index = index
+            progress.current_symbol = instrument.symbol
+            start_date = next_sync_date(
+                instrument.latest_candle_date,
+                target_date,
+                backfill_years,
+            )
+
+            if start_date > target_date:
+                progress.skipped_symbols += 1
+                progress.successful_symbols += 1
+                progress.log(
+                    f"{instrument.symbol} is already current through {target_date}."
+                )
+                await save_sync_status(redis, progress)
+                continue
+
+            symbol_candles = 0
+            symbol_failed = False
+            chunks = build_date_chunks(start_date, target_date)
+            progress.log(
+                f"Syncing {instrument.symbol} from {start_date.isoformat()} "
+                f"to {target_date.isoformat()}."
+            )
+
+            for chunk_start, chunk_end in chunks:
+                payload = {
+                    "symbol": instrument.fyers_symbol,
                     "resolution": "D",
                     "date_format": "1",
-                    "range_from": chunk_from,
-                    "range_to": chunk_to,
-                    "cont_flag": "1"
+                    "range_from": chunk_start.isoformat(),
+                    "range_to": chunk_end.isoformat(),
+                    "cont_flag": "1",
                 }
-                
                 try:
-                    # Fyers API call
-                    response = await fyers.history(data=data)
-                    
+                    response = await fyers.history(data=payload)
                     if response.get("s") != "ok":
-                        error_msg = response.get("message", "API response error")
-                        sync_progress.add_error(inst.symbol, f"Chunk {chunk_from} to {chunk_to} failed: {error_msg}")
+                        symbol_failed = True
+                        progress.add_error(
+                            instrument.symbol,
+                            response.get("message", "Fyers history API returned an error."),
+                        )
                     else:
                         candles = response.get("candles", [])
-                        sync_progress.log(f"Received {len(candles)} candles for {inst.symbol} ({chunk_from} to {chunk_to}).")
-                        
                         if candles:
-                            candle_dicts = []
-                            for c in candles:
-                                # Fyers returns epoch timestamp in seconds as float or int
-                                epoch = int(c[0])
-                                candle_start = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
-                                
-                                candle_dicts.append({
-                                    "instrument_id": inst.id,
-                                    "candle_start": candle_start,
-                                    "open_price": float(c[1]),
-                                    "high_price": float(c[2]),
-                                    "low_price": float(c[3]),
-                                    "close_price": float(c[4]),
-                                    "volume": int(c[5]),
-                                    "raw_payload": json.dumps({"c": c})
-                                })
-                                
-                            # Batch insert into Postgres
+                            candle_rows = [
+                                {
+                                    "instrument_id": instrument.id,
+                                    "candle_start": datetime.datetime.fromtimestamp(
+                                        int(candle[0]),
+                                        tz=datetime.timezone.utc,
+                                    ),
+                                    "open_price": float(candle[1]),
+                                    "high_price": float(candle[2]),
+                                    "low_price": float(candle[3]),
+                                    "close_price": float(candle[4]),
+                                    "volume": int(candle[5]),
+                                    "raw_payload": json.dumps({"c": candle}),
+                                }
+                                for candle in candles
+                            ]
                             async with async_session() as session:
-                                await session.execute(upsert_query, candle_dicts)
+                                await session.execute(upsert_query, candle_rows)
                                 await session.commit()
-                                
-                except Exception as e:
-                    sync_progress.add_error(inst.symbol, f"Exception on chunk {chunk_from}-{chunk_to}: {str(e)}")
-                    
-                # Rate limiting sleep (0.35s yields ~170 requests per minute)
+                            symbol_candles += len(candle_rows)
+                except Exception as exc:
+                    symbol_failed = True
+                    progress.add_error(
+                        instrument.symbol,
+                        f"{type(exc).__name__}: {exc}",
+                    )
+
                 await asyncio.sleep(0.35)
-            
-        sync_progress.complete()
-        
-    except Exception as general_err:
-        sync_progress.cancel(f"Sync crashed: {str(general_err)}")
+
+            progress.candles_upserted += symbol_candles
+            if not symbol_failed:
+                progress.successful_symbols += 1
+            progress.log(f"{instrument.symbol}: saved {symbol_candles} new EOD candles.")
+            await redis.expire(SYNC_LOCK_KEY, SYNC_LOCK_SECONDS)
+            await save_sync_status(redis, progress)
+
+        final_state = "partial" if progress.error_count else "succeeded"
+        progress.finish(
+            final_state,
+            f"Sync complete: {progress.candles_upserted} candles saved for "
+            f"{progress.successful_symbols}/{progress.total_symbols} symbols.",
+        )
+        await save_sync_status(redis, progress)
+        return {
+            "status": final_state,
+            "candles_upserted": progress.candles_upserted,
+        }
+    except Exception as exc:
+        logger.exception("Historical EOD sync failed")
+        progress.finish("failed", f"Sync failed: {exc}")
+        await save_sync_status(redis, progress)
+        raise
     finally:
-        # Properly close async SDK resources
-        try:
-            await fyers.close()
-        except Exception:
-            pass
+        if fyers is not None:
+            try:
+                await fyers.close()
+            except Exception:
+                logger.debug("Failed to close Fyers client cleanly", exc_info=True)
+        await redis.delete(SYNC_CANCEL_KEY)
+        current_lock_owner = await redis.get(SYNC_LOCK_KEY)
+        if isinstance(current_lock_owner, bytes):
+            current_lock_owner = current_lock_owner.decode()
+        if current_lock_owner == lock_owner:
+            await redis.delete(SYNC_LOCK_KEY)

@@ -57,6 +57,8 @@ def run_tests():
     volumes = np.random.randint(10000, 50000, days)
     
     df = pd.DataFrame({
+        'high': closes + 1.0,
+        'low': closes - 1.0,
         'close': closes,
         'volume': volumes
     })
@@ -67,7 +69,9 @@ def run_tests():
     expected_cols = [
         'sma_50', 'sma_150', 'sma_200', 'sma_200_prev', 
         'sma_200_prev_22', 'sma_200_prev_110', 
-        'high_52w', 'low_52w', 'avg_volume_20', 'pct_from_52w_high'
+        'high_52w', 'low_52w', 'avg_volume_20', 'pct_from_52w_high',
+        'adtv_crore', 'atr_ratio', 'atr_ratio_3m_low', 'bb_width',
+        'bb_width_20th_pct', 'volume_dry_up_ratio'
     ]
     for col in expected_cols:
         assert col in df_ind.columns, f"Expected column {col} not found in df"

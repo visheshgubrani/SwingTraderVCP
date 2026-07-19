@@ -1,12 +1,18 @@
-import pandas as pd
 import numpy as np
-from typing import Dict, Any, Tuple
+import pandas as pd
+from typing import Any, Dict, Tuple
 
-def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
+from app.services.screening_config import TechnicalScreeningConfig
+
+
+def compute_technical_indicators(
+    df: pd.DataFrame,
+    config: TechnicalScreeningConfig | None = None,
+) -> pd.DataFrame:
     """
     Computes technical indicators on a DataFrame of daily candles.
     The DataFrame MUST be sorted chronologically and contain:
-    - 'close' (float)
+    - 'high', 'low', 'close' (float)
     - 'volume' (float/int)
     
     Returns the DataFrame with additional columns:
@@ -19,8 +25,16 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     - 'high_52w'
     - 'low_52w'
     - 'avg_volume_20'
-    - 'pct_from_52w_high'
+    - liquidity, volatility-contraction, Bollinger-width, and volume-ratio fields
     """
+    config = config or TechnicalScreeningConfig()
+
+    required_columns = {"high", "low", "close", "volume"}
+    missing_columns = required_columns - set(df.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(f"Missing required OHLCV columns: {missing}")
+
     # Create copy to prevent modifying the input DataFrame
     df = df.copy()
     
@@ -40,11 +54,61 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['sma_200_prev_22'] = df['sma_200'].shift(22)
     df['sma_200_prev_110'] = df['sma_200'].shift(110)
     
-    df['high_52w'] = df['close'].rolling(window=252).max()
-    df['low_52w'] = df['close'].rolling(window=252).min()
+    df['high_52w'] = df['high'].rolling(window=252).max()
+    df['low_52w'] = df['low'].rolling(window=252).min()
     
     df['avg_volume_20'] = df['volume'].rolling(window=20).mean()
     df['pct_from_52w_high'] = (df['high_52w'] - df['close']) / df['high_52w']
+
+    # Liquidity: average daily traded value (close * volume), expressed in INR crore.
+    traded_value = df['close'] * df['volume']
+    df['adtv_crore'] = (
+        traded_value.rolling(window=config.liquidity_lookback_days).mean() / 10_000_000
+    )
+
+    # ATR contraction: Wilder ATR(10) / ATR(50), compared with its trailing 3-month low.
+    previous_close = df['close'].shift(1)
+    true_range = pd.concat(
+        [
+            df['high'] - df['low'],
+            (df['high'] - previous_close).abs(),
+            (df['low'] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    df['atr_10'] = true_range.ewm(
+        alpha=1 / config.atr_short_days,
+        adjust=False,
+        min_periods=config.atr_short_days,
+    ).mean()
+    df['atr_50'] = true_range.ewm(
+        alpha=1 / config.atr_long_days,
+        adjust=False,
+        min_periods=config.atr_long_days,
+    ).mean()
+    df['atr_ratio'] = df['atr_10'] / df['atr_50']
+    df['atr_ratio_3m_low'] = df['atr_ratio'].rolling(
+        window=config.atr_low_lookback_days,
+        min_periods=config.atr_low_lookback_days,
+    ).min()
+
+    # Bollinger width relative to the stock's own trailing six-month distribution.
+    bb_middle = df['close'].rolling(window=config.bb_window_days).mean()
+    bb_std = df['close'].rolling(window=config.bb_window_days).std(ddof=0)
+    df['bb_width'] = (
+        (2 * config.bb_std_deviations * bb_std) / bb_middle.replace(0, np.nan)
+    )
+    df['bb_width_20th_pct'] = df['bb_width'].rolling(
+        window=config.bb_percentile_lookback_days,
+        min_periods=config.bb_percentile_lookback_days,
+    ).quantile(config.bb_max_percentile)
+
+    # Volume dry-up into the pivot.
+    df['avg_volume_10'] = df['volume'].rolling(window=config.volume_short_days).mean()
+    df['avg_volume_50'] = df['volume'].rolling(window=config.volume_long_days).mean()
+    df['volume_dry_up_ratio'] = (
+        df['avg_volume_10'] / df['avg_volume_50'].replace(0, np.nan)
+    )
     
     return df
 
@@ -196,3 +260,60 @@ def evaluate_minervini_criteria(df: pd.DataFrame, rs_rating: int) -> Tuple[bool,
     }
     
     return passed, metrics
+
+
+def evaluate_vcp_shortlist_criteria(
+    df: pd.DataFrame,
+    config: TechnicalScreeningConfig | None = None,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Evaluate post-Stage-2 gates used to produce the manual VCP-review shortlist."""
+    config = config or TechnicalScreeningConfig()
+    latest = df.iloc[-1]
+
+    metric_names = (
+        "adtv_crore",
+        "pct_from_52w_high",
+        "atr_ratio",
+        "atr_ratio_3m_low",
+        "bb_width",
+        "bb_width_20th_pct",
+        "avg_volume_10",
+        "avg_volume_50",
+        "volume_dry_up_ratio",
+    )
+    values = {name: float(latest[name]) for name in metric_names}
+    if any(pd.isna(value) or not np.isfinite(value) for value in values.values()):
+        return False, {
+            "error": "Insufficient or invalid data for VCP shortlist indicators.",
+            **values,
+        }
+
+    liquidity_passed = values["adtv_crore"] > config.min_adtv_crore
+    pivot_distance_passed = (
+        values["pct_from_52w_high"] * 100 <= config.pivot_max_distance_pct
+    )
+    atr_contraction_passed = values["atr_ratio"] <= (
+        values["atr_ratio_3m_low"] * config.atr_near_low_multiplier
+    )
+    bb_contraction_passed = values["bb_width"] <= values["bb_width_20th_pct"]
+    squeeze_combo_passed = atr_contraction_passed and bb_contraction_passed
+    volume_dry_up_passed = (
+        values["volume_dry_up_ratio"] <= config.max_volume_dry_up_ratio
+    )
+
+    criteria_matches = {
+        "liquidity_adtv_above_threshold": bool(liquidity_passed),
+        "pivot_distance_within_threshold": bool(pivot_distance_passed),
+        "atr_ratio_near_trailing_low": bool(atr_contraction_passed),
+        "bb_width_below_percentile_threshold": bool(bb_contraction_passed),
+        "squeeze_combo": bool(squeeze_combo_passed),
+        "volume_dry_up": bool(volume_dry_up_passed),
+    }
+    passed = (
+        liquidity_passed
+        and pivot_distance_passed
+        and squeeze_combo_passed
+        and volume_dry_up_passed
+    )
+
+    return passed, {**values, "criteria_matches": criteria_matches}

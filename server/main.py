@@ -1,31 +1,63 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from typing import AsyncIterator
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 import urllib.parse
 from arq import create_pool
-from arq.connections import RedisSettings
+from arq.connections import RedisSettings, ArqRedis
+import redis.asyncio as aioredis
 
 from app.config import settings
 from app.database import db_dep
 from app.routers.auth import router as auth_router
 from app.routers.historical import router as historical_router
 from app.routers.screening import router as screening_router
+from app.routers.system_controls import router as system_controls_router
+from app.routers.trading import router as trading_router
+from app.routers.ws import router as ws_router, manager as ws_manager
+
+# Module-level reference — set during lifespan, usable by background workers.
+# API endpoints should use get_redis() dependency instead.
+_arq_pool: ArqRedis | None = None
+
+
+def get_redis_pool() -> ArqRedis:
+    """Return the shared arq/Redis pool. For use by background workers only."""
+    if _arq_pool is None:
+        raise RuntimeError("Redis pool not initialised — app lifespan not running")
+    return _arq_pool
+
+
+async def get_redis(request: Request) -> AsyncIterator[ArqRedis]:
+    """FastAPI dependency — yields Redis pool from app.state."""
+    yield request.app.state.redis
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _arq_pool
     # Setup Redis Connection Pool for arq enqueuing
     url = urllib.parse.urlparse(settings.redis_url)
     redis_host = url.hostname or '127.0.0.1'
     redis_port = url.port or 6379
     redis_db = int(url.path.lstrip('/')) if url.path else 0
-    
-    app.state.redis = await create_pool(
+
+    _arq_pool = await create_pool(
         RedisSettings(host=redis_host, port=redis_port, database=redis_db)
     )
+    app.state.redis = _arq_pool
+
+    # Separate async Redis connection for WS manager (pub/sub needs dedicated conn)
+    app.state.redis_async = aioredis.from_url(settings.redis_url, decode_responses=True)
+    await ws_manager.start(app.state.redis_async)
+
     yield
-    # Close Redis pool on shutdown
-    await app.state.redis.close()
+
+    # Shutdown
+    await ws_manager.stop()
+    await app.state.redis_async.aclose()
+    await _arq_pool.close()
 
 app = FastAPI(title="Algo Trading", version="0.1.0", lifespan=lifespan)
 
@@ -40,10 +72,12 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(historical_router, prefix="/api/v1")
 app.include_router(screening_router, prefix="/api/v1")
+app.include_router(trading_router, prefix="/api/v1")
+app.include_router(system_controls_router, prefix="/api/v1")
+app.include_router(ws_router)
 
 
 @app.get("/health")
 async def health(db: db_dep) -> dict:
     result = await db.execute(text("SELECT 1"))
     return {"status": "ok", "db": result.scalar() == 1}
-

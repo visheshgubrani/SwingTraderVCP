@@ -1,0 +1,2 @@
+"""Pure trading-domain rules."""
+

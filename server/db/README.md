@@ -7,6 +7,12 @@ architecture and component-boundary source of truth.
 ## Files
 
 - `schema.sql` - executable Postgres DDL for the initial application schema.
+- `migrations/001_p3_paper_trading.sql` - upgrades a pre-P3 local database
+  with the paper-execution fields and idempotency constraints.
+- `migrations/002_p4_live_order_gateway.sql` - adds async-placement
+  correlation IDs, submission safety states, and replay-safe gateway events.
+- `migrations/003_p7_fundamental_pass.sql` - adds durable, read-only
+  fundamental snapshots and links each LLM annotation to its exact input.
 
 ## Domain Layout
 
@@ -23,6 +29,7 @@ The schema is organized around five data domains:
 3. **Screening**
    - `scan_runs`
    - `screening_results`
+   - `fundamental_snapshots`
    - `watchlists`
    - `watchlist_items`
 
@@ -48,9 +55,17 @@ Keep table writes aligned with the component ownership from `AGENTS.md`:
 
 - Market data tables are written by ingestion/backfill workers.
 - Screening tables are written by the screening worker and reviewed by the UI.
+- `fundamental_snapshots` are written only by the P7 arq job after the
+  technical shortlist has been persisted. Raw provider responses and
+  deterministic normalized facts are retained for audit/replay.
 - Trading tables are written by the execution engine and position monitor.
 - Operational/audit tables are written by scheduler, reconciliation, and system
   services.
+
+Reconciliation (P6) writes `reconciliation_runs` / `reconciliation_items` and
+may heal matched live intents through the order-gateway persistence path. It
+flags external broker activity and position qty mismatches without auto-importing
+positions or calling Fyers order placement APIs.
 
 The API layer should stay thin: it can create explicit human instructions and
 read state for the frontend, but it should not perform screening, monitoring,
@@ -84,3 +99,27 @@ Scanner-sourced trades can be traced through:
 
 Manual trades can leave `screening_result_id` null while still preserving the
 human instruction, order intent, fills, and position event trail.
+
+P7 annotations can be traced through:
+
+`screening_results.fundamental_snapshot_id -> fundamental_snapshots`
+
+The screening result retains the model/prompt/input hash and evidence-backed
+verdict in `llm_flags`. Model reasoning details and provider credentials are
+never stored.
+
+## P3 Paper Execution
+
+P3 persists `product_type = 'CNC'` and `execution_mode = 'paper'` on the
+money-path records. Confirmation creates exactly one pending position and one
+entry intent per trade instruction. The intent remains `created`: this means
+the paper engine logged it but deliberately made no broker request.
+
+## P4 Live Entry and Order Gateway
+
+Migration `002_p4_live_order_gateway.sql` adds the broker correlation fields
+(`fyers_async_id`, Fyers/exchange order IDs), durable submission states, and a
+unique event fingerprint. The execution engine writes and commits the intent;
+the order gateway owns `order_events` and `order_fills` from the single Fyers
+order WebSocket. Fill aggregation moves a pending entry to `open`, including
+partial fills, without depending on the API or UI process.

@@ -74,12 +74,23 @@ class HistoricalFetcherDateTests(unittest.TestCase):
 
 class HistoricalSyncScheduleTests(unittest.TestCase):
     def test_eod_sync_runs_weekdays_at_1830_ist(self) -> None:
-        [sync_job] = WorkerSettings.cron_jobs
+        sync_jobs = [j for j in WorkerSettings.cron_jobs if j.name == "incremental_eod_sync"]
+        self.assertEqual(len(sync_jobs), 1, "Expected exactly one incremental_eod_sync cron job")
+        sync_job = sync_jobs[0]
 
         self.assertEqual(str(WorkerSettings.timezone), "Asia/Kolkata")
         self.assertEqual(sync_job.weekday, {0, 1, 2, 3, 4})
         self.assertEqual(sync_job.hour, 18)
         self.assertEqual(sync_job.minute, 30)
+
+    def test_token_refresh_runs_weekdays_before_market_open(self) -> None:
+        refresh_jobs = [j for j in WorkerSettings.cron_jobs if j.name == "fyers_token_refresh"]
+        self.assertEqual(len(refresh_jobs), 1, "Expected exactly one fyers_token_refresh cron job")
+        refresh_job = refresh_jobs[0]
+
+        self.assertEqual(refresh_job.weekday, {0, 1, 2, 3, 4})
+        self.assertEqual(refresh_job.hour, 8)
+        self.assertEqual(refresh_job.minute, 50)
 
 
 if __name__ == "__main__":

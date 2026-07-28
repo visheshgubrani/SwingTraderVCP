@@ -139,6 +139,29 @@ CREATE TABLE scan_runs (
 CREATE INDEX scan_runs_created_idx
 ON scan_runs (created_at DESC);
 
+CREATE TABLE fundamental_snapshots (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    instrument_id uuid NOT NULL REFERENCES instruments(id),
+    provider text NOT NULL,
+    statement_type text NOT NULL DEFAULT 'consolidated',
+    fetched_at timestamptz NOT NULL DEFAULT now(),
+    latest_annual_period text,
+    latest_quarterly_period text,
+    raw_payload jsonb NOT NULL,
+    normalized_facts jsonb NOT NULL,
+    content_hash text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT fundamental_snapshots_statement_type_check CHECK (
+        statement_type IN ('consolidated', 'standalone')
+    )
+);
+
+CREATE INDEX fundamental_snapshots_instrument_fetched_idx
+ON fundamental_snapshots (instrument_id, provider, statement_type, fetched_at DESC);
+
+CREATE INDEX fundamental_snapshots_content_hash_idx
+ON fundamental_snapshots (content_hash);
+
 CREATE TABLE screening_results (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_run_id uuid NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
@@ -156,6 +179,7 @@ CREATE TABLE screening_results (
     llm_verdict text,
     llm_flags jsonb NOT NULL DEFAULT '{}'::jsonb,
     llm_checked_at timestamptz,
+    fundamental_snapshot_id uuid REFERENCES fundamental_snapshots(id),
     reviewer_status text NOT NULL DEFAULT 'pending',
     reviewer_notes text,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -176,6 +200,10 @@ ON screening_results (scan_run_id, result_rank);
 
 CREATE INDEX screening_results_instrument_created_idx
 ON screening_results (instrument_id, created_at DESC);
+
+CREATE INDEX screening_results_fundamental_snapshot_idx
+ON screening_results (fundamental_snapshot_id)
+WHERE fundamental_snapshot_id IS NOT NULL;
 
 CREATE TABLE watchlists (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -214,7 +242,9 @@ CREATE TABLE trade_instructions (
     screening_result_id uuid REFERENCES screening_results(id),
     side text NOT NULL,
     quantity integer NOT NULL CHECK (quantity > 0),
+    product_type text NOT NULL DEFAULT 'CNC',
     entry_order_type text NOT NULL,
+    planned_entry_price numeric(18, 4) NOT NULL CHECK (planned_entry_price > 0),
     entry_limit_price numeric(18, 4) CHECK (
         entry_limit_price IS NULL OR entry_limit_price >= 0
     ),
@@ -231,6 +261,9 @@ CREATE TABLE trade_instructions (
     CONSTRAINT trade_instructions_side_check CHECK (side IN ('buy', 'sell')),
     CONSTRAINT trade_instructions_entry_order_type_check CHECK (
         entry_order_type IN ('market', 'limit', 'stop', 'stop_limit')
+    ),
+    CONSTRAINT trade_instructions_product_type_check CHECK (
+        product_type IN ('CNC')
     ),
     CONSTRAINT trade_instructions_status_check CHECK (
         status IN ('draft', 'confirmed', 'submitted', 'cancelled', 'rejected')
@@ -258,6 +291,7 @@ CREATE TABLE positions (
     side text NOT NULL,
     quantity integer NOT NULL CHECK (quantity > 0),
     open_quantity integer NOT NULL CHECK (open_quantity >= 0),
+    product_type text NOT NULL DEFAULT 'CNC',
     average_entry_price numeric(18, 4) CHECK (
         average_entry_price IS NULL OR average_entry_price >= 0
     ),
@@ -284,6 +318,7 @@ CREATE TABLE positions (
         )
     ),
     CONSTRAINT positions_side_check CHECK (side IN ('long', 'short')),
+    CONSTRAINT positions_product_type_check CHECK (product_type IN ('CNC')),
     CONSTRAINT positions_open_quantity_lte_quantity_check CHECK (open_quantity <= quantity),
     CONSTRAINT positions_dates_check CHECK (
         closed_at IS NULL OR opened_at IS NULL OR closed_at >= opened_at
@@ -302,6 +337,10 @@ WHERE state <> 'closed';
 CREATE INDEX positions_screening_result_idx
 ON positions (screening_result_id)
 WHERE screening_result_id IS NOT NULL;
+
+CREATE UNIQUE INDEX positions_trade_instruction_unique_idx
+ON positions (trade_instruction_id)
+WHERE trade_instruction_id IS NOT NULL;
 
 CREATE TABLE position_events (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -327,6 +366,7 @@ CREATE TABLE position_events (
         trigger_source IN (
             'api',
             'execution_engine',
+            'order_gateway',
             'position_monitor',
             'reconciliation',
             'manual_import'
@@ -345,11 +385,17 @@ CREATE TABLE order_intents (
     intent_type text NOT NULL,
     side text NOT NULL,
     quantity integer NOT NULL CHECK (quantity > 0),
+    product_type text NOT NULL DEFAULT 'CNC',
     order_type text NOT NULL,
     limit_price numeric(18, 4) CHECK (limit_price IS NULL OR limit_price >= 0),
     trigger_price numeric(18, 4) CHECK (trigger_price IS NULL OR trigger_price >= 0),
     status text NOT NULL DEFAULT 'created',
+    execution_mode text NOT NULL DEFAULT 'paper',
+    fyers_async_id text,
     fyers_order_id text UNIQUE,
+    exchange_order_id text,
+    broker_requested_at timestamptz,
+    broker_responded_at timestamptz,
     requested_by_component text NOT NULL,
     reason text,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -361,9 +407,17 @@ CREATE TABLE order_intents (
     CONSTRAINT order_intents_order_type_check CHECK (
         order_type IN ('market', 'limit', 'stop', 'stop_limit')
     ),
+    CONSTRAINT order_intents_product_type_check CHECK (
+        product_type IN ('CNC')
+    ),
+    CONSTRAINT order_intents_execution_mode_check CHECK (
+        execution_mode IN ('paper', 'live')
+    ),
     CONSTRAINT order_intents_status_check CHECK (
         status IN (
             'created',
+            'submission_pending',
+            'submission_unknown',
             'submitted',
             'acknowledged',
             'partially_filled',
@@ -387,12 +441,27 @@ CREATE INDEX order_intents_position_idx
 ON order_intents (position_id, created_at DESC)
 WHERE position_id IS NOT NULL;
 
+CREATE UNIQUE INDEX order_intents_fyers_async_unique_idx
+ON order_intents (fyers_async_id)
+WHERE fyers_async_id IS NOT NULL;
+
+CREATE UNIQUE INDEX order_intents_exchange_order_unique_idx
+ON order_intents (exchange_order_id)
+WHERE exchange_order_id IS NOT NULL;
+
+CREATE UNIQUE INDEX order_intents_entry_instruction_unique_idx
+ON order_intents (trade_instruction_id)
+WHERE trade_instruction_id IS NOT NULL AND intent_type = 'entry';
+
 CREATE TABLE order_events (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     order_intent_id uuid NOT NULL REFERENCES order_intents(id),
     event_ts timestamptz NOT NULL DEFAULT now(),
     event_type text NOT NULL,
+    broker_event_key text NOT NULL,
+    fyers_async_id text,
     fyers_order_id text,
+    exchange_order_id text,
     fyers_status text,
     filled_quantity integer CHECK (filled_quantity IS NULL OR filled_quantity >= 0),
     average_price numeric(18, 4) CHECK (average_price IS NULL OR average_price >= 0),
@@ -402,6 +471,9 @@ CREATE TABLE order_events (
 
 CREATE INDEX order_events_intent_ts_idx
 ON order_events (order_intent_id, event_ts, id);
+
+CREATE UNIQUE INDEX order_events_broker_event_unique_idx
+ON order_events (broker_event_key);
 
 CREATE TABLE order_fills (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -546,6 +618,9 @@ COMMENT ON TABLE market_ticks IS
 
 COMMENT ON TABLE screening_results IS
 'Shortlist rows produced by scan runs. LLM checks apply only to technical-pass survivors.';
+
+COMMENT ON TABLE fundamental_snapshots IS
+'Read-only provider payloads and deterministic normalized facts fetched only for persisted technical survivors.';
 
 COMMENT ON TABLE trade_instructions IS
 'Human decision checkpoint: stock, size, entry, stop loss, target, and trailing rule before any order intent is submitted.';

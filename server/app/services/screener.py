@@ -1,12 +1,16 @@
 import datetime
 import json
 import logging
+from collections import Counter
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy import text
 
+from app.config import settings
 from app.database import async_session
+from app.services.fundamental_pass import p7_run_config
 from app.services.indicators import (
     compute_technical_indicators,
     compute_relative_strength_ratings,
@@ -18,6 +22,27 @@ from app.services.screening_config import TechnicalScreeningConfig
 from app.services.screening_ranker import rank_and_cap_shortlist
 
 logger = logging.getLogger(__name__)
+INDIA_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def select_reference_eod_date(
+    latest_dates: list[datetime.date],
+) -> datetime.date | None:
+    """Choose the latest date shared by the largest part of the universe."""
+    if not latest_dates:
+        return None
+    date_counts = Counter(latest_dates)
+    return max(
+        date_counts,
+        key=lambda candle_date: (date_counts[candle_date], candle_date),
+    )
+
+
+def candle_trading_date(candle_start: datetime.datetime) -> datetime.date:
+    if candle_start.tzinfo is None:
+        candle_start = candle_start.replace(tzinfo=datetime.timezone.utc)
+    return candle_start.astimezone(INDIA_TZ).date()
+
 
 async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
     """
@@ -99,10 +124,33 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             if candle.instrument_id in candles_by_inst:
                 candles_by_inst[candle.instrument_id].append(candle)
 
+        latest_dates_by_inst = {
+            inst_id: candle_trading_date(candles[-1].candle_start)
+            for inst_id, candles in candles_by_inst.items()
+            if candles
+        }
+        reference_eod_date = select_reference_eod_date(
+            list(latest_dates_by_inst.values())
+        )
+        stale_instrument_ids = {
+            inst_id
+            for inst_id in candles_by_inst
+            if latest_dates_by_inst.get(inst_id) != reference_eod_date
+        }
+        if stale_instrument_ids:
+            logger.warning(
+                "Skipping %s instruments that are not current through the "
+                "reference EOD date %s.",
+                len(stale_instrument_ids),
+                reference_eod_date,
+            )
+
         # 4. Perform calculations and evaluate criteria
         # Step 4a: Prepare DataFrame and calculate technical indicators + performance score for each stock
         prepared_stocks = []
         for inst_id, candles_list in candles_by_inst.items():
+            if inst_id in stale_instrument_ids:
+                continue
             if len(candles_list) < 252:
                 # Skip instruments without enough history for 52-week lookback
                 continue
@@ -192,6 +240,11 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     "avg_volume_20": stage_2_metrics["avg_volume_20"],
                     "pct_from_52w_high": stage_2_metrics["pct_from_52w_high"],
                     "rs_rating": rs_rating,
+                    "llm_status": (
+                        "queued"
+                        if settings.p7_fundamental_pass_enabled
+                        else "not_requested"
+                    ),
                     "technical_metrics": {
                         "sma_150": stage_2_metrics["sma_150"],
                         "sma_200_yesterday": stage_2_metrics["sma_200_yesterday"],
@@ -252,7 +305,8 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         sma_200,
                         avg_volume_20,
                         pct_from_52w_high,
-                        technical_metrics
+                        technical_metrics,
+                        llm_status
                     )
                     VALUES (
                         :scan_run_id,
@@ -264,7 +318,8 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         :sma_200,
                         :avg_volume_20,
                         :pct_from_52w_high,
-                        CAST(:technical_metrics AS jsonb)
+                        CAST(:technical_metrics AS jsonb),
+                        :llm_status
                     )
                 """)
                 await session.execute(insert_query, survivors)
@@ -275,12 +330,106 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
         async with async_session() as session:
             success_query = text("""
                 UPDATE scan_runs
-                SET status = 'succeeded', completed_at = now()
+                SET
+                    status = 'succeeded',
+                    completed_at = now(),
+                    llm_config = CAST(:llm_config AS jsonb)
                 WHERE id = :scan_run_id
             """)
-            await session.execute(success_query, {"scan_run_id": scan_run_id})
+            await session.execute(
+                success_query,
+                {
+                    "scan_run_id": scan_run_id,
+                    "llm_config": json.dumps(p7_run_config()),
+                },
+            )
             await session.commit()
-            
+
+        # P7 is intentionally a separate background job. Enqueue failures are
+        # recorded on the annotations and never turn a valid technical scan
+        # into a failed scan.
+        if survivors and settings.p7_fundamental_pass_enabled:
+            redis = ctx.get("redis")
+            try:
+                if redis is None:
+                    raise RuntimeError("arq Redis context is unavailable")
+                await redis.enqueue_job(
+                    "run_fundamental_pass",
+                    str(scan_run_id),
+                    _job_id=f"fundamental-pass:{scan_run_id}",
+                )
+            except Exception as enqueue_error:
+                logger.exception(
+                    "Could not enqueue P7 for scan %s",
+                    scan_run_id,
+                )
+                failure_flags = json.dumps(
+                    {
+                        "schema_version": "fundamental_verdict_v1",
+                        "summary": (
+                            "Fundamental annotation could not be queued; "
+                            "manual review remains available."
+                        ),
+                        "criteria": [],
+                        "red_flags": [],
+                        "missing_data": [],
+                        "error": {
+                            "type": type(enqueue_error).__name__,
+                            "message": str(enqueue_error)[:500],
+                        },
+                    },
+                    separators=(",", ":"),
+                )
+                async with async_session() as session:
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE screening_results
+                            SET
+                                llm_status = 'failed',
+                                llm_verdict = NULL,
+                                llm_flags = CAST(:flags AS jsonb),
+                                llm_checked_at = now()
+                            WHERE
+                                scan_run_id = :scan_run_id
+                                AND technical_passed = true
+                                AND llm_status = 'queued'
+                            """
+                        ),
+                        {
+                            "scan_run_id": scan_run_id,
+                            "flags": failure_flags,
+                        },
+                    )
+                    await session.execute(
+                        text(
+                            """
+                            INSERT INTO system_events (
+                                component,
+                                severity,
+                                event_type,
+                                correlation_id,
+                                payload
+                            )
+                            VALUES (
+                                'screener',
+                                'warning',
+                                'fundamental_pass_enqueue_failed',
+                                :scan_run_id,
+                                CAST(:payload AS jsonb)
+                            )
+                            """
+                        ),
+                        {
+                            "scan_run_id": scan_run_id,
+                            "payload": json.dumps(
+                                {"error": str(enqueue_error)[:500]},
+                                separators=(",", ":"),
+                            ),
+                        },
+                    )
+                    await session.commit()
+
         logger.info("Scan run %s completed successfully.", scan_run_id)
 
     except Exception as run_err:

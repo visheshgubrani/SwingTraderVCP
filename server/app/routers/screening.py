@@ -132,12 +132,21 @@ async def get_scan_results(
             s.technical_metrics,
             s.llm_status,
             s.llm_verdict,
+            s.llm_flags,
+            s.llm_checked_at,
+            s.fundamental_snapshot_id,
             s.reviewer_status,
+            f.provider AS fundamentals_provider,
+            f.statement_type AS fundamentals_statement_type,
+            f.fetched_at AS fundamentals_fetched_at,
+            f.latest_annual_period,
+            f.latest_quarterly_period,
             i.symbol, 
             i.name, 
             i.fyers_symbol
         FROM screening_results s
         JOIN instruments i ON s.instrument_id = i.id
+        LEFT JOIN fundamental_snapshots f ON f.id = s.fundamental_snapshot_id
         WHERE s.scan_run_id = :run_id
         ORDER BY s.result_rank ASC NULLS LAST, s.pct_from_52w_high ASC
     """)
@@ -180,6 +189,26 @@ async def get_scan_results(
             "criteria_matches": tech_metrics.get("criteria_matches", {}),
             "llm_status": row.llm_status,
             "llm_verdict": row.llm_verdict,
+            "llm_flags": row.llm_flags or {},
+            "llm_checked_at": (
+                row.llm_checked_at.isoformat() if row.llm_checked_at else None
+            ),
+            "fundamental_snapshot_id": (
+                str(row.fundamental_snapshot_id)
+                if row.fundamental_snapshot_id
+                else None
+            ),
+            "fundamentals_provenance": (
+                {
+                    "provider": row.fundamentals_provider,
+                    "statement_type": row.fundamentals_statement_type,
+                    "fetched_at": row.fundamentals_fetched_at.isoformat(),
+                    "latest_annual_period": row.latest_annual_period,
+                    "latest_quarterly_period": row.latest_quarterly_period,
+                }
+                if row.fundamental_snapshot_id
+                else None
+            ),
             "reviewer_status": row.reviewer_status
         })
         

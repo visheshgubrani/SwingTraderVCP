@@ -7,6 +7,12 @@
       "skillPath": "fastapi/.agents/skills/fastapi/SKILL.md",
       "computedHash": "e85d9e223fbc3183b1a599bbe8b02d2edf275d046ff5bcfd14352c92cdff52b3"
     },
+    "lightweight-charts": {
+      "source": "tradingview/lightweight-charts",
+      "sourceType": "github",
+      "skillPath": ".github/skills/lightweight-charts/SKILL.md",
+      "computedHash": "4ce0d91803fcb28d70a4bd4d7335057b4eb13a6ff85e26c88cf5aa91b7acac8a"
+    },
     "shadcn": {
       "source": "shadcn/ui",
       "sourceType": "github",

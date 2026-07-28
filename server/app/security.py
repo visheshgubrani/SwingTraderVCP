@@ -46,7 +46,6 @@ async def save_fyers_token(
         "key": settings.fyers_secret_key,
         "expires_at": expires_at
     })
-    await session.commit()
 
 async def get_fyers_token(session: AsyncSession) -> dict | None:
     """

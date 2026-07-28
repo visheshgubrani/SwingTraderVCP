@@ -224,3 +224,55 @@ async def cancel_validation():
     
     validation_progress.cancel("User cancelled the validation.")
     return {"status": "cancelled", "message": "Validation cancellation requested."}
+
+
+@router.get("/candles")
+async def get_candles(
+    symbol: str,
+    timeframe: str = "1D",
+    limit: int = 300,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    """
+    Fetch daily (or other timeframe) candles for a given Fyers symbol.
+    Used by the chart workspace to render historical price data.
+
+    Returns OHLCV array ordered by candle_start ascending.
+    """
+    if limit > 1000:
+        limit = 1000
+
+    result = await db.execute(
+        text("""
+            SELECT
+                mc.candle_start,
+                mc.open_price,
+                mc.high_price,
+                mc.low_price,
+                mc.close_price,
+                mc.volume
+            FROM market_candles mc
+            JOIN instruments i ON i.id = mc.instrument_id
+            WHERE i.fyers_symbol = :symbol
+              AND mc.timeframe = :timeframe
+            ORDER BY mc.candle_start DESC
+            LIMIT :limit
+        """),
+        {"symbol": symbol, "timeframe": timeframe, "limit": limit},
+    )
+    rows = result.fetchall()
+
+    # Return ascending (oldest first) for chart consumption
+    candles = [
+        {
+            "time": r[0].strftime("%Y-%m-%d") if timeframe == "1D" else r[0].isoformat(),
+            "open": float(r[1]),
+            "high": float(r[2]),
+            "low": float(r[3]),
+            "close": float(r[4]),
+            "volume": r[5],
+        }
+        for r in reversed(rows)
+    ]
+
+    return {"symbol": symbol, "timeframe": timeframe, "candles": candles}

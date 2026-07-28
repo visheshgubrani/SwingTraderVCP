@@ -114,8 +114,29 @@ async def import_rows(
     *,
     universe_code: str,
     member_from: date,
-) -> tuple[int, int]:
-    instrument_stmt = (
+) -> tuple[int, int, int]:
+    instrument_update_stmt = (
+        text(
+            """
+            UPDATE instruments
+            SET
+                exchange = 'NSE',
+                segment = 'EQUITY',
+                symbol = :symbol,
+                trading_symbol = :trading_symbol,
+                fyers_symbol = :fyers_symbol,
+                name = :name,
+                active = true,
+                active_to = NULL,
+                metadata = instruments.metadata || :metadata
+            WHERE isin = :isin
+            RETURNING id
+            """
+        )
+        .bindparams(bindparam("metadata", type_=JSONB))
+    )
+
+    instrument_insert_stmt = (
         text(
             """
             INSERT INTO instruments (
@@ -185,23 +206,44 @@ async def import_rows(
         """
     )
 
+    close_absent_memberships_stmt = text(
+        """
+        UPDATE universe_memberships AS membership
+        SET member_to = GREATEST(
+            membership.member_from,
+            CAST(:member_from AS date) - 1
+        )
+        FROM instruments AS instrument
+        WHERE membership.instrument_id = instrument.id
+          AND membership.universe_code = :universe_code
+          AND membership.member_to IS NULL
+          AND NOT (instrument.fyers_symbol = ANY(:current_fyers_symbols))
+        """
+    )
+
     async with async_session() as session:
         imported_count = 0
         created_memberships = 0
 
         for row in rows:
-            await session.execute(
-                instrument_stmt,
-                {
-                    "symbol": row.symbol,
-                    "trading_symbol": f"{row.symbol}-{row.series}",
-                    "fyers_symbol": row.fyers_symbol,
-                    "isin": row.isin,
-                    "name": row.company_name,
-                    "member_from": member_from,
-                    "metadata": row.metadata,
-                },
+            instrument_params = {
+                "symbol": row.symbol,
+                "trading_symbol": f"{row.symbol}-{row.series}",
+                "fyers_symbol": row.fyers_symbol,
+                "isin": row.isin,
+                "name": row.company_name,
+                "member_from": member_from,
+                "metadata": row.metadata,
+            }
+            update_result = await session.execute(
+                instrument_update_stmt,
+                instrument_params,
             )
+            if update_result.scalar_one_or_none() is None:
+                await session.execute(
+                    instrument_insert_stmt,
+                    instrument_params,
+                )
             membership_result = await session.execute(
                 membership_stmt,
                 {
@@ -214,15 +256,24 @@ async def import_rows(
             imported_count += 1
             created_memberships += membership_result.rowcount or 0
 
+        closed_result = await session.execute(
+            close_absent_memberships_stmt,
+            {
+                "universe_code": universe_code,
+                "member_from": member_from,
+                "current_fyers_symbols": [row.fyers_symbol for row in rows],
+            },
+        )
+        closed_memberships = closed_result.rowcount or 0
         await session.commit()
 
-    return imported_count, created_memberships
+    return imported_count, created_memberships, closed_memberships
 
 
 async def async_main() -> None:
     args = parse_args()
     rows = read_csv(args.csv)
-    imported_count, created_memberships = await import_rows(
+    imported_count, created_memberships, closed_memberships = await import_rows(
         rows,
         universe_code=args.universe_code,
         member_from=args.member_from,
@@ -230,7 +281,8 @@ async def async_main() -> None:
     print(
         "Imported "
         f"{imported_count} instruments into {args.universe_code}; "
-        f"created {created_memberships} current memberships."
+        f"created {created_memberships} and closed "
+        f"{closed_memberships} current memberships."
     )
 
 

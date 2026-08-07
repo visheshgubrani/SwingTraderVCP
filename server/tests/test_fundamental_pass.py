@@ -22,9 +22,8 @@ from app.services.fundamental_pass import (
     Survivor,
     _get_snapshot,
     _load_survivors,
-    _process_survivor,
-    run_fundamental_pass,
 )
+from app.services.fundamental_rules import score_balanced_sepa
 from app.worker import WorkerSettings
 
 
@@ -212,13 +211,10 @@ class FundamentalNormalizationTests(unittest.TestCase):
             ],
             5.0,
         )
-        self.assertAlmostEqual(
-            evidence["quality.debt_to_equity"]["value"]["value"],
-            0.25,
-        )
-        self.assertIn("quarterly_eps", facts["missing_data"])
-        self.assertIn("promoter_pledge", facts["missing_data"])
-        self.assertNotIn("debt_to_equity", facts["missing_data"])
+        self.assertNotIn("quality.debt_to_equity", evidence)
+        self.assertNotIn("quarterly_eps", facts["missing_data"])
+        self.assertEqual(facts["coverage"]["quarterly_eps"], "unsupported_by_provider")
+        self.assertEqual(facts["coverage"]["debt_to_equity"], "unsupported_by_provider")
         self.assertEqual(facts["periods"]["latest_quarterly"], "Mar 2026")
         self.assertEqual(
             facts["company"]["description"],
@@ -410,7 +406,7 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.verdict.verdict, "pass")
         self.assertEqual(result.request_id, "or-request-1")
-        self.assertEqual(seen_payload["model"], "xiaomi/mimo-v2.5-pro")
+        self.assertEqual(seen_payload["model"], "openai/gpt-5.6-luna-pro")
         self.assertFalse(seen_payload["stream"])
         self.assertEqual(
             seen_payload["response_format"]["type"],
@@ -430,9 +426,157 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             seen_payload["reasoning"],
-            {"enabled": True, "exclude": True},
+            {"effort": "low", "exclude": True},
         )
+        self.assertEqual(seen_payload["temperature"], 0)
+        self.assertNotIn("enabled", seen_payload["reasoning"])
         self.assertNotIn("reasoning_details", json.dumps(seen_payload))
+
+    async def test_includes_temperature_only_when_explicitly_configured(self) -> None:
+        seen_payload = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_payload.update(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "verdict": "uncertain",
+                                        "summary": "Only limited evidence is available.",
+                                        "criteria": [
+                                            {
+                                                "name": "sales_growth",
+                                                "status": "unknown",
+                                                "explanation": "Evidence is limited.",
+                                                "evidence_keys": [],
+                                            }
+                                        ],
+                                        "red_flags": [],
+                                        "missing_data": ["quarterly_eps"],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = OpenRouterFundamentalClient(
+            api_key="openrouter-key",
+            api_url="https://openrouter.test/chat/completions",
+            temperature=0.2,
+            transport=httpx.MockTransport(handler),
+            sleep=AsyncMock(),
+        )
+        await client.analyze(self.facts())
+        self.assertEqual(seen_payload["temperature"], 0.2)
+
+    async def test_surfaces_openrouter_error_message(self) -> None:
+        async def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={
+                    "error": {
+                        "message": "No endpoints support all requested parameters"
+                    }
+                },
+            )
+
+        client = OpenRouterFundamentalClient(
+            api_key="openrouter-key",
+            api_url="https://openrouter.test/chat/completions",
+            transport=httpx.MockTransport(handler),
+            sleep=AsyncMock(),
+        )
+        with self.assertRaises(FundamentalLLMError) as ctx:
+            await client.analyze(self.facts())
+        self.assertIn(
+            "No endpoints support all requested parameters",
+            str(ctx.exception),
+        )
+
+    async def test_parses_content_parts_array(self) -> None:
+        verdict_payload = {
+            "verdict": "pass",
+            "summary": "Growth evidence is supportive.",
+            "criteria": [
+                {
+                    "name": "sales_growth",
+                    "status": "positive",
+                    "explanation": "Revenue CAGR is positive.",
+                    "evidence_keys": ["growth.annual_revenue_cagr"],
+                }
+            ],
+            "red_flags": [],
+            "missing_data": ["quarterly_eps"],
+        }
+
+        async def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": json.dumps(verdict_payload),
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = OpenRouterFundamentalClient(
+            api_key="openrouter-key",
+            api_url="https://openrouter.test/chat/completions",
+            transport=httpx.MockTransport(handler),
+            sleep=AsyncMock(),
+        )
+        result = await client.analyze(self.facts())
+        self.assertEqual(result.verdict.verdict, "pass")
+
+    async def test_null_content_fails_with_finish_reason_after_retries(self) -> None:
+        calls = 0
+
+        async def handler(_: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                200,
+                json={
+                    "usage": {
+                        "completion_tokens": 1600,
+                        "completion_tokens_details": {"reasoning_tokens": 1500},
+                    },
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {"content": None},
+                        }
+                    ],
+                },
+            )
+
+        client = OpenRouterFundamentalClient(
+            api_key="key",
+            api_url="https://openrouter.test/chat/completions",
+            max_attempts=2,
+            transport=httpx.MockTransport(handler),
+            sleep=AsyncMock(),
+        )
+        with self.assertRaises(FundamentalLLMError) as ctx:
+            await client.analyze(self.facts())
+        self.assertEqual(calls, 2)
+        self.assertIn("finish_reason='length'", str(ctx.exception))
+        self.assertIn("reasoning_tokens=1500", str(ctx.exception))
 
     async def test_rejects_unverifiable_evidence_after_bounded_retries(self) -> None:
         calls = 0
@@ -508,6 +652,8 @@ class FundamentalPassOrchestrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("FROM screening_results", captured_sql)
         self.assertIn("s.technical_passed = true", captured_sql)
+        self.assertIn("fundamental_selected", captured_sql)
+        self.assertIn("LIMIT 20", captured_sql)
         self.assertNotIn("universe_memberships", captured_sql)
         self.assertNotIn("market_candles", captured_sql)
 
@@ -539,83 +685,14 @@ class FundamentalPassOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, snapshot)
         provider.fetch_company_bundle.assert_not_awaited()
 
-    async def test_terminal_result_is_idempotently_skipped(self) -> None:
-        survivor = Survivor(
-            result_id=uuid4(),
-            scan_run_id=uuid4(),
-            instrument_id=uuid4(),
-            isin="INE000000001",
-            symbol="EXAMPLE",
-            company_name="Example",
+    def test_rules_are_authoritative_and_provider_limitations_are_neutral(self) -> None:
+        facts = normalize_fundamentals(
+            fundamentals_bundle(), isin="INE000000010", symbol="RULES", company_name="Rules"
         )
-        provider = AsyncMock()
-        model = AsyncMock()
-
-        with patch(
-            "app.services.fundamental_pass._claim_survivor",
-            return_value=False,
-        ):
-            outcome = await _process_survivor(
-                survivor,
-                semaphore=asyncio.Semaphore(1),
-                fundamentals_client=provider,
-                llm_client=model,
-            )
-
-        self.assertEqual(outcome, "already_terminal")
-        provider.fetch_company_bundle.assert_not_awaited()
-        model.analyze.assert_not_awaited()
-
-    async def test_partial_annotation_failure_does_not_fail_the_p7_batch(self) -> None:
-        survivors = [
-            Survivor(
-                result_id=uuid4(),
-                scan_run_id=uuid4(),
-                instrument_id=uuid4(),
-                isin=f"INE00000000{index}",
-                symbol=f"EXAMPLE{index}",
-                company_name="Example",
-            )
-            for index in (1, 2)
-        ]
-
-        with (
-            patch(
-                "app.services.fundamental_pass.settings.p7_fundamental_pass_enabled",
-                True,
-            ),
-            patch(
-                "app.services.fundamental_pass.settings.upstox_analytics_token",
-                "token",
-            ),
-            patch(
-                "app.services.fundamental_pass.settings.openrouter_api_key",
-                "key",
-            ),
-            patch(
-                "app.services.fundamental_pass._start_job_run",
-                return_value=uuid4(),
-            ),
-            patch(
-                "app.services.fundamental_pass._load_survivors",
-                return_value=survivors,
-            ),
-            patch(
-                "app.services.fundamental_pass._process_survivor",
-                side_effect=["succeeded", "failed"],
-            ),
-            patch(
-                "app.services.fundamental_pass._finish_job_run"
-            ) as finish_job,
-        ):
-            result = await run_fundamental_pass(
-                {"job_id": "test-job"},
-                str(uuid4()),
-            )
-
-        self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(result["outcomes"], {"failed": 1, "succeeded": 1})
-        self.assertEqual(finish_job.await_args.kwargs["status"], "succeeded")
+        scorecard = score_balanced_sepa(facts)
+        self.assertEqual(scorecard["rubric_version"], "balanced_sepa_v2")
+        self.assertIn("debt_to_equity", scorecard["provider_limitations"])
+        self.assertNotIn("leverage", scorecard["red_flags"])
 
     def test_worker_registers_p7_job(self) -> None:
         names = [function.__name__ for function in WorkerSettings.functions]

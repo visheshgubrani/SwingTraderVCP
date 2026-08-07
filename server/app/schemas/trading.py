@@ -181,6 +181,26 @@ class KillSwitchView(BaseModel):
     redis_published: bool | None = None
 
 
+class FundamentalControlUpdate(BaseModel):
+    paused: bool
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class FundamentalControlView(BaseModel):
+    control_key: str
+    enabled: bool
+    paused: bool
+    reason: str | None
+    changed_by: str
+    changed_at: datetime
+    redis_published: bool | None = None
+
+
+class FundamentalControlsView(BaseModel):
+    processing: FundamentalControlView
+    ai: FundamentalControlView
+
+
 class ReconciliationRunView(BaseModel):
     id: UUID
     status: Literal["running", "succeeded", "failed"]

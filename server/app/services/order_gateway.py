@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.trading import realized_pnl_on_exit
+from app.services.journal_outbox import enqueue_journal_fill_event
 
 
 class OrderGatewayError(RuntimeError):
@@ -239,8 +240,17 @@ async def process_trade_message(
             "broker_payload": _json(payload),
         },
     )
-    if fill_id.mappings().one_or_none() is None:
+    fill_row = fill_id.mappings().one_or_none()
+    if fill_row is None:
         return False
+
+    fill_side = "entry" if intent["intent_type"] == "entry" else "exit"
+    await enqueue_journal_fill_event(
+        db,
+        order_fill_id=fill_row["id"],
+        position_id=intent["position_id"],
+        fill_side=fill_side,
+    )
 
     await db.execute(
         text(

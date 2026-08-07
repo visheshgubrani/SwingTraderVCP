@@ -71,7 +71,7 @@ def run_tests():
         'sma_200_prev_22', 'sma_200_prev_110', 
         'high_52w', 'low_52w', 'avg_volume_20', 'pct_from_52w_high',
         'adtv_crore', 'atr_ratio', 'atr_ratio_3m_low', 'bb_width',
-        'bb_width_20th_pct', 'volume_dry_up_ratio'
+        'bb_width_20th_pct', 'bb_width_percentile', 'volume_dry_up_ratio'
     ]
     for col in expected_cols:
         assert col in df_ind.columns, f"Expected column {col} not found in df"

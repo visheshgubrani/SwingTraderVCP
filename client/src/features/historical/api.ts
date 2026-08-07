@@ -31,12 +31,15 @@ export interface SyncStatus {
     timestamp: string
   }>
   logs: string[]
+  target_date: string | null
+  data_current: boolean
   started_at: string | null
   completed_at: string | null
   db_metrics: {
     total_candles: number
     nifty500_instruments: number
     latest_candle_date: string | null
+    expected_latest_candle_date: string
     symbols_at_latest_date: number
   }
   schedule: {

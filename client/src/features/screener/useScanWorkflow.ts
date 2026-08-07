@@ -62,12 +62,84 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
   const triggerSync = useTriggerSync()
   const triggerScan = useTriggerScan()
 
+  const queueScan = useCallback(
+    async (
+      syncRunId: string | null,
+      syncWarning: string | null,
+      currentDataReused = false,
+    ) => {
+      setState({
+        phase: "queueing_scan",
+        syncRunId,
+        scanRunId: null,
+        syncWarning,
+        message: currentDataReused
+          ? "EOD data is already current. Queueing technical scoring without another sync…"
+          : syncWarning
+            ? `${syncWarning} Queueing technical scoring with current symbols…`
+            : "EOD data is current. Queueing technical scoring…",
+      })
+
+      try {
+        const result = await triggerScan.mutateAsync()
+        setState({
+          phase: "scanning",
+          syncRunId,
+          scanRunId: result.scan_run_id,
+          syncWarning,
+          message: syncWarning
+            ? `Technical scoring is running. ${syncWarning}`
+            : "Technical scoring is running across the Nifty 500…",
+        })
+      } catch (error) {
+        setState({
+          phase: "failed",
+          syncRunId,
+          scanRunId: null,
+          syncWarning,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Technical scoring could not be queued.",
+        })
+      }
+    },
+    [triggerScan],
+  )
+
   const start = useCallback(async () => {
+    const refreshedStatus = await syncStatus.refetch()
+    const current = refreshedStatus.data ?? syncStatus.data
+
+    if (current?.data_current) {
+      const syncWarning =
+        current.state === "partial"
+          ? partialSyncWarning(
+              current.successful_symbols,
+              current.total_symbols,
+              current.errors,
+            )
+          : null
+      await queueScan(current.run_id || null, syncWarning, true)
+      return
+    }
+
+    if (isSyncActive(current) && current?.run_id) {
+      setState({
+        phase: "syncing",
+        syncRunId: current.run_id,
+        scanRunId: null,
+        syncWarning: null,
+        message: "Attached to the EOD sync already in progress…",
+      })
+      return
+    }
+
     if (!authStatus?.authenticated || !authStatus.healthy) {
       setState({
         ...INITIAL_STATE,
         phase: "failed",
-        message: "Log in to Fyers before syncing and running the scanner.",
+        message: "Stored EOD data is stale. Log in to Fyers before syncing and running the scanner.",
       })
       return
     }
@@ -110,7 +182,7 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
             : "Failed to queue the EOD sync.",
       })
     }
-  }, [authStatus, syncStatus, triggerSync])
+  }, [authStatus, queueScan, syncStatus, triggerSync])
 
   useEffect(() => {
     const current = syncStatus.data
@@ -129,14 +201,6 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
             )
           : null
       queuedSyncRuns.current.add(completedRunId)
-      setState((previous) => ({
-        ...previous,
-        phase: "queueing_scan",
-        syncWarning,
-        message: syncWarning
-          ? `${syncWarning} Queueing the technical scanner with current symbols…`
-          : "EOD data is current. Queueing the technical scanner…",
-      }))
       void Promise.all([
         queryClient.invalidateQueries({
           queryKey: historicalKeys.candles(),
@@ -145,31 +209,7 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
           queryKey: historicalKeys.status(),
         }),
       ])
-      void triggerScan
-        .mutateAsync()
-        .then((result) => {
-          setState({
-            phase: "scanning",
-            syncRunId: completedRunId,
-            scanRunId: result.scan_run_id,
-            syncWarning,
-            message: syncWarning
-              ? `Technical scan is running. ${syncWarning}`
-              : "Technical scan is running across the Nifty 500…",
-          })
-        })
-        .catch((error: unknown) => {
-          setState({
-            phase: "failed",
-            syncRunId: completedRunId,
-            scanRunId: null,
-            syncWarning,
-            message:
-              error instanceof Error
-                ? error.message
-                : "The EOD sync succeeded, but the scanner could not be queued.",
-          })
-        })
+      void queueScan(completedRunId, syncWarning)
       return
     }
 
@@ -192,10 +232,10 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
     }
   }, [
     queryClient,
+    queueScan,
     state.phase,
     state.syncRunId,
     syncStatus.data,
-    triggerScan,
   ])
 
   useEffect(() => {
@@ -208,8 +248,8 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
         ...previous,
         phase: "completed",
         message: previous.syncWarning
-          ? `Scan complete: ${run.passing_count} stocks shortlisted. ${previous.syncWarning}`
-          : `Scan complete: ${run.passing_count} stocks shortlisted.`,
+          ? `Scan complete: ${run.passing_count} ranked setups. ${previous.syncWarning}`
+          : `Scan complete: ${run.passing_count} ranked setups.`,
       }))
       void Promise.all([
         queryClient.invalidateQueries({

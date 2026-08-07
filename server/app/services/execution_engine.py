@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.domain.trading import ExitIntentType, realized_pnl_on_exit
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
+from app.services.journal_outbox import enqueue_journal_fill_event
 
 REDIS_TICK_SUBS_CHANNEL = "tick_subs"
 
@@ -434,7 +435,7 @@ async def complete_paper_entry_fill(
 
     filled_at = datetime.now(timezone.utc)
     paper_trade_id = f"paper:entry:{order_intent_id}"
-    await db.execute(
+    fill_insert = await db.execute(
         text(
             """
             INSERT INTO order_fills (
@@ -456,6 +457,7 @@ async def complete_paper_entry_fill(
                 CAST(:broker_payload AS jsonb)
             )
             ON CONFLICT (fyers_trade_id) DO NOTHING
+            RETURNING id
             """
         ),
         {
@@ -469,6 +471,15 @@ async def complete_paper_entry_fill(
                 {"source": "paper_entry_fill", "price": str(fill_price)}
             ),
         },
+    )
+    fill_row = fill_insert.mappings().one_or_none()
+    if fill_row is None:
+        return False
+    await enqueue_journal_fill_event(
+        db,
+        order_fill_id=fill_row["id"],
+        position_id=position_id,
+        fill_side="entry",
     )
     await db.execute(
         text(
@@ -829,7 +840,7 @@ async def complete_paper_exit(
     )
     paper_trade_id = f"paper:exit:{order_intent_id}"
 
-    await db.execute(
+    fill_insert = await db.execute(
         text(
             """
             INSERT INTO order_fills (
@@ -851,6 +862,7 @@ async def complete_paper_exit(
                 CAST(:broker_payload AS jsonb)
             )
             ON CONFLICT (fyers_trade_id) DO NOTHING
+            RETURNING id
             """
         ),
         {
@@ -868,6 +880,15 @@ async def complete_paper_exit(
                 }
             ),
         },
+    )
+    fill_row = fill_insert.mappings().one_or_none()
+    if fill_row is None:
+        return False
+    await enqueue_journal_fill_event(
+        db,
+        order_fill_id=fill_row["id"],
+        position_id=position_id,
+        fill_side="exit",
     )
     await db.execute(
         text(

@@ -101,7 +101,14 @@ def compute_technical_indicators(
     df['bb_width_20th_pct'] = df['bb_width'].rolling(
         window=config.bb_percentile_lookback_days,
         min_periods=config.bb_percentile_lookback_days,
-    ).quantile(config.bb_max_percentile)
+    ).quantile(config.bb_reference_percentile)
+    df['bb_width_percentile'] = df['bb_width'].rolling(
+        window=config.bb_percentile_lookback_days,
+        min_periods=config.bb_percentile_lookback_days,
+    ).apply(
+        lambda window: float(np.count_nonzero(window <= window[-1])) / len(window),
+        raw=True,
+    )
 
     # Volume dry-up into the pivot.
     df['avg_volume_10'] = df['volume'].rolling(window=config.volume_short_days).mean()
@@ -277,6 +284,7 @@ def evaluate_vcp_shortlist_criteria(
         "atr_ratio_3m_low",
         "bb_width",
         "bb_width_20th_pct",
+        "bb_width_percentile",
         "avg_volume_10",
         "avg_volume_50",
         "volume_dry_up_ratio",
@@ -290,15 +298,18 @@ def evaluate_vcp_shortlist_criteria(
 
     liquidity_passed = values["adtv_crore"] > config.min_adtv_crore
     pivot_distance_passed = (
-        values["pct_from_52w_high"] * 100 <= config.pivot_max_distance_pct
+        values["pct_from_52w_high"] * 100
+        <= config.max_distance_52w_high_pct
     )
     atr_contraction_passed = values["atr_ratio"] <= (
-        values["atr_ratio_3m_low"] * config.atr_near_low_multiplier
+        values["atr_ratio_3m_low"] * config.atr_proximity_zero
     )
-    bb_contraction_passed = values["bb_width"] <= values["bb_width_20th_pct"]
+    bb_contraction_passed = (
+        values["bb_width_percentile"] <= config.bb_percentile_zero
+    )
     squeeze_combo_passed = atr_contraction_passed and bb_contraction_passed
     volume_dry_up_passed = (
-        values["volume_dry_up_ratio"] <= config.max_volume_dry_up_ratio
+        values["volume_dry_up_ratio"] <= config.volume_ratio_zero
     )
 
     criteria_matches = {

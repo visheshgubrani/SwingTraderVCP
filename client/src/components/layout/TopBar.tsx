@@ -68,8 +68,14 @@ export const TopBar: React.FC<TopBarProps> = ({
         }) + ' IST'
       );
       
-      const hours = now.getHours();
-      const mins = now.getMinutes();
+      const parts = new Intl.DateTimeFormat('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(now);
+      const hours = Number(parts.find((part) => part.type === 'hour')?.value ?? 0);
+      const mins = Number(parts.find((part) => part.type === 'minute')?.value ?? 0);
       const timeInMins = hours * 60 + mins;
       setIsMarketOpen(timeInMins >= 555 && timeInMins <= 930);
     };
@@ -95,47 +101,44 @@ export const TopBar: React.FC<TopBarProps> = ({
   };
 
   return (
-    <header className="h-12 bg-[#0d1117] border-b border-[#252932] flex items-center justify-between px-3 shrink-0 z-30 select-none">
+    <header className="z-30 flex h-12 shrink-0 select-none items-center justify-between border-b bg-card px-3">
       {/* Left: Brand & Sidebar Toggle */}
       <div className="flex items-center gap-3">
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
-          className="p-1 hover:bg-[#161b22] rounded text-[#8b949e] hover:text-[#e6edf3] transition-colors"
+          className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           title="Toggle Navigation Sidebar"
         >
           <Menu className="w-5 h-5" />
         </button>
         
         <div className="flex items-center gap-2">
-          <Zap className="w-4 h-4 text-[#3b82f6]" />
-          <span className="font-bold text-xs tracking-wider text-[#e6edf3]">
-            SWINGTRADER <span className="text-[#3b82f6]">VCP</span>
-          </span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#161b22] text-[#8b949e] border border-[#252932] font-mono">
-            P0–P4 UI
+          <Zap className="size-4 text-primary" />
+          <span className="text-xs font-bold tracking-wider text-foreground">
+            SWINGTRADER <span className="text-primary">VCP</span>
           </span>
         </div>
       </div>
 
       {/* Center: Active Symbol Ticker Banner */}
       {activeSymbol && (
-        <div className="hidden md:flex items-center gap-4 bg-[#080a0e] px-3 py-1 rounded border border-[#252932] font-mono text-xs">
-          <span className="font-bold text-[#3b82f6]">{activeSymbol}</span>
-          <span className="font-bold text-[#e6edf3]">
+        <div className="hidden items-center gap-4 rounded border bg-background px-3 py-1 font-mono text-xs md:flex">
+          <span className="font-bold text-primary">{activeSymbol}</span>
+          <span className="font-bold text-foreground">
             ₹{activeLtp.toFixed(2)}
           </span>
           {activeTick && (
             <>
               <span
                 className={`flex items-center font-medium ${
-                  activeChange >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'
+                  activeChange >= 0 ? 'text-emerald-500' : 'text-destructive'
                 }`}
               >
                 {activeChange >= 0 ? '+' : ''}
                 {activeChange.toFixed(2)} ({activeChangePct >= 0 ? '+' : ''}
                 {activeChangePct.toFixed(2)}%)
               </span>
-              <span className="text-[11px] text-[#8b949e]">
+              <span className="text-[11px] text-muted-foreground">
                 O: {activeTick.open?.toFixed(2) ?? '-'} H:{' '}
                 {activeTick.high?.toFixed(2) ?? '-'} L:{' '}
                 {activeTick.low?.toFixed(2) ?? '-'} V:{' '}
@@ -149,17 +152,17 @@ export const TopBar: React.FC<TopBarProps> = ({
       {/* Right: Controls & Kill Switch */}
       <div className="flex items-center gap-3">
         {/* Market Status & Clock */}
-        <div className="hidden lg:flex items-center gap-2 text-[11px] font-mono text-[#8b949e]">
+        <div className="hidden items-center gap-2 font-mono text-[11px] text-muted-foreground lg:flex">
           <span className="flex items-center gap-1.5">
             <span
               className={`w-2 h-2 rounded-full ${
-                isMarketOpen ? 'bg-[#22c55e] animate-pulse' : 'bg-gray-500'
+                isMarketOpen ? 'animate-pulse bg-emerald-500' : 'bg-muted-foreground'
               }`}
             />
             {isMarketOpen ? 'NSE LIVE' : 'NSE CLOSED'}
           </span>
-          <span className="text-[#252932]">|</span>
-          <span className="text-[#e6edf3]">{timeStr}</span>
+          <span className="text-border">|</span>
+          <span className="text-foreground">{timeStr}</span>
         </div>
 
         {/* Auth Status */}

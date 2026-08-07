@@ -45,16 +45,26 @@ class Settings(BaseSettings):
     upstox_fundamentals_base_url: str = "https://api.upstox.com/v2"
     openrouter_api_key: str = ""
     openrouter_api_url: str = "https://openrouter.ai/api/v1/chat/completions"
-    openrouter_model: str = "xiaomi/mimo-v2.5-pro"
-    openrouter_prompt_version: str = "sepa_fundamentals_v1"
+    # These stay runtime-configurable through server/.env. The defaults are
+    # conservative but deployment may choose another supported OpenRouter model.
+    openrouter_model: str = "deepseek/deepseek-v4-flash"
+    openrouter_reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "xhigh"
+    openrouter_prompt_version: str = "minervini_fundamentals_v1"
     openrouter_http_referer: str = ""
     openrouter_app_title: str = "SwingTraderVCP"
     fundamentals_snapshot_ttl_hours: int = Field(default=24, ge=1, le=168)
-    fundamentals_max_concurrency: int = Field(default=5, ge=1, le=5)
+    # P7 intentionally performs one company at a time; this remains an env
+    # setting so an operator can only make it stricter, never concurrent.
+    fundamentals_max_concurrency: int = Field(default=1, ge=1, le=1)
     fundamentals_http_timeout_seconds: float = Field(default=20.0, gt=0, le=60)
     fundamentals_http_max_attempts: int = Field(default=3, ge=1, le=5)
-    openrouter_max_tokens: int = Field(default=1600, ge=256, le=4096)
-    openrouter_temperature: float = Field(default=0.1, ge=0, le=1)
+    openrouter_max_tokens: int = Field(default=3200, ge=256, le=4096)
+    fundamental_run_token_budget: int = Field(default=150_000, ge=1_000, le=500_000)
+    fundamental_prompt_max_chars: int = Field(default=6_000, ge=1_000, le=12_000)
+    openrouter_http_timeout_seconds: float = Field(default=60.0, gt=0, le=120)
+    # GPT-5.6 reasoning endpoints do not support sampling temperature. Keep
+    # this opt-in for model overrides that do support it.
+    openrouter_temperature: float | None = Field(default=None, ge=0, le=1)
 
     @field_validator("database_url", mode="before")
     @classmethod

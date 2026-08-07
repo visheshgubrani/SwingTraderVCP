@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import settings
 from app.database import async_session
+from app.domain.market_regime import BENCHMARK_SYMBOL
 from app.services.auth_service import get_valid_access_token, AuthUnavailableError
 
 logging.basicConfig(
@@ -114,12 +115,6 @@ def _on_close_factory():
 
 
 async def _load_subscription_symbols(db: AsyncSession) -> list[str]:
-    """
-    Build the dynamic subscription set:
-      - instruments in open/watched positions
-      - instruments in active watchlists
-    Returns list of Fyers symbol strings (e.g. "NSE:SBIN-EQ").
-    """
     result = await db.execute(
         text("""
             SELECT DISTINCT i.fyers_symbol
@@ -138,7 +133,10 @@ async def _load_subscription_symbols(db: AsyncSession) -> list[str]:
         """)
     )
     rows = result.fetchall()
-    return [r[0] for r in rows]
+    symbols = [r[0] for r in rows]
+    if BENCHMARK_SYMBOL not in symbols:
+        symbols.append(BENCHMARK_SYMBOL)
+    return symbols
 
 
 async def _emit_system_event(redis, severity: str, event_type: str, payload: dict):

@@ -7,6 +7,7 @@ from app.services.historical_fetcher import (
     build_date_chunks,
     latest_completed_eod_date,
     next_sync_date,
+    sync_status_is_current,
 )
 from app.worker import WorkerSettings
 
@@ -70,6 +71,39 @@ class HistoricalFetcherDateTests(unittest.TestCase):
         result = latest_completed_eod_date(monday_afternoon)
 
         self.assertEqual(result, datetime.date(2026, 7, 17))
+
+    def test_successful_sync_for_current_target_is_reusable(self) -> None:
+        status = {
+            "state": "succeeded",
+            "target_date": "2026-07-31",
+        }
+
+        self.assertTrue(
+            sync_status_is_current(status, datetime.date(2026, 7, 31))
+        )
+
+    def test_successful_sync_for_old_target_is_stale(self) -> None:
+        status = {
+            "state": "succeeded",
+            "target_date": "2026-07-30",
+        }
+
+        self.assertFalse(
+            sync_status_is_current(status, datetime.date(2026, 7, 31))
+        )
+
+    def test_nearly_complete_partial_sync_is_reusable(self) -> None:
+        status = {
+            "state": "partial",
+            "target_date": "2026-07-31",
+            "total_symbols": 500,
+            "successful_symbols": 496,
+            "error_count": 4,
+        }
+
+        self.assertTrue(
+            sync_status_is_current(status, datetime.date(2026, 7, 31))
+        )
 
 
 class HistoricalSyncScheduleTests(unittest.TestCase):

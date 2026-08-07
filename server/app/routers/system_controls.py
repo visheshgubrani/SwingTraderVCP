@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -5,11 +6,19 @@ from sqlalchemy import text
 
 from app.database import db_dep
 from app.schemas.trading import (
+    FundamentalControlUpdate,
+    FundamentalControlView,
+    FundamentalControlsView,
     KillSwitchUpdate,
     KillSwitchView,
     ReconciliationItemView,
     ReconciliationRunView,
     ReconciliationTriggerResponse,
+)
+from app.services.fundamental_controls import (
+    get_fundamental_controls,
+    publish_fundamental_control,
+    set_fundamental_control,
 )
 from app.services.kill_switch import (
     KillSwitchUnavailableError,
@@ -19,6 +28,41 @@ from app.services.kill_switch import (
 )
 
 router = APIRouter(prefix="/system", tags=["system controls"])
+
+
+@router.get("/fundamentals-controls", response_model=FundamentalControlsView)
+async def read_fundamental_controls(db: db_dep) -> FundamentalControlsView:
+    try:
+        return FundamentalControlsView.model_validate(await get_fundamental_controls(db))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.put(
+    "/fundamentals-controls/{control}",
+    response_model=FundamentalControlView,
+)
+async def set_fundamental_controls(
+    control: Literal["processing", "ai"],
+    payload: FundamentalControlUpdate,
+    request: Request,
+    db: db_dep,
+) -> FundamentalControlView:
+    try:
+        state = await set_fundamental_control(
+            db, control=control, paused=payload.paused, reason=payload.reason
+        )
+        await db.commit()
+    except RuntimeError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        state["redis_published"] = await publish_fundamental_control(
+            request.app.state.redis, control=control, state=state
+        )
+    except Exception:
+        state["redis_published"] = False
+    return FundamentalControlView.model_validate(state)
 
 
 @router.get("/kill-switch", response_model=KillSwitchView)

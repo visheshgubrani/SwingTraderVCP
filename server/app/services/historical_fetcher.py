@@ -39,6 +39,7 @@ class SyncProgress:
     error_count: int = 0
     errors: list[dict[str, str]] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
+    target_date: str | None = None
     started_at: str | None = None
     completed_at: str | None = None
 
@@ -130,6 +131,32 @@ def latest_completed_eod_date(
     return candidate
 
 
+def sync_status_is_current(
+    status: dict[str, Any],
+    expected_target_date: datetime.date,
+) -> bool:
+    """Return whether a completed sync covered the current EOD target."""
+    if status.get("target_date") != expected_target_date.isoformat():
+        return False
+
+    state = status.get("state")
+    if state == "succeeded":
+        return True
+    if state != "partial":
+        return False
+
+    total_symbols = int(status.get("total_symbols") or 0)
+    if total_symbols <= 0:
+        return False
+    tolerated_failures = max(1, total_symbols // 100)
+    successful_symbols = int(status.get("successful_symbols") or 0)
+    error_count = int(status.get("error_count") or 0)
+    return (
+        successful_symbols >= total_symbols - tolerated_failures
+        and error_count <= tolerated_failures
+    )
+
+
 def _token_is_expired(expires_at: datetime.datetime) -> bool:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
@@ -145,6 +172,7 @@ async def run_historical_sync(
     """Incrementally fetch daily Nifty 500 candles as an arq worker job."""
     redis: ArqRedis = ctx["redis"]
     effective_run_id = run_id or str(ctx.get("job_id", "scheduled"))
+    target_date = latest_completed_eod_date()
     lock_owner = effective_run_id
     lock_acquired = await redis.set(
         SYNC_LOCK_KEY,
@@ -161,6 +189,7 @@ async def run_historical_sync(
         state="running",
         triggered_by=triggered_by,
         is_running=True,
+        target_date=target_date.isoformat(),
         started_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
     progress.log(f"Started {triggered_by} incremental EOD sync.")
@@ -193,12 +222,17 @@ async def run_historical_sync(
                         (MAX(c.candle_start) AT TIME ZONE 'Asia/Kolkata')::date
                             AS latest_candle_date
                     FROM instruments i
-                    JOIN universe_memberships m ON i.id = m.instrument_id
+                    LEFT JOIN universe_memberships m
+                        ON m.instrument_id = i.id
+                        AND m.universe_code = 'NIFTY500'
+                        AND m.member_to IS NULL
                     LEFT JOIN market_candles c
                         ON c.instrument_id = i.id AND c.timeframe = '1d'
-                    WHERE m.universe_code = 'NIFTY500'
-                      AND m.member_to IS NULL
-                      AND i.active = true
+                    WHERE i.active = true
+                      AND (
+                            m.instrument_id IS NOT NULL
+                            OR i.fyers_symbol = 'NSE:NIFTY50-INDEX'
+                          )
                     GROUP BY i.id, i.symbol, i.fyers_symbol
                     ORDER BY i.symbol ASC
                     """
@@ -215,7 +249,6 @@ async def run_historical_sync(
         progress.total_symbols = len(instruments)
         await save_sync_status(redis, progress)
 
-        target_date = latest_completed_eod_date()
         fyers = fyersModel.FyersModel(
             is_async=True,
             client_id=settings.fyers_app_id,

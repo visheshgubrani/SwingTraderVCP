@@ -1,92 +1,151 @@
-import React from 'react';
+import type { Dispatch, SetStateAction } from "react"
 import {
-  LayoutDashboard,
-  CandlestickChart,
-  Briefcase,
-  Receipt,
-  BookCheck,
-  BookOpen,
-  Wallet,
-  ChevronLeft,
-  ChevronRight,
-} from 'lucide-react';
+  BookCheckIcon,
+  BookOpenIcon,
+  BriefcaseBusinessIcon,
+  CandlestickChartIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  LandmarkIcon,
+  ListOrderedIcon,
+  ScanSearchIcon,
+  SlidersHorizontalIcon,
+  TablePropertiesIcon,
+} from "lucide-react"
+import { NavLink } from "react-router"
 
-export type NavTab =
-  | 'overview'
-  | 'chart'
-  | 'positions'
-  | 'orders'
-  | 'tradebook'
-  | 'journal'
-  | 'ledger';
+import { cn } from "@/lib/utils"
 
 interface SidebarProps {
-  activeTab: NavTab;
-  setActiveTab: (tab: NavTab) => void;
-  open: boolean;
-  setOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  open: boolean
+  setOpen: Dispatch<SetStateAction<boolean>>
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({
-  activeTab,
-  setActiveTab,
-  open,
-  setOpen,
-}) => {
-  const navItems: { id: NavTab; label: string; icon: React.FC<{ className?: string }> }[] = [
-    { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'chart', label: 'Chart & Scanner', icon: CandlestickChart },
-    { id: 'positions', label: 'Active Positions', icon: Briefcase },
-    { id: 'orders', label: 'Orders Book', icon: Receipt },
-    { id: 'tradebook', label: 'Tradebook', icon: BookCheck },
-    { id: 'journal', label: 'Trade Journal & AI', icon: BookOpen },
-    { id: 'ledger', label: 'Account Ledger', icon: Wallet },
-  ];
+interface NavGroup {
+  category: string
+  items: ReadonlyArray<{
+    to: string
+    label: string
+    icon: typeof CandlestickChartIcon
+    end?: boolean
+    badge?: string
+  }>
+}
 
+const navGroups: ReadonlyArray<NavGroup> = [
+  {
+    category: "CORE TERMINAL",
+    items: [
+      { to: "/", label: "Workstation", icon: CandlestickChartIcon, end: true },
+      { to: "/scanner", label: "Stock Screener", icon: TablePropertiesIcon, badge: "EOD" },
+    ],
+  },
+  {
+    category: "MONITOR & ORDERS",
+    items: [
+      { to: "/positions", label: "Active Positions", icon: BriefcaseBusinessIcon },
+      { to: "/orders", label: "Order Book", icon: ListOrderedIcon },
+      { to: "/tradebook", label: "Tradebook", icon: BookCheckIcon },
+    ],
+  },
+  {
+    category: "RESEARCH & INTEL",
+    items: [
+      { to: "/fundamentals", label: "Fundamentals", icon: ScanSearchIcon },
+      { to: "/journal", label: "Journal & AI", icon: BookOpenIcon },
+    ],
+  },
+  {
+    category: "SYSTEM",
+    items: [
+      { to: "/operations", label: "Operations", icon: SlidersHorizontalIcon },
+      { to: "/ledger", label: "Account Ledger", icon: LandmarkIcon },
+    ],
+  },
+]
+
+export function Sidebar({ open, setOpen }: SidebarProps) {
   return (
     <aside
-      className={`bg-[#0d1117] border-r border-[#252932] flex flex-col justify-between shrink-0 transition-all duration-200 z-20 ${
-        open ? 'w-52' : 'w-14'
-      }`}
+      className={cn(
+        "z-20 flex shrink-0 flex-col justify-between border-r border-border bg-card/95 font-mono text-xs text-card-foreground select-none transition-[width] duration-200 shadow-md",
+        open ? "w-56" : "w-14",
+      )}
     >
-      <div className="py-2 flex flex-col gap-1">
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          const isActive = activeTab === item.id;
-          return (
-            <button
-              key={item.id}
-              onClick={() => setActiveTab(item.id)}
-              className={`flex items-center gap-3 px-3.5 py-2.5 mx-1.5 rounded transition-all text-xs font-medium ${
-                isActive
-                  ? 'bg-[#1c2128] text-[#3b82f6] border-l-2 border-[#3b82f6]'
-                  : 'text-[#8b949e] hover:bg-[#161b22] hover:text-[#e6edf3]'
-              }`}
-              title={!open ? item.label : undefined}
-            >
-              <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-[#3b82f6]' : ''}`} />
-              {open && <span className="truncate">{item.label}</span>}
-            </button>
-          );
-        })}
+      <div className="flex flex-col gap-4 overflow-y-auto p-2 scrollbar-none">
+        {/* Terminal Header Info */}
+        {open ? (
+          <div className="flex items-center justify-between border-b border-border/60 px-2 py-2 text-[10px] tracking-wider text-muted-foreground uppercase">
+            <span className="font-bold text-foreground/90">BBG // VCP TRADER</span>
+            <span className="flex items-center gap-1 font-mono text-[9px] text-emerald-500 font-semibold">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              ONLINE
+            </span>
+          </div>
+        ) : (
+          <div className="flex justify-center border-b border-border/60 py-2">
+            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" title="System Online" />
+          </div>
+        )}
+
+        <nav aria-label="Primary navigation" className="flex flex-col gap-4">
+          {navGroups.map((group) => (
+            <div key={group.category} className="flex flex-col gap-1">
+              {open && (
+                <div className="px-2 pb-1 text-[9px] font-bold tracking-widest text-muted-foreground/70 uppercase">
+                  {group.category}
+                </div>
+              )}
+              {group.items.map(({ to, label, icon: Icon, end, badge }) => (
+                <NavLink
+                  className={({ isActive }) =>
+                    cn(
+                      "relative flex h-8.5 items-center gap-2.5 rounded-sm px-2 text-[11px] font-medium transition-all duration-150",
+                      isActive
+                        ? "bg-accent/90 text-accent-foreground font-semibold shadow-xs border-l-2 border-primary"
+                        : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+                    )
+                  }
+                  end={end}
+                  key={to}
+                  title={!open ? label : undefined}
+                  to={to}
+                >
+                  <Icon aria-hidden="true" className="size-4 shrink-0 opacity-85" />
+                  {open && (
+                    <div className="flex min-w-0 flex-1 items-center justify-between gap-1.5">
+                      <span className="truncate">{label}</span>
+                      {badge && (
+                        <span className="rounded bg-primary/20 px-1 py-0.2 text-[9px] font-bold text-primary">
+                          {badge}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </NavLink>
+              ))}
+            </div>
+          ))}
+        </nav>
       </div>
 
-      {/* Collapse Toggle Footer */}
-      <div className="p-2 border-t border-[#252932]">
+      <div className="border-t border-border/80 p-2 bg-card/60">
         <button
-          onClick={() => setOpen(!open)}
-          className="w-full flex items-center justify-center p-1.5 hover:bg-[#161b22] rounded text-[#8b949e] hover:text-[#e6edf3] transition-colors"
+          aria-label={open ? "Collapse sidebar" : "Expand sidebar"}
+          className="flex h-8 w-full items-center justify-center gap-2 rounded-sm text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          onClick={() => setOpen((current) => !current)}
+          type="button"
         >
           {open ? (
-            <div className="flex items-center gap-2 text-xs">
-              <ChevronLeft className="w-4 h-4" />
-              <span>Collapse Sidebar</span>
-            </div>
+            <>
+              <ChevronLeftIcon aria-hidden="true" className="size-3.5" />
+              <span>COLLAPSE</span>
+            </>
           ) : (
-            <ChevronRight className="w-4 h-4" />
+            <ChevronRightIcon aria-hidden="true" className="size-3.5" />
           )}
         </button>
       </div>
     </aside>
-  );
-};
+  )
+}

@@ -10,7 +10,10 @@ from app.services.indicators import (
     evaluate_vcp_shortlist_criteria,
 )
 from app.services.screening_config import TechnicalScreeningConfig
-from app.services.screening_ranker import rank_and_cap_shortlist
+from app.services.screening_ranker import (
+    fundamental_selection_status,
+    rank_and_cap_shortlist,
+)
 
 
 def make_tightening_stock() -> pd.DataFrame:
@@ -60,22 +63,14 @@ class IndicatorTests(unittest.TestCase):
         self.assertLessEqual(metrics["volume_dry_up_ratio"], 0.8)
         self.assertTrue(metrics["criteria_matches"]["squeeze_combo"])
 
-    def test_each_new_gate_is_a_hard_filter(self) -> None:
-        latest_index = self.indicators.index[-1]
-        failing_values = {
-            "adtv_crore": 10.0,
-            "pct_from_52w_high": 0.151,
-            "atr_ratio": self.indicators.at[latest_index, "atr_ratio_3m_low"] * 1.11,
-            "bb_width": self.indicators.at[latest_index, "bb_width_20th_pct"] * 1.01,
-            "volume_dry_up_ratio": 0.81,
-        }
+    def test_bollinger_percentile_matches_trailing_window_rank(self) -> None:
+        latest = self.indicators.iloc[-1]
+        trailing = self.indicators["bb_width"].dropna().iloc[
+            -self.config.bb_percentile_lookback_days:
+        ]
+        expected = float((trailing <= trailing.iloc[-1]).mean())
 
-        for column, failing_value in failing_values.items():
-            with self.subTest(column=column):
-                candidate = self.indicators.copy()
-                candidate.at[latest_index, column] = failing_value
-                passed, _ = evaluate_vcp_shortlist_criteria(candidate, self.config)
-                self.assertFalse(passed)
+        self.assertAlmostEqual(latest["bb_width_percentile"], expected)
 
     def test_rs_rating_is_cross_sectional(self) -> None:
         ratings = compute_relative_strength_ratings(
@@ -94,6 +89,7 @@ class IndicatorTests(unittest.TestCase):
         candidates = [
             {
                 "symbol": f"STOCK{index}",
+                "technical_score": 100 - index,
                 "rs_rating": 99 - index,
                 "pct_from_52w_high": 0.10,
             }
@@ -102,6 +98,7 @@ class IndicatorTests(unittest.TestCase):
         candidates.append(
             {
                 "symbol": "TIE_NEARER",
+                "technical_score": 100,
                 "rs_rating": 99,
                 "pct_from_52w_high": 0.05,
             }
@@ -113,6 +110,37 @@ class IndicatorTests(unittest.TestCase):
         self.assertEqual(ranked[0]["symbol"], "TIE_NEARER")
         self.assertEqual(ranked[1]["symbol"], "STOCK0")
         self.assertEqual([row["result_rank"] for row in ranked], list(range(1, 21)))
+
+    def test_v2_shortlist_retains_at_most_50_scored_setups(self) -> None:
+        candidates = [
+            {
+                "symbol": f"STOCK{index:02d}",
+                "technical_score": 100 - index,
+                "rs_rating": 99 - index,
+                "pct_from_52w_high": index / 1000,
+            }
+            for index in range(60)
+        ]
+
+        ranked = rank_and_cap_shortlist(candidates, limit=50)
+
+        self.assertEqual(len(ranked), 50)
+        self.assertEqual(ranked[0]["symbol"], "STOCK00")
+        self.assertEqual(ranked[-1]["symbol"], "STOCK49")
+
+    def test_only_top_20_are_selected_for_fundamentals(self) -> None:
+        self.assertEqual(
+            fundamental_selection_status(20, limit=20, enabled=True),
+            (True, "queued"),
+        )
+        self.assertEqual(
+            fundamental_selection_status(21, limit=20, enabled=True),
+            (False, "not_requested"),
+        )
+        self.assertEqual(
+            fundamental_selection_status(1, limit=20, enabled=False),
+            (False, "not_requested"),
+        )
 
 
 if __name__ == "__main__":

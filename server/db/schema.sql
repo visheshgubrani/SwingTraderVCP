@@ -168,6 +168,10 @@ CREATE TABLE screening_results (
     instrument_id uuid NOT NULL REFERENCES instruments(id),
     result_rank integer CHECK (result_rank IS NULL OR result_rank > 0),
     technical_passed boolean NOT NULL DEFAULT true,
+    technical_score numeric(5, 2) CHECK (
+        technical_score IS NULL
+        OR (technical_score >= 0 AND technical_score <= 100)
+    ),
     vcp_detected boolean NOT NULL DEFAULT false,
     close_price numeric(18, 4) CHECK (close_price IS NULL OR close_price >= 0),
     sma_50 numeric(18, 4) CHECK (sma_50 IS NULL OR sma_50 >= 0),
@@ -179,6 +183,10 @@ CREATE TABLE screening_results (
     llm_verdict text,
     llm_flags jsonb NOT NULL DEFAULT '{}'::jsonb,
     llm_checked_at timestamptz,
+    fundamental_status text NOT NULL DEFAULT 'not_requested',
+    fundamental_verdict text,
+    fundamental_scorecard jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ai_status text NOT NULL DEFAULT 'not_requested',
     fundamental_snapshot_id uuid REFERENCES fundamental_snapshots(id),
     reviewer_status text NOT NULL DEFAULT 'pending',
     reviewer_notes text,
@@ -204,6 +212,33 @@ ON screening_results (instrument_id, created_at DESC);
 CREATE INDEX screening_results_fundamental_snapshot_idx
 ON screening_results (fundamental_snapshot_id)
 WHERE fundamental_snapshot_id IS NOT NULL;
+
+-- P7 durable, ordered processing state. See migration 006_p7_reliable_fundamentals.sql.
+CREATE TABLE fundamental_analysis_runs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scan_run_id uuid NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'queued', mode text NOT NULL DEFAULT 'retry_incomplete', queue_job_id text UNIQUE,
+    config jsonb NOT NULL DEFAULT '{}'::jsonb, current_rank integer, current_symbol text, provider_requests integer NOT NULL DEFAULT 0,
+    input_tokens integer NOT NULL DEFAULT 0, reasoning_tokens integer NOT NULL DEFAULT 0, output_tokens integer NOT NULL DEFAULT 0,
+    cached_tokens integer NOT NULL DEFAULT 0, total_cost numeric(18, 8) NOT NULL DEFAULT 0, error_message text,
+    started_at timestamptz, heartbeat_at timestamptz, completed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE fundamental_analysis_items (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), analysis_run_id uuid NOT NULL REFERENCES fundamental_analysis_runs(id) ON DELETE CASCADE,
+    screening_result_id uuid NOT NULL REFERENCES screening_results(id) ON DELETE CASCADE, rank integer NOT NULL,
+    status text NOT NULL DEFAULT 'queued', snapshot_id uuid REFERENCES fundamental_snapshots(id), analysis_key text,
+    provider_requests integer NOT NULL DEFAULT 0, input_tokens integer NOT NULL DEFAULT 0, reasoning_tokens integer NOT NULL DEFAULT 0,
+    output_tokens integer NOT NULL DEFAULT 0, cached_tokens integer NOT NULL DEFAULT 0, cost numeric(18, 8) NOT NULL DEFAULT 0,
+    error_code text, error_message text, started_at timestamptz, completed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (analysis_run_id, screening_result_id)
+);
+
+CREATE TABLE fundamental_annotations (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), analysis_key text NOT NULL UNIQUE, status text NOT NULL DEFAULT 'succeeded',
+    model text NOT NULL, reasoning_effort text NOT NULL, prompt_version text NOT NULL, input_hash text NOT NULL,
+    payload jsonb NOT NULL, request_id text, usage jsonb NOT NULL DEFAULT '{}'::jsonb, cost numeric(18, 8) NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
 
 CREATE TABLE watchlists (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -583,6 +618,12 @@ INSERT INTO system_controls (control_key, enabled, reason, changed_by)
 VALUES ('global_kill_switch', false, 'Default: trading automation enabled only when higher-level services permit it.', 'schema')
 ON CONFLICT (control_key) DO NOTHING;
 
+INSERT INTO system_controls (control_key, enabled, reason, changed_by)
+VALUES
+    ('fundamentals_processing_paused', false, 'Default: P7 fundamental processing enabled when configured.', 'schema'),
+    ('fundamentals_ai_paused', false, 'Default: P7 AI annotations enabled when configured.', 'schema')
+ON CONFLICT (control_key) DO NOTHING;
+
 CREATE TABLE system_events (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     event_ts timestamptz NOT NULL DEFAULT now(),
@@ -642,3 +683,182 @@ COMMENT ON TABLE job_runs IS
 
 COMMENT ON TABLE system_controls IS
 'Operational controls including the global kill switch used by execution and monitoring services.';
+
+CREATE TABLE market_regime_snapshots (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    reference_eod_date date NOT NULL,
+    classifier_version text NOT NULL,
+    regime text NOT NULL,
+    benchmark_symbol text NOT NULL,
+    benchmark_price numeric(18, 4) CHECK (benchmark_price IS NULL OR benchmark_price >= 0),
+    benchmark_price_source text NOT NULL,
+    benchmark_price_at timestamptz,
+    sma_50 numeric(18, 4),
+    sma_200 numeric(18, 4),
+    sma_50_slope_20d numeric(18, 6),
+    breadth_above_sma_50_pct numeric(8, 4),
+    breadth_above_sma_200_pct numeric(8, 4),
+    evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT market_regime_snapshots_regime_check CHECK (
+        regime IN ('bullish', 'bearish', 'neutral', 'unavailable')
+    )
+);
+
+CREATE INDEX market_regime_snapshots_date_idx
+ON market_regime_snapshots (reference_eod_date DESC);
+
+CREATE TABLE journal_entries (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    position_id uuid NOT NULL UNIQUE REFERENCES positions(id),
+    instrument_id uuid NOT NULL REFERENCES instruments(id),
+    execution_mode text NOT NULL,
+    status text NOT NULL DEFAULT 'open',
+    symbol text NOT NULL,
+    entry_frozen_at timestamptz,
+    first_entry_fill_at timestamptz,
+    first_entry_price numeric(18, 4),
+    first_entry_quantity integer CHECK (
+        first_entry_quantity IS NULL OR first_entry_quantity > 0
+    ),
+    final_entry_quantity integer CHECK (
+        final_entry_quantity IS NULL OR final_entry_quantity > 0
+    ),
+    weighted_entry_price numeric(18, 4),
+    entry_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+    exit_fills jsonb NOT NULL DEFAULT '[]'::jsonb,
+    weighted_exit_price numeric(18, 4),
+    closed_at timestamptz,
+    hold_duration_hours numeric(18, 4),
+    exit_outcome text,
+    exit_reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+    gross_pnl numeric(18, 4),
+    estimated_charges jsonb NOT NULL DEFAULT '{}'::jsonb,
+    actual_charges jsonb,
+    charge_quality text NOT NULL DEFAULT 'estimated',
+    net_pnl numeric(18, 4),
+    gross_r_multiple numeric(18, 6),
+    net_r_multiple numeric(18, 6),
+    risk_amount numeric(18, 4),
+    pnl_mismatch boolean NOT NULL DEFAULT false,
+    pnl_mismatch_delta numeric(18, 4),
+    market_regime_snapshot_id uuid REFERENCES market_regime_snapshots(id),
+    notes text,
+    execution_rating integer CHECK (
+        execution_rating IS NULL
+        OR (execution_rating >= 1 AND execution_rating <= 5)
+    ),
+    setup_tags jsonb NOT NULL DEFAULT '[]'::jsonb,
+    mistake_tags jsonb NOT NULL DEFAULT '[]'::jsonb,
+    emotion_tags jsonb NOT NULL DEFAULT '[]'::jsonb,
+    lessons text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT journal_entries_execution_mode_check CHECK (
+        execution_mode IN ('paper', 'live')
+    ),
+    CONSTRAINT journal_entries_status_check CHECK (
+        status IN ('open', 'closed')
+    ),
+    CONSTRAINT journal_entries_charge_quality_check CHECK (
+        charge_quality IN ('estimated', 'reconciled')
+    ),
+    CONSTRAINT journal_entries_exit_outcome_check CHECK (
+        exit_outcome IS NULL
+        OR exit_outcome IN (
+            'stop_loss',
+            'target',
+            'trailing',
+            'manual',
+            'mixed'
+        )
+    )
+);
+
+CREATE TRIGGER journal_entries_set_updated_at
+BEFORE UPDATE ON journal_entries
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE INDEX journal_entries_closed_at_idx
+ON journal_entries (closed_at DESC NULLS LAST)
+WHERE status = 'closed';
+
+CREATE INDEX journal_entries_symbol_idx
+ON journal_entries (symbol);
+
+CREATE TABLE journal_chart_artifacts (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    journal_entry_id uuid NOT NULL UNIQUE REFERENCES journal_entries(id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'pending',
+    claimed_by text,
+    claimed_at timestamptz,
+    lease_expires_at timestamptz,
+    chart_source jsonb NOT NULL DEFAULT '{}'::jsonb,
+    png_bytes bytea,
+    content_hash text,
+    capture_attempts integer NOT NULL DEFAULT 0 CHECK (capture_attempts >= 0),
+    last_error text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT journal_chart_artifacts_status_check CHECK (
+        status IN ('pending', 'claimed', 'captured', 'failed')
+    )
+);
+
+CREATE TRIGGER journal_chart_artifacts_set_updated_at
+BEFORE UPDATE ON journal_chart_artifacts
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE INDEX journal_chart_artifacts_pending_idx
+ON journal_chart_artifacts (status, created_at)
+WHERE status IN ('pending', 'claimed');
+
+CREATE TABLE journal_fill_outbox (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_fill_id uuid NOT NULL UNIQUE REFERENCES order_fills(id),
+    position_id uuid NOT NULL REFERENCES positions(id),
+    fill_side text NOT NULL,
+    status text NOT NULL DEFAULT 'pending',
+    attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    last_error text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    processed_at timestamptz,
+    CONSTRAINT journal_fill_outbox_fill_side_check CHECK (
+        fill_side IN ('entry', 'exit')
+    ),
+    CONSTRAINT journal_fill_outbox_status_check CHECK (
+        status IN ('pending', 'processing', 'completed', 'failed')
+    )
+);
+
+CREATE INDEX journal_fill_outbox_pending_idx
+ON journal_fill_outbox (status, created_at)
+WHERE status IN ('pending', 'processing');
+
+CREATE TABLE journal_ai_runs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    status text NOT NULL DEFAULT 'queued',
+    filters jsonb NOT NULL DEFAULT '{}'::jsonb,
+    input_hash text NOT NULL,
+    result jsonb,
+    model text NOT NULL,
+    request_id text,
+    usage jsonb NOT NULL DEFAULT '{}'::jsonb,
+    error_message text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    CONSTRAINT journal_ai_runs_status_check CHECK (
+        status IN ('queued', 'running', 'succeeded', 'failed')
+    )
+);
+
+CREATE INDEX journal_ai_runs_input_hash_idx
+ON journal_ai_runs (input_hash, status, created_at DESC);
+
+COMMENT ON TABLE journal_entries IS
+'One automated journal record per app-managed position. Entry context frozen on first fill.';
+
+COMMENT ON TABLE journal_fill_outbox IS
+'Durable fill events for async journal processing. Future fills only — no backfill.';

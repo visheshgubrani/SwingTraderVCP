@@ -23,13 +23,19 @@ Configure the worker without committing credentials:
 P7_FUNDAMENTAL_PASS_ENABLED=true
 UPSTOX_ANALYTICS_TOKEN=<one-year-read-only-analytics-token>
 OPENROUTER_API_KEY=<openrouter-key>
+OPENROUTER_MODEL=deepseek/deepseek-v4-flash
+OPENROUTER_REASONING_EFFORT=xhigh  # low | medium | high | xhigh
+FUNDAMENTAL_RUN_TOKEN_BUDGET=150000
+FUNDAMENTAL_PROMPT_MAX_CHARS=6000
 ```
 
 Defaults lock the provider/model behavior:
 
 - consolidated Upstox Company Fundamentals statements
 - a 24-hour snapshot cache and at most five concurrent survivors
-- `xiaomi/mimo-v2.5-pro` through OpenRouter
+- OpenRouter remains runtime-configurable: set `OPENROUTER_MODEL` and
+  `OPENROUTER_REASONING_EFFORT` in `server/.env`. P7 records the exact model,
+  reasoning effort, prompt version, and usage for each annotation.
 - strict JSON Schema with reasoning enabled but excluded from the response
 - provider data collection denied
 

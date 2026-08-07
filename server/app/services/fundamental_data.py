@@ -58,6 +58,20 @@ class UpstoxFundamentalsClient:
         self._max_attempts = max_attempts
         self._transport = transport
         self._sleep = sleep
+        self._client: httpx.AsyncClient | None = None
+
+    async def __aenter__(self) -> "UpstoxFundamentalsClient":
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url,
+            timeout=self._timeout,
+            transport=self._transport,
+        )
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def fetch_company_bundle(
         self,
@@ -112,12 +126,15 @@ class UpstoxFundamentalsClient:
 
         for attempt in range(1, self._max_attempts + 1):
             try:
-                async with httpx.AsyncClient(
-                    base_url=self._base_url,
-                    timeout=self._timeout,
-                    transport=self._transport,
-                ) as client:
-                    response = await client.get(path, params=params, headers=headers)
+                if self._client is None:
+                    async with httpx.AsyncClient(
+                        base_url=self._base_url,
+                        timeout=self._timeout,
+                        transport=self._transport,
+                    ) as transient_client:
+                        response = await transient_client.get(path, params=params, headers=headers)
+                else:
+                    response = await self._client.get(path, params=params, headers=headers)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
                 if attempt == self._max_attempts:
@@ -481,7 +498,11 @@ def normalize_fundamentals(
     )
     revenue_yoy = _latest_yoy(quarterly_revenue)
     profit_yoy = _latest_yoy(quarterly_net_profit)
+    annual_revenue_yoy = _latest_yoy(annual_revenue)
+    annual_profit_yoy = _latest_yoy(annual_net_profit)
+    annual_eps_yoy = _latest_yoy(annual_eps)
     margin_change = _latest_margin_change(quarterly_margins)
+    annual_margin_change = _latest_margin_change(annual_margins)
     revenue_cagr = _cagr(annual_revenue)
     profit_cagr = _cagr(annual_net_profit)
     eps_cagr = _cagr(annual_eps)
@@ -508,22 +529,6 @@ def normalize_fundamentals(
     industry = _profile_value(profile, "industry", "industry_name")
     financial_sector = _is_financial_sector(sector, industry)
 
-    balance_rows = balance.get("full_statement")
-    debt = _statement_history(
-        balance_rows,
-        exact=("Total Borrowings", "Borrowings"),
-        contains=("total borrowings",),
-    )
-    equity = _statement_history(
-        balance_rows,
-        exact=(
-            "Total Equity",
-            "Shareholders' Funds",
-            "Shareholder Funds",
-        ),
-        contains=("total equity", "shareholders' funds"),
-    )
-    debt_to_equity = _latest_ratio(debt, equity)
     cash_conversion = (
         None
         if financial_sector
@@ -598,6 +603,24 @@ def normalize_fundamentals(
         periods=[item["period"] for item in annual_eps],
     )
     add_evidence(
+        "growth.latest_annual_revenue_yoy",
+        annual_revenue_yoy,
+        label="Latest annual revenue growth",
+        unit="percent",
+    )
+    add_evidence(
+        "growth.latest_annual_net_profit_yoy",
+        annual_profit_yoy,
+        label="Latest annual net-profit growth",
+        unit="percent",
+    )
+    add_evidence(
+        "growth.latest_annual_eps_yoy",
+        annual_eps_yoy,
+        label="Latest annual basic EPS growth",
+        unit="percent",
+    )
+    add_evidence(
         "growth.latest_quarter_revenue_yoy",
         revenue_yoy,
         label="Latest available quarterly revenue YoY",
@@ -616,15 +639,15 @@ def normalize_fundamentals(
         unit="percentage_points",
     )
     add_evidence(
+        "margins.latest_annual_yoy_change",
+        annual_margin_change,
+        label="Latest annual operating-margin change",
+        unit="percentage_points",
+    )
+    add_evidence(
         "quality.cash_from_operations_to_pat_3y",
         cash_conversion,
         label="Average cash from operations divided by PAT",
-        unit="ratio",
-    )
-    add_evidence(
-        "quality.debt_to_equity",
-        debt_to_equity,
-        label="Latest debt to equity derived from statement line items",
         unit="ratio",
     )
     for ratio_name in ("roe", "roce", "roa", "p_e", "p_b", "ev_ebitda"):
@@ -649,7 +672,16 @@ def normalize_fundamentals(
             label="Recent corporate actions returned by Upstox",
         )
 
-    missing_data = ["quarterly_eps", "promoter_pledge"]
+    # Documented Upstox endpoints do not provide quarterly EPS, promoter
+    # pledge, or a canonical debt-to-equity metric. Do not infer those from
+    # unrelated statement totals or present their absence as a red flag.
+    provider_limitations = [
+        "quarterly_eps_yoy",
+        "quarterly_sales_yoy" if revenue_yoy is None else "quarterly_sales_yoy_history",
+        "debt_to_equity",
+        "promoter_pledge",
+    ]
+    missing_data: list[str] = []
     expected = {
         "annual_revenue_history": annual_revenue,
         "annual_net_profit_history": annual_net_profit,
@@ -663,8 +695,6 @@ def normalize_fundamentals(
     missing_data.extend(key for key, value in expected.items() if not value)
     if not financial_sector and cash_conversion is None:
         missing_data.append("cash_conversion")
-    if not financial_sector and debt_to_equity is None:
-        missing_data.append("debt_to_equity")
 
     latest_annual_period = (
         str(annual_revenue[0]["period"]) if annual_revenue else None
@@ -674,7 +704,7 @@ def normalize_fundamentals(
     )
 
     return {
-        "schema_version": "fundamental_facts_v1",
+        "schema_version": "fundamental_facts_v3",
         "company": {
             "isin": isin,
             "symbol": symbol,
@@ -725,6 +755,36 @@ def normalize_fundamentals(
             "industrial_leverage": (
                 "not_applicable" if financial_sector else "applicable"
             ),
+        },
+        "coverage": {
+            "annual_revenue": "available" if annual_revenue else "not_returned",
+            "annual_net_profit": "available" if annual_net_profit else "not_returned",
+            "annual_eps": "available" if annual_eps else "not_returned",
+            "quarterly_revenue": "available" if quarterly_revenue else "not_returned",
+            "quarterly_net_profit": "available" if quarterly_net_profit else "not_returned",
+            "cash_conversion": (
+                "not_applicable" if financial_sector else ("available" if cash_conversion is not None else "not_returned")
+            ),
+            "quarterly_eps": "unsupported_by_provider",
+            "quarterly_eps_yoy": "unsupported_by_provider",
+            "quarterly_sales_yoy": (
+                "available" if revenue_yoy is not None else "not_returned"
+            ),
+            "debt_to_equity": "unsupported_by_provider",
+            "promoter_pledge": "unsupported_by_provider",
+        },
+        "provider_limitations": provider_limitations,
+        # Keep every documented read-only section available to the review API.
+        # The OpenRouter packet intentionally does not include this raw detail.
+        "provider_sections": {
+            "company_profile": profile,
+            "income_yearly": yearly,
+            "income_quarterly": quarterly,
+            "balance_sheet": balance,
+            "cash_flow": cash,
+            "key_ratios": _data(bundle.get("key_ratios")),
+            "share_holdings": _data(bundle.get("share_holdings")),
+            "corporate_actions": _data(bundle.get("corporate_actions")),
         },
         "evidence": evidence,
         "missing_data": sorted(set(missing_data)),

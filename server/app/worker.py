@@ -7,6 +7,8 @@ from arq.connections import RedisSettings
 from app.config import settings
 from app.services.fundamental_pass import run_fundamental_pass
 from app.services.historical_fetcher import run_historical_sync
+from app.services.journal_ai_coach import run_journal_ai_coach
+from app.services.journal_processor import run_journal_dispatcher
 from app.services.reconciliation import run_reconciliation
 from app.services.screener import run_technical_scan
 from app.services.token_refresh import run_token_refresh
@@ -25,6 +27,8 @@ class WorkerSettings:
         run_historical_sync,
         run_token_refresh,
         run_reconciliation,
+        run_journal_dispatcher,
+        run_journal_ai_coach,
     ]
 
     # arq evaluates cron expressions in this explicit timezone.
@@ -73,6 +77,17 @@ class WorkerSettings:
                 max_tries=1,
             )
         )
+
+    cron_jobs.append(
+        cron(
+            run_journal_dispatcher,
+            name="journal_fill_dispatcher",
+            minute=set(range(60)),
+            second={0, 30},
+            timeout=120,
+            max_tries=1,
+        )
+    )
 
     job_timeout = 60 * 60
 

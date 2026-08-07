@@ -56,7 +56,7 @@ Do not substitute these without an explicit instruction from the user.
 | Broker/queue         | Redis                                             | (1) pub/sub for LTP fan-out, (2) hot LTP cache, (3) backing store for async job queue (`arq`)                                                        |
 | Market data & orders | Fyers API (REST + WebSocket)                      | See §2.1 for which Fyers surfaces we use                                                                                                            |
 | Fundamentals         | Upstox Company Fundamentals API                   | Read-only Analytics Token; ISIN-keyed snapshots for technical survivors only; never prices, sockets, or orders                                     |
-| LLM inference        | OpenRouter (`xiaomi/mimo-v2.5-pro`)               | Strict structured annotation over normalized snapshots; no tools and no money-path access                                                          |
+| LLM inference        | OpenRouter (`openai/gpt-5.6-luna-pro`)            | Strict structured annotation over normalized snapshots; no tools and no money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
 
 ### 2.1 Locked Fyers / trading product decisions
 
@@ -127,7 +127,8 @@ money-path workers into the API process.
 - **Tick ingestion worker** — the _only_ component holding the Fyers
   **market data** WebSocket (LTP/quote). Publishes ticks to Redis pub/sub and
   updates the hot LTP cache. Dynamic subscribe set = open positions ∪ active
-  watchlist ∪ open chart sessions. No business/trading logic.
+  watchlist ∪ open chart sessions ∪ **`NSE:NIFTY50-INDEX` benchmark** (P8
+  regime). No business/trading logic.
 - **Order gateway** — the _only_ component holding the Fyers **order**
   WebSocket. Receives async place/modify/cancel correlation (`id_fyers`,
   exchange ids, fills) and persists `order_events` / `order_fills`. Does not
@@ -159,9 +160,13 @@ money-path workers into the API process.
   never fought blindly.
 - **Kill switch service** — reads/writes `system_controls` and publishes a
   Redis control channel so workers react immediately. See §7.
-- **Journal / AI surfaces** — read-only over closed trades and notes. May
-  stream analysis to the UI (e.g. Vercel AI SDK via a thin backend context
-  endpoint). **Must not** expose tools that place or confirm orders.
+- **Journal / AI surfaces** — read-only over closed trades and notes. P8
+  automates journal entries from future app-managed fills only (no backfill).
+  First entry fill freezes chart, scanner, trade plan, and market regime;
+  closure computes P&L, charges, R-multiples, and exit outcome. Human review
+  fields (notes, tags, rating, actual charges) are journal-only writes.
+  AI coach runs async over filtered closed trades with strict structured
+  OpenRouter output — **must not** expose tools that place or confirm orders.
 - **Database (Postgres)** — system of record for instruments, candles,
   screening, watchlists, trade instructions, positions, order intents/events/
   fills, jobs, reconciliation, broker tokens, system controls/events.
@@ -181,6 +186,9 @@ without updating this file.
 | Position monitor worker      | positions / position_events; calls execution engine for exits   |
 | Screener / LLM jobs          | scan_runs, screening_results                                    |
 | Reconcile / scheduler        | job_runs, reconciliation_*, broker token refresh, system_events |
+| Journal processor (arq)      | journal_entries, journal_fill_outbox, market_regime_snapshots     |
+| Journal router (API)         | journal review fields, actual_charges, chart artifact uploads   |
+| Journal AI coach (arq)       | journal_ai_runs (read-only analysis, no money path)             |
 | Domain pure modules          | trailing rules, position state transitions, tick-size snap      |
 
 Frontend should be split by feature (`screener`, `chart`, `trade`,
@@ -394,7 +402,7 @@ Do not reorder phases without asking. Status tags: `[done]`, `[next]`,
 | **P5** | Position monitor SL/target/trail + kill switch wiring + heartbeats | `[done]` |
 | **P6** | Reconciliation cron | `[done]` |
 | **P7** | LLM fundamental pass on technical survivors | `[done]` — cached Upstox snapshots, deterministic normalization, strict OpenRouter verdicts, and manual-review UI |
-| **P8** | Journal + AI coach (read-only) | `[ ]` |
+| **P8** | Journal + AI coach (read-only) | `[done]` — future-fill outbox, frozen entry snapshots, regime tag at first fill, CNC charge estimates, chart PNG capture, period summaries, tradebook from journal, async AI coach with input-hash reuse |
 | **P9** | Nifty sentiment overlay (optional) | `[ ]` |
 
 Notes:

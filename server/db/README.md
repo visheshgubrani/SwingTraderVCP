@@ -13,6 +13,13 @@ architecture and component-boundary source of truth.
   correlation IDs, submission safety states, and replay-safe gateway events.
 - `migrations/003_p7_fundamental_pass.sql` - adds durable, read-only
   fundamental snapshots and links each LLM annotation to its exact input.
+- `migrations/004_p8_journal_ai.sql` - adds automated journal, chart artifact,
+  market-regime snapshot, and read-only AI-coach storage.
+- `migrations/005_screening_score_engine.sql` - adds the nullable, constrained
+  0-100 technical score while preserving legacy screening results.
+- `migrations/006_p7_reliable_fundamentals.sql` - adds ordered P7 job/item
+  state, deterministic scorecard projections, annotation cache, and separate
+  fundamentals processing/AI pause controls.
 
 ## Domain Layout
 

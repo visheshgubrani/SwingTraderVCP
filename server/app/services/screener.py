@@ -15,11 +15,13 @@ from app.services.indicators import (
     compute_technical_indicators,
     compute_relative_strength_ratings,
     compute_weighted_performance_score,
-    evaluate_minervini_criteria,
-    evaluate_vcp_shortlist_criteria,
 )
 from app.services.screening_config import TechnicalScreeningConfig
-from app.services.screening_ranker import rank_and_cap_shortlist
+from app.services.screening_ranker import (
+    fundamental_selection_status,
+    rank_and_cap_shortlist,
+)
+from app.services.technical_scoring import evaluate_technical_setup
 
 logger = logging.getLogger(__name__)
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
@@ -151,8 +153,8 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
         for inst_id, candles_list in candles_by_inst.items():
             if inst_id in stale_instrument_ids:
                 continue
-            if len(candles_list) < 252:
-                # Skip instruments without enough history for 52-week lookback
+            if len(candles_list) < config.minimum_history_days:
+                # Skip instruments without enough history for the score inputs.
                 continue
                 
             inst = inst_map[inst_id]
@@ -189,15 +191,9 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
         )
         rs_ratings = compute_relative_strength_ratings(prepared_stocks)
 
-        # Step 4c: Apply ordered gates and retain the full audit trail for each hit.
+        # Step 4c: Apply the small eligibility layer, then score every eligible setup.
         survivors = []
-        gate_counts = {
-            "liquidity": 0,
-            "stage_2": 0,
-            "pivot": 0,
-            "squeeze": 0,
-            "volume_dry_up": 0,
-        }
+        rejection_counts: Counter[str] = Counter()
         for s in prepared_stocks:
             inst_id = s["instrument_id"]
             inst = s["inst"]
@@ -205,90 +201,97 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             rs_rating = rs_ratings.get(inst_id, 0)
             
             try:
-                _, shortlist_metrics = evaluate_vcp_shortlist_criteria(df_ind, config)
-                shortlist_checks = shortlist_metrics.get("criteria_matches", {})
-                if not shortlist_checks.get("liquidity_adtv_above_threshold", False):
-                    continue
-                gate_counts["liquidity"] += 1
-
-                stage_2_passed, stage_2_metrics = evaluate_minervini_criteria(
+                scoring = evaluate_technical_setup(
                     df_ind,
-                    rs_rating,
+                    rs_rating=rs_rating,
+                    history_days=len(df_ind),
+                    config=config,
                 )
-                if not stage_2_passed:
+                if not scoring["eligible"]:
+                    for check, passed in scoring.get("eligibility", {}).items():
+                        if not passed:
+                            rejection_counts[check] += 1
                     continue
-                gate_counts["stage_2"] += 1
 
-                if not shortlist_checks.get("pivot_distance_within_threshold", False):
-                    continue
-                gate_counts["pivot"] += 1
-
-                if not shortlist_checks.get("squeeze_combo", False):
-                    continue
-                gate_counts["squeeze"] += 1
-
-                if not shortlist_checks.get("volume_dry_up", False):
-                    continue
-                gate_counts["volume_dry_up"] += 1
+                raw_inputs = scoring["raw_inputs"]
 
                 survivors.append({
                     "scan_run_id": scan_run_id,
                     "instrument_id": inst_id,
-                    "close_price": stage_2_metrics["close"],
-                    "sma_50": stage_2_metrics["sma_50"],
-                    "sma_200": stage_2_metrics["sma_200"],
-                    "avg_volume_20": stage_2_metrics["avg_volume_20"],
-                    "pct_from_52w_high": stage_2_metrics["pct_from_52w_high"],
-                    "rs_rating": rs_rating,
-                    "llm_status": (
-                        "queued"
-                        if settings.p7_fundamental_pass_enabled
-                        else "not_requested"
+                    "symbol": inst.symbol,
+                    "close_price": raw_inputs["close"],
+                    "sma_50": raw_inputs["sma_50"],
+                    "sma_200": raw_inputs["sma_200"],
+                    "avg_volume_20": int(df_ind.iloc[-1]["avg_volume_20"]),
+                    "pct_from_52w_high": (
+                        raw_inputs["distance_52w_high_pct"] / 100
                     ),
+                    "technical_score": scoring["score"],
+                    "rs_rating": rs_rating,
                     "technical_metrics": {
-                        "sma_150": stage_2_metrics["sma_150"],
-                        "sma_200_yesterday": stage_2_metrics["sma_200_yesterday"],
-                        "sma_200_prev_22": stage_2_metrics["sma_200_prev_22"],
-                        "sma_200_prev_110": stage_2_metrics["sma_200_prev_110"],
-                        "high_52w": stage_2_metrics["high_52w"],
-                        "low_52w": stage_2_metrics["low_52w"],
+                        "sma_150": raw_inputs["sma_150"],
+                        "sma_200_yesterday": float(df_ind.iloc[-1]["sma_200_prev"]),
+                        "sma_200_prev_22": raw_inputs["sma_200_prev_22"],
+                        "sma_200_prev_110": (
+                            float(df_ind.iloc[-1]["sma_200_prev_110"])
+                            if not pd.isna(df_ind.iloc[-1]["sma_200_prev_110"])
+                            else None
+                        ),
+                        "high_52w": raw_inputs["high_52w"],
+                        "low_52w": raw_inputs["low_52w"],
                         "rs_rating": rs_rating,
                         "perf_score": float(s["perf_score"]) if not pd.isna(s["perf_score"]) else None,
-                        "adtv_crore": shortlist_metrics["adtv_crore"],
+                        "adtv_crore": raw_inputs["adtv_crore"],
                         "atr_10": float(df_ind.iloc[-1]["atr_10"]),
                         "atr_50": float(df_ind.iloc[-1]["atr_50"]),
-                        "atr_ratio": shortlist_metrics["atr_ratio"],
-                        "atr_ratio_3m_low": shortlist_metrics["atr_ratio_3m_low"],
-                        "bb_width": shortlist_metrics["bb_width"],
-                        "bb_width_20th_pct": shortlist_metrics["bb_width_20th_pct"],
-                        "avg_volume_10": shortlist_metrics["avg_volume_10"],
-                        "avg_volume_50": shortlist_metrics["avg_volume_50"],
-                        "volume_dry_up_ratio": shortlist_metrics["volume_dry_up_ratio"],
-                        "criteria_matches": {
-                            **stage_2_metrics["criteria_matches"],
-                            **shortlist_checks,
+                        "atr_ratio": raw_inputs["atr_ratio"],
+                        "atr_ratio_3m_low": raw_inputs["atr_ratio_3m_low"],
+                        "atr_proximity_factor": raw_inputs["atr_proximity_factor"],
+                        "bb_width": raw_inputs["bb_width"],
+                        "bb_width_20th_pct": float(
+                            df_ind.iloc[-1]["bb_width_20th_pct"]
+                        ),
+                        "bb_width_percentile": raw_inputs["bb_width_percentile"],
+                        "avg_volume_10": float(df_ind.iloc[-1]["avg_volume_10"]),
+                        "avg_volume_50": float(df_ind.iloc[-1]["avg_volume_50"]),
+                        "volume_dry_up_ratio": raw_inputs["volume_dry_up_ratio"],
+                        "score": {
+                            "version": config.pipeline_version,
+                            "total": scoring["score"],
+                            "grade": scoring["grade"],
+                            "components": scoring["components"],
                         },
+                        "eligibility": scoring["eligibility"],
+                        "core_checks": scoring["core_checks"],
+                        "criteria_matches": scoring["core_checks"],
                     },
                 })
             except Exception as eval_err:
                 logger.exception("Error evaluating shortlist criteria for %s: %s", inst.symbol, eval_err)
 
-        # Step 4d: Highest RS first; deterministic pivot-distance tie-break; cap the shortlist.
+        # Step 4d: Score first, deterministic tie-breaks, and a broad top-50 cap.
         survivors = rank_and_cap_shortlist(survivors, config.shortlist_limit)
         for survivor in survivors:
+            fundamental_selected, llm_status = fundamental_selection_status(
+                survivor["result_rank"],
+                limit=config.fundamental_limit,
+                enabled=settings.p7_fundamental_pass_enabled,
+            )
+            survivor["llm_status"] = llm_status
+            survivor["technical_metrics"]["fundamental_selected"] = (
+                fundamental_selected
+            )
             survivor["technical_metrics"] = json.dumps(survivor["technical_metrics"])
             survivor.pop("rs_rating")
+            survivor.pop("symbol")
 
         logger.info(
-            "Gate counts: liquidity=%s, stage_2=%s, pivot=%s, squeeze=%s, "
-            "volume_dry_up=%s. Shortlist retained=%s (cap=%s).",
-            gate_counts["liquidity"],
-            gate_counts["stage_2"],
-            gate_counts["pivot"],
-            gate_counts["squeeze"],
-            gate_counts["volume_dry_up"],
+            "Technical score eligibility rejections=%s. Ranked setups retained=%s "
+            "(cap=%s, fundamental limit=%s).",
+            dict(rejection_counts),
             len(survivors),
             config.shortlist_limit,
+            config.fundamental_limit,
         )
 
         # 5. Insert results in batch
@@ -300,6 +303,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         instrument_id,
                         result_rank,
                         technical_passed,
+                        technical_score,
                         close_price,
                         sma_50,
                         sma_200,
@@ -313,6 +317,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         :instrument_id,
                         :result_rank,
                         true,
+                        :technical_score,
                         :close_price,
                         :sma_50,
                         :sma_200,
@@ -340,7 +345,9 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                 success_query,
                 {
                     "scan_run_id": scan_run_id,
-                    "llm_config": json.dumps(p7_run_config()),
+                    "llm_config": json.dumps(
+                        p7_run_config(technical_rank_limit=config.fundamental_limit)
+                    ),
                 },
             )
             await session.commit()
@@ -348,7 +355,11 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
         # P7 is intentionally a separate background job. Enqueue failures are
         # recorded on the annotations and never turn a valid technical scan
         # into a failed scan.
-        if survivors and settings.p7_fundamental_pass_enabled:
+        if (
+            survivors
+            and settings.p7_fundamental_pass_enabled
+            and config.fundamental_limit > 0
+        ):
             redis = ctx.get("redis")
             try:
                 if redis is None:
@@ -365,7 +376,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                 )
                 failure_flags = json.dumps(
                     {
-                        "schema_version": "fundamental_verdict_v1",
+                        "schema_version": "fundamental_result_v3",
                         "summary": (
                             "Fundamental annotation could not be queued; "
                             "manual review remains available."

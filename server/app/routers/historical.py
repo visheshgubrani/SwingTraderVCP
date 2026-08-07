@@ -15,7 +15,9 @@ from app.services.historical_fetcher import (
     SYNC_CANCEL_KEY,
     SyncProgress,
     get_sync_status as get_stored_sync_status,
+    latest_completed_eod_date,
     save_sync_status,
+    sync_status_is_current,
 )
 
 router = APIRouter(prefix="/historical", tags=["historical"])
@@ -63,6 +65,7 @@ async def trigger_sync(
         run_id=run_id,
         state="queued",
         triggered_by="manual",
+        target_date=latest_completed_eod_date().isoformat(),
     )
     progress.log("Manual incremental EOD sync queued.")
     await save_sync_status(redis, progress)
@@ -146,6 +149,11 @@ async def get_sync_status(
     latest_row = latest_result.one_or_none()
 
     status = await get_stored_sync_status(request.app.state.redis)
+    expected_target_date = latest_completed_eod_date()
+    status["data_current"] = sync_status_is_current(
+        status,
+        expected_target_date,
+    )
     status["db_metrics"] = {
         "total_candles": candles_count,
         "nifty500_instruments": nifty500_count,
@@ -157,6 +165,7 @@ async def get_sync_status(
         "symbols_at_latest_date": (
             latest_row.symbols_at_latest_date if latest_row else 0
         ),
+        "expected_latest_candle_date": expected_target_date.isoformat(),
     }
     status["schedule"] = {
         "enabled": settings.eod_sync_enabled,

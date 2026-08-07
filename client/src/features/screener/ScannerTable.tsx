@@ -1,7 +1,4 @@
-import { Fragment } from "react"
 import {
-  AlertTriangle,
-  CheckCircle,
   LineChart,
   Play,
   XCircle,
@@ -20,7 +17,12 @@ import {
   NativeSelectOption,
 } from "@/components/ui/native-select"
 import { Spinner } from "@/components/ui/spinner"
-import type { ScanResult, ScanRun } from "@/features/screener/api"
+import type {
+  ScanResult,
+  ScanRun,
+  TechnicalScoreGrade,
+} from "@/features/screener/api"
+import { cn } from "@/lib/utils"
 
 interface ScannerTableProps {
   items: ScanResult[]
@@ -46,152 +48,14 @@ function formatRun(run: ScanRun) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(run.created_at))
-  return `${date} · ${run.status} · ${run.passing_count} hits`
+  return `${date} · ${run.status} · ${run.passing_count} setups`
 }
 
-function FundamentalStatus({ result }: { result: ScanResult }) {
-  if (result.llm_status === "queued" || result.llm_status === "running") {
-    return (
-      <Badge variant="secondary">
-        <Spinner data-icon="inline-start" />
-        {result.llm_status}
-      </Badge>
-    )
-  }
-  if (result.llm_status === "failed") {
-    return (
-      <Badge variant="destructive">
-        <XCircle data-icon="inline-start" />
-        Failed
-      </Badge>
-    )
-  }
-  if (result.llm_status === "skipped") {
-    return (
-      <Badge variant="outline">
-        <AlertTriangle data-icon="inline-start" />
-        Skipped
-      </Badge>
-    )
-  }
-  if (result.llm_status === "not_requested") {
-    return <Badge variant="outline">Not requested</Badge>
-  }
-  if (result.llm_verdict === "pass") {
-    return (
-      <Badge>
-        <CheckCircle data-icon="inline-start" />
-        Pass
-      </Badge>
-    )
-  }
-  if (result.llm_verdict === "fail") {
-    return (
-      <Badge variant="destructive">
-        <XCircle data-icon="inline-start" />
-        Fail
-      </Badge>
-    )
-  }
-  return (
-    <Badge variant="secondary">
-      <AlertTriangle data-icon="inline-start" />
-      Review
-    </Badge>
-  )
-}
-
-function criterionVariant(
-  status: NonNullable<ScanResult["llm_flags"]["criteria"]>[number]["status"],
-) {
-  if (status === "negative") return "destructive" as const
-  if (status === "positive") return "default" as const
-  if (status === "mixed") return "secondary" as const
+function gradeVariant(grade: TechnicalScoreGrade | null) {
+  if (grade === "A") return "default" as const
+  if (grade === "B") return "secondary" as const
+  if (grade === "D") return "destructive" as const
   return "outline" as const
-}
-
-function FundamentalDetails({ result }: { result: ScanResult }) {
-  const flags = result.llm_flags
-  const provenance = result.fundamentals_provenance
-  return (
-    <div className="flex flex-col gap-2 px-3 py-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <strong>Fundamental annotation</strong>
-        <FundamentalStatus result={result} />
-        {provenance && (
-          <Badge
-            title={`Snapshot fetched ${new Intl.DateTimeFormat("en-IN", {
-              dateStyle: "medium",
-              timeStyle: "short",
-            }).format(new Date(provenance.fetched_at))}`}
-            variant="outline"
-          >
-            {provenance.provider} · {provenance.statement_type}
-          </Badge>
-        )}
-        {provenance?.latest_quarterly_period && (
-          <Badge variant="outline">
-            Quarter {provenance.latest_quarterly_period}
-          </Badge>
-        )}
-        {provenance?.latest_annual_period && (
-          <Badge variant="outline">
-            Annual {provenance.latest_annual_period}
-          </Badge>
-        )}
-      </div>
-
-      <p className="max-w-5xl text-muted-foreground">
-        {flags.summary ??
-          "No fundamental explanation is available for this result."}
-      </p>
-
-      {flags.criteria && flags.criteria.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {flags.criteria.map((criterion) => (
-            <Badge
-              key={criterion.name}
-              title={`${criterion.explanation}${
-                criterion.evidence_keys.length
-                  ? ` Evidence: ${criterion.evidence_keys.join(", ")}`
-                  : ""
-              }`}
-              variant={criterionVariant(criterion.status)}
-            >
-              {criterion.name.replaceAll("_", " ")} · {criterion.status}
-            </Badge>
-          ))}
-        </div>
-      )}
-
-      {flags.red_flags && flags.red_flags.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-muted-foreground">Red flags:</span>
-          {flags.red_flags.map((flag) => (
-            <Badge key={flag} variant="destructive">
-              {flag}
-            </Badge>
-          ))}
-        </div>
-      )}
-
-      {flags.missing_data && flags.missing_data.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-muted-foreground">Missing:</span>
-          {flags.missing_data.map((field) => (
-            <Badge key={field} variant="outline">
-              {field.replaceAll("_", " ")}
-            </Badge>
-          ))}
-        </div>
-      )}
-
-      <span className="text-[10px] text-muted-foreground">
-        Read-only annotation. It does not confirm, reject, size, or place a
-        trade.
-      </span>
-    </div>
-  )
 }
 
 export function ScannerTable({
@@ -216,9 +80,9 @@ export function ScannerTable({
     <div className="flex h-full flex-col bg-background font-mono text-xs">
       <div className="flex min-h-10 shrink-0 items-center justify-between gap-3 border-b bg-card px-3 py-1.5">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="font-semibold">VCP SHORTLIST</span>
+          <span className="font-semibold">VCP SCOREBOARD</span>
           <Badge variant="outline">
-            {activeRun?.passing_count ?? items.length} survivors
+            {activeRun?.passing_count ?? items.length} ranked setups
           </Badge>
           <NativeSelect
             aria-label="Scanner run history"
@@ -248,11 +112,10 @@ export function ScannerTable({
         <div className="flex items-center gap-2">
           {workflowMessage && (
             <span
-              className={
-                workflowError
-                  ? "max-w-96 truncate text-destructive"
-                  : "max-w-96 truncate text-muted-foreground"
-              }
+              className={cn(
+                "max-w-96 truncate",
+                workflowError ? "text-destructive" : "text-muted-foreground",
+              )}
               title={workflowMessage}
             >
               {workflowMessage}
@@ -270,7 +133,7 @@ export function ScannerTable({
             ) : (
               <Play data-icon="inline-start" />
             )}
-            {isRunning ? "SYNCING / SCANNING" : "RUN EOD SCAN"}
+            {isRunning ? "SYNCING / SCORING" : "RUN EOD SCAN"}
           </Button>
         </div>
       </div>
@@ -312,16 +175,16 @@ export function ScannerTable({
         ) : activeRun?.status === "queued" || activeRun?.status === "running" ? (
           <div className="flex h-full items-center justify-center gap-2 text-muted-foreground">
             <Spinner />
-            Technical scanner is {activeRun.status}…
+            Technical score engine is {activeRun.status}…
           </div>
         ) : items.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
             <LineChart aria-hidden="true" className="text-muted-foreground" />
-            <strong>No shortlisted stocks</strong>
+            <strong>No eligible setups</strong>
             <span className="text-muted-foreground">
               {activeRun
-                ? "This run completed without a stock passing every technical gate."
-                : "Run the EOD scanner to build the first real shortlist."}
+                ? "This run completed without a stock meeting the broad technical eligibility rules."
+                : "Run the EOD scanner to build the first scored shortlist."}
             </span>
           </div>
         ) : (
@@ -329,6 +192,8 @@ export function ScannerTable({
             <thead className="sticky top-0 border-b bg-card text-[10px] uppercase text-muted-foreground">
               <tr>
                 <th className="w-12 px-3 py-1.5 text-center">Rank</th>
+                <th className="px-3 py-1.5 text-right">Score</th>
+                <th className="px-3 py-1.5 text-center">Grade</th>
                 <th className="px-3 py-1.5">Symbol</th>
                 <th className="px-3 py-1.5 text-right">Close</th>
                 <th className="px-3 py-1.5 text-right">SMA 50</th>
@@ -336,7 +201,7 @@ export function ScannerTable({
                 <th className="px-3 py-1.5 text-right">Below 52W high</th>
                 <th className="px-3 py-1.5 text-center">RS</th>
                 <th className="px-3 py-1.5 text-center">Setup</th>
-                <th className="px-3 py-1.5 text-center">LLM funda</th>
+                <th className="px-3 py-1.5 text-center">Funda</th>
                 <th className="w-28 px-3 py-1.5 text-center">Action</th>
               </tr>
             </thead>
@@ -344,79 +209,84 @@ export function ScannerTable({
               {items.map((row) => {
                 const selected = selectedResultId === row.id
                 return (
-                  <Fragment key={row.id}>
-                    <tr
-                      className={
-                        selected
-                          ? "cursor-pointer bg-accent text-accent-foreground"
-                          : "cursor-pointer hover:bg-muted/50"
-                      }
-                      onClick={() => onSelectResult(row)}
-                    >
-                      <td className="px-3 py-2 text-center font-semibold">
-                        #{row.rank}
-                      </td>
-                      <td className="px-3 py-2">
-                        <strong className="block">{row.symbol}</strong>
-                        <span className="block max-w-48 truncate text-[10px] text-muted-foreground">
-                          {row.name ?? row.fyers_symbol}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 text-right font-semibold">
-                        ₹{row.close_price.toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2 text-right text-muted-foreground">
-                        ₹{row.sma_50.toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2 text-right text-muted-foreground">
-                        ₹{row.sma_200.toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {(row.pct_from_52w_high * 100).toFixed(2)}%
-                      </td>
-                      <td className="px-3 py-2 text-center">{row.rs_rating}</td>
-                      <td className="px-3 py-2 text-center">
-                        <Badge variant="outline">Shortlisted</Badge>
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        <FundamentalStatus result={row} />
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        <div className="flex items-center justify-center gap-1">
-                          <Button
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              onSelectResult(row)
-                            }}
-                            size="icon-sm"
-                            title="Load chart"
-                            type="button"
-                            variant="ghost"
-                          >
-                            <LineChart />
-                          </Button>
-                          <Button
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              onPlanTrade?.(row)
-                            }}
-                            size="sm"
-                            type="button"
-                            variant="outline"
-                          >
-                            Plan
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                    {selected && (
-                      <tr className="bg-muted/30">
-                        <td colSpan={10}>
-                          <FundamentalDetails result={row} />
-                        </td>
-                      </tr>
+                  <tr
+                    className={cn(
+                      "cursor-pointer transition-colors",
+                      selected
+                        ? "bg-accent text-accent-foreground font-medium"
+                        : "hover:bg-muted/50",
                     )}
-                  </Fragment>
+                    key={row.id}
+                    onClick={() => onSelectResult(row)}
+                  >
+                    <td className="px-3 py-2 text-center font-semibold">
+                      #{row.rank}
+                    </td>
+                    <td className="px-3 py-2 text-right font-semibold">
+                      {row.technical_score?.toFixed(2) ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <Badge variant={gradeVariant(row.score_grade)}>
+                        {row.score_grade ?? "Legacy"}
+                      </Badge>
+                    </td>
+                    <td className="px-3 py-2">
+                      <strong className="block">{row.symbol}</strong>
+                      <span className="block max-w-48 truncate text-[10px] text-muted-foreground">
+                        {row.name ?? row.fyers_symbol}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-right font-semibold">
+                      ₹{row.close_price.toFixed(2)}
+                    </td>
+                    <td className="px-3 py-2 text-right text-muted-foreground">
+                      ₹{row.sma_50.toFixed(2)}
+                    </td>
+                    <td className="px-3 py-2 text-right text-muted-foreground">
+                      ₹{row.sma_200.toFixed(2)}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {(row.pct_from_52w_high * 100).toFixed(2)}%
+                    </td>
+                    <td className="px-3 py-2 text-center">{row.rs_rating}</td>
+                    <td className="px-3 py-2 text-center">
+                      <Badge variant="outline">
+                        {row.technical_score === null ? "Legacy" : "Scored"}
+                      </Badge>
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <Badge variant={row.fundamental_selected ? "secondary" : "outline"}>
+                        {row.fundamental_selected ? "Top 20" : "Technical only"}
+                      </Badge>
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <div className="flex items-center justify-center gap-1">
+                        <Button
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onSelectResult(row)
+                          }}
+                          size="icon-sm"
+                          title="Load chart"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <LineChart data-icon="inline-start" />
+                        </Button>
+                        <Button
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onPlanTrade?.(row)
+                          }}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          Plan
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
                 )
               })}
             </tbody>

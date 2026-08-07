@@ -11,9 +11,49 @@ export interface KillSwitchState {
   redis_published: boolean | null
 }
 
+export interface FundamentalControlState {
+  control_key: string
+  enabled: boolean
+  paused: boolean
+  reason: string | null
+  changed_by: string
+  changed_at: string
+  redis_published: boolean | null
+}
+
+export interface FundamentalControlsState {
+  processing: FundamentalControlState
+  ai: FundamentalControlState
+}
+
 export const systemControlKeys = {
   all: ["system-controls"] as const,
   killSwitch: () => [...systemControlKeys.all, "global-kill-switch"] as const,
+  fundamentals: () => [...systemControlKeys.all, "fundamentals"] as const,
+}
+
+export function useFundamentalControls() {
+  return useQuery({
+    queryKey: systemControlKeys.fundamentals(),
+    queryFn: () => apiRequest<FundamentalControlsState>("/system/fundamentals-controls"),
+    staleTime: 2_000,
+    refetchInterval: 5_000,
+    retry: 1,
+  })
+}
+
+export function useSetFundamentalControl() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ control, paused, reason }: { control: "processing" | "ai"; paused: boolean; reason: string }) =>
+      apiRequest<FundamentalControlState>(`/system/fundamentals-controls/${control}`, {
+        method: "PUT",
+        body: JSON.stringify({ paused, reason }),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: systemControlKeys.fundamentals() })
+    },
+  })
 }
 
 export function useKillSwitch() {

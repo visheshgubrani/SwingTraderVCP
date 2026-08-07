@@ -153,6 +153,9 @@ async def confirm_instruction(
                     request.app.state.redis,
                     [result.position.symbol],
                 )
+                from app.services.journal_outbox import trigger_journal_dispatcher
+
+                await trigger_journal_dispatcher(request.app.state.redis)
             except Exception as exc:
                 await db.rollback()
                 _raise_trade_http_error(exc)

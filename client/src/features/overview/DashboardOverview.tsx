@@ -138,7 +138,7 @@ export function DashboardOverview({
           </strong>
           <span className="text-muted-foreground">
             {latestScan
-              ? `${latestScan.passing_count} shortlisted · ${formatDateTime(latestScan.created_at)}`
+              ? `${latestScan.passing_count} ranked setups · ${formatDateTime(latestScan.created_at)}`
               : "Run the EOD scanner from the chart workspace"}
           </span>
           {latestScan && (

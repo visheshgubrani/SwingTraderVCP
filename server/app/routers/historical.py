@@ -17,6 +17,7 @@ from app.services.historical_fetcher import (
     get_sync_status as get_stored_sync_status,
     latest_completed_eod_date,
     save_sync_status,
+    sync_status_blocks_enqueue,
     sync_status_is_current,
 )
 
@@ -46,7 +47,7 @@ async def trigger_sync(
     """
     redis = request.app.state.redis
     current_status = await get_stored_sync_status(redis)
-    if current_status["state"] in {"queued", "running"}:
+    if await sync_status_blocks_enqueue(redis, current_status):
         raise HTTPException(
             status_code=409,
             detail="An EOD sync is already queued or running.",
@@ -61,11 +62,13 @@ async def trigger_sync(
         )
 
     run_id = str(uuid.uuid4())
+    enqueued_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     progress = SyncProgress(
         run_id=run_id,
         state="queued",
         triggered_by="manual",
         target_date=latest_completed_eod_date().isoformat(),
+        enqueued_at=enqueued_at,
     )
     progress.log("Manual incremental EOD sync queued.")
     await save_sync_status(redis, progress)

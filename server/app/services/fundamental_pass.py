@@ -1,7 +1,8 @@
-"""Ordered P7 worker: Upstox facts -> deterministic rules -> optional AI explanation."""
+"""Ordered P7 worker: Upstox facts -> authoritative rules -> optional AI opinion."""
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -22,7 +23,12 @@ from app.services.fundamental_data import (
     canonical_json_hash,
     normalize_fundamentals,
 )
-from app.services.fundamental_llm import FundamentalLLMError, OpenRouterFundamentalClient
+from app.services.fundamental_llm import (
+    FundamentalLLMError,
+    FundamentalLLMResult,
+    OpenRouterFundamentalClient,
+    PreparedFundamentalRequest,
+)
 from app.services.fundamental_rules import FACTS_SCHEMA_VERSION, RUBRIC_VERSION, score_minervini_inspired
 
 logger = logging.getLogger(__name__)
@@ -62,7 +68,7 @@ def p7_run_config(*, technical_rank_limit: int = 20) -> dict[str, Any]:
         "reasoning_enabled": True,
         "reasoning_effort": settings.openrouter_reasoning_effort,
         "reasoning_excluded": True,
-        "response_schema": "fundamental_explanation_v3",
+        "response_schema": "fundamental_second_opinion_v1",
         "rubric_version": RUBRIC_VERSION,
         "token_budget": settings.fundamental_run_token_budget,
         "selection": {"source": "technical_score_rank", "rank_limit": technical_rank_limit},
@@ -130,6 +136,50 @@ async def _ensure_analysis_run(scan_run_id: str, job_id: str) -> UUID:
         run_id = inserted.scalar_one()
         await db.commit()
         return run_id
+
+
+async def _finish_unprocessed_results(
+    scan_run_id: str,
+    *,
+    llm_status: str,
+    ai_status: str,
+    reason: str,
+) -> None:
+    """Move untouched queued results to a terminal state so UI polling stops."""
+    async with async_session() as db:
+        await db.execute(
+            text(
+                """
+                UPDATE screening_results
+                SET
+                    llm_status = :llm_status,
+                    ai_status = :ai_status,
+                    llm_flags = COALESCE(llm_flags, '{}'::jsonb)
+                        || CAST(:operational_state AS jsonb)
+                WHERE scan_run_id = :scan_run_id
+                  AND technical_passed = true
+                  AND COALESCE(
+                        (technical_metrics ->> 'fundamental_selected')::boolean,
+                        false
+                  ) = true
+                  AND llm_status IN ('queued', 'running')
+                """
+            ),
+            {
+                "scan_run_id": scan_run_id,
+                "llm_status": llm_status,
+                "ai_status": ai_status,
+                "operational_state": json.dumps(
+                    {
+                        "operational_status": {
+                            "status": ai_status,
+                            "message": reason,
+                        }
+                    }
+                ),
+            },
+        )
+        await db.commit()
 
 
 async def _seed_items(analysis_run_id: UUID, survivors: list[Survivor]) -> None:
@@ -240,8 +290,50 @@ async def _cached_snapshot(survivor: Survivor) -> Snapshot | None:
         return Snapshot(row.id, dict(row.normalized_facts or {}), row.fetched_at, row.latest_annual_period, row.latest_quarterly_period, True)
 
 
-async def _get_snapshot(survivor: Survivor, client: UpstoxFundamentalsClient, *, force_refresh: bool = False) -> Snapshot:
-    cached = None if force_refresh else await _cached_snapshot(survivor)
+async def _linked_snapshot(survivor: Survivor) -> Snapshot | None:
+    """Reuse the result's reproducible snapshot regardless of cache TTL."""
+
+    async with async_session() as db:
+        result = await db.execute(
+            text(
+                """
+                SELECT f.id, f.normalized_facts, f.fetched_at,
+                       f.latest_annual_period, f.latest_quarterly_period
+                FROM screening_results s
+                JOIN fundamental_snapshots f ON f.id = s.fundamental_snapshot_id
+                WHERE s.id = :result_id
+                  AND f.provider = 'upstox'
+                  AND f.statement_type = 'consolidated'
+                  AND f.normalized_facts ->> 'schema_version' = :facts_schema_version
+                """
+            ),
+            {
+                "result_id": survivor.result_id,
+                "facts_schema_version": FACTS_SCHEMA_VERSION,
+            },
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        return Snapshot(
+            row.id,
+            dict(row.normalized_facts or {}),
+            row.fetched_at,
+            row.latest_annual_period,
+            row.latest_quarterly_period,
+            True,
+        )
+
+
+async def _get_snapshot(
+    survivor: Survivor,
+    client: UpstoxFundamentalsClient,
+    *,
+    force_refresh: bool = False,
+) -> Snapshot:
+    cached = None
+    if not force_refresh:
+        cached = await _linked_snapshot(survivor) or await _cached_snapshot(survivor)
     if cached:
         return cached
     if not survivor.isin:
@@ -280,61 +372,284 @@ async def _run_tokens(analysis_run_id: UUID) -> int:
 
 async def _cached_annotation(analysis_key: str) -> dict[str, Any] | None:
     async with async_session() as db:
-        result = await db.execute(text("SELECT payload, request_id, usage, cost FROM fundamental_annotations WHERE analysis_key = :analysis_key"), {"analysis_key": analysis_key})
+        result = await db.execute(
+            text(
+                """
+                SELECT payload, request_id, usage, cost, model,
+                       reasoning_effort, prompt_version, input_hash
+                FROM fundamental_annotations
+                WHERE analysis_key = :analysis_key
+                """
+            ),
+            {"analysis_key": analysis_key},
+        )
         row = result.mappings().one_or_none()
         return dict(row) if row else None
 
 
-async def _store_annotation(analysis_key: str, client: OpenRouterFundamentalClient, input_hash: str, result: Any) -> None:
+async def _start_ai_attempt(
+    analysis_run_id: UUID,
+    survivor: Survivor,
+    client: OpenRouterFundamentalClient,
+    prepared: PreparedFundamentalRequest,
+) -> tuple[UUID, int]:
+    async with async_session() as db:
+        result = await db.execute(
+            text(
+                """
+                WITH analysis_item AS (
+                    SELECT id
+                    FROM fundamental_analysis_items
+                    WHERE analysis_run_id = :analysis_run_id
+                      AND screening_result_id = :result_id
+                ), numbered AS (
+                    SELECT analysis_item.id AS analysis_item_id,
+                           COALESCE(MAX(attempt.attempt_number), 0) + 1 AS attempt_number
+                    FROM analysis_item
+                    LEFT JOIN fundamental_ai_attempts attempt
+                      ON attempt.analysis_item_id = analysis_item.id
+                    GROUP BY analysis_item.id
+                )
+                INSERT INTO fundamental_ai_attempts (
+                    analysis_item_id, attempt_number, status, model,
+                    reasoning_effort, prompt_version, response_schema,
+                    input_hash, request_payload
+                )
+                SELECT analysis_item_id, attempt_number, 'started', :model,
+                       :reasoning, :prompt, 'fundamental_second_opinion_v1',
+                       :input_hash, CAST(:request_payload AS jsonb)
+                FROM numbered
+                RETURNING id, attempt_number
+                """
+            ),
+            {
+                "analysis_run_id": analysis_run_id,
+                "result_id": survivor.result_id,
+                "model": client.model,
+                "reasoning": client.reasoning_effort,
+                "prompt": client.prompt_version,
+                "input_hash": prepared.input_hash,
+                "request_payload": json.dumps(
+                    prepared.request_payload,
+                    separators=(",", ":"),
+                ),
+            },
+        )
+        row = result.one()
+        await db.commit()
+        return row.id, int(row.attempt_number)
+
+
+async def _finish_ai_attempt(
+    attempt_id: UUID,
+    *,
+    status: str,
+    result: FundamentalLLMResult | None = None,
+    error: FundamentalLLMError | None = None,
+) -> None:
+    response_payload = result.response_payload if result else (
+        error.response_payload if error else None
+    )
+    usage = result.usage if result else (error.usage if error else {})
+    cost = result.cost if result else (error.cost if error else 0.0)
+    request_id = result.request_id if result else (error.request_id if error else None)
+    http_status = error.http_status if error else 200
     async with async_session() as db:
         await db.execute(
-            text("""INSERT INTO fundamental_annotations (analysis_key, model, reasoning_effort, prompt_version, input_hash, payload, request_id, usage, cost)
-                    VALUES (:key, :model, :reasoning, :prompt, :input_hash, CAST(:payload AS jsonb), :request_id, CAST(:usage AS jsonb), :cost)
-                    ON CONFLICT (analysis_key) DO NOTHING"""),
-            {"key": analysis_key, "model": client.model, "reasoning": client.reasoning_effort, "prompt": client.prompt_version, "input_hash": input_hash, "payload": json.dumps(result.explanation.model_dump(mode="json")), "request_id": result.request_id, "usage": json.dumps(result.usage), "cost": result.cost},
+            text(
+                """
+                UPDATE fundamental_ai_attempts
+                SET status = :status,
+                    response_payload = CAST(:response_payload AS jsonb),
+                    http_status = :http_status,
+                    request_id = :request_id,
+                    usage = CAST(:usage AS jsonb),
+                    cost = :cost,
+                    error_code = :error_code,
+                    error_message = :error_message,
+                    completed_at = now()
+                WHERE id = :attempt_id
+                """
+            ),
+            {
+                "attempt_id": attempt_id,
+                "status": status,
+                "response_payload": (
+                    json.dumps(response_payload, separators=(",", ":"))
+                    if response_payload is not None
+                    else None
+                ),
+                "http_status": http_status,
+                "request_id": request_id,
+                "usage": json.dumps(usage, separators=(",", ":")),
+                "cost": cost,
+                "error_code": type(error).__name__ if error else None,
+                "error_message": str(error)[:500] if error else None,
+            },
         )
         await db.commit()
 
 
-async def _update_result(
+async def _store_annotation(
+    analysis_key: str,
+    client: OpenRouterFundamentalClient,
+    result: FundamentalLLMResult,
+    source_attempt_id: UUID,
+) -> None:
+    async with async_session() as db:
+        await db.execute(
+            text("""INSERT INTO fundamental_annotations (analysis_key, model, reasoning_effort, prompt_version, input_hash, payload, request_id, usage, cost, source_attempt_id)
+                    VALUES (:key, :model, :reasoning, :prompt, :input_hash, CAST(:payload AS jsonb), :request_id, CAST(:usage AS jsonb), :cost, :source_attempt_id)
+                    ON CONFLICT (analysis_key) DO NOTHING"""),
+            {
+                "key": analysis_key,
+                "model": client.model,
+                "reasoning": client.reasoning_effort,
+                "prompt": client.prompt_version,
+                "input_hash": result.input_hash,
+                "payload": json.dumps(result.opinion.model_dump(mode="json")),
+                "request_id": result.request_id,
+                "usage": json.dumps(result.usage),
+                "cost": result.cost,
+                "source_attempt_id": source_attempt_id,
+            },
+        )
+        await db.commit()
+
+
+async def _update_fundamental_result(
     survivor: Survivor,
     *,
     snapshot: Snapshot | None,
     scorecard: dict[str, Any],
-    ai_status: str,
-    explanation: dict[str, Any] | None = None,
     error: Exception | None = None,
-    ai_skip_reason: str | None = None,
 ) -> None:
-    strengths = (explanation or {}).get("strengths")
-    if strengths is None:
-        strengths = (explanation or {}).get("highlights", [])
     flags = {
-        "schema_version": "fundamental_result_v3",
+        "schema_version": "fundamental_result_v4",
         "rules": scorecard,
         "assessment": scorecard,
-        "summary": (explanation or {}).get("summary") or "Minervini-inspired fundamental fit is available.",
-        "strengths": strengths,
-        "highlights": strengths,
-        "risks": (explanation or {}).get("risks", []),
-        "review_focus": (explanation or {}).get("review_focus", []),
+        "summary": "Minervini-inspired fundamental fit is available." if snapshot else None,
+        "strengths": [],
+        "highlights": [],
+        "risks": [],
+        "review_focus": [],
         "criteria": scorecard.get("criteria", []),
         "red_flags": scorecard.get("red_flags", []),
         "missing_data": snapshot.facts.get("missing_data", []) if snapshot else [],
         "provider_limitations": scorecard.get("provider_limitations", []),
-        "ai_skip_reason": ai_skip_reason,
-        "error": {"type": type(error).__name__, "message": str(error)[:500]} if error else None,
+        "ai_opinion": None,
+        "ai_skip_reason": None,
+        "ai_error": None,
+        "fundamental_error": (
+            {"type": type(error).__name__, "message": str(error)[:500]}
+            if error
+            else None
+        ),
         "provenance": {"snapshot_id": str(snapshot.snapshot_id) if snapshot else None, "snapshot_cache_hit": snapshot.cache_hit if snapshot else False, "rubric_version": RUBRIC_VERSION},
     }
     async with async_session() as db:
         await db.execute(
             text("""UPDATE screening_results
                     SET fundamental_status = :fundamental_status, fundamental_verdict = NULL,
-                        fundamental_scorecard = CAST(:scorecard AS jsonb), ai_status = :ai_status,
-                        llm_status = :llm_status, llm_verdict = NULL, llm_flags = CAST(:flags AS jsonb),
-                        llm_checked_at = now(), fundamental_snapshot_id = :snapshot_id
+                        fundamental_scorecard = CAST(:scorecard AS jsonb),
+                        llm_flags = CAST(:flags AS jsonb),
+                        fundamental_snapshot_id = COALESCE(:snapshot_id, fundamental_snapshot_id)
                     WHERE id = :result_id"""),
-            {"result_id": survivor.result_id, "fundamental_status": "completed" if snapshot else "failed", "scorecard": json.dumps(scorecard), "ai_status": ai_status, "llm_status": "succeeded" if ai_status in {"succeeded", "cached"} else ("skipped" if ai_status in {"paused", "not_requested", "budget_exhausted"} else "failed"), "flags": json.dumps(flags, separators=(",", ":")), "snapshot_id": snapshot.snapshot_id if snapshot else None},
+            {
+                "result_id": survivor.result_id,
+                "fundamental_status": "completed" if snapshot else "failed",
+                "scorecard": json.dumps(scorecard),
+                "flags": json.dumps(flags, separators=(",", ":")),
+                "snapshot_id": snapshot.snapshot_id if snapshot else None,
+            },
+        )
+        await db.commit()
+
+
+async def _set_fundamental_running(survivor: Survivor) -> None:
+    async with async_session() as db:
+        await db.execute(
+            text(
+                """
+                UPDATE screening_results
+                SET fundamental_status = 'running'
+                WHERE id = :result_id
+                """
+            ),
+            {"result_id": survivor.result_id},
+        )
+        await db.commit()
+
+
+async def _set_ai_running(survivor: Survivor) -> None:
+    async with async_session() as db:
+        await db.execute(
+            text(
+                """
+                UPDATE screening_results
+                SET ai_status = 'running', llm_status = 'running',
+                    llm_verdict = NULL, llm_checked_at = NULL
+                WHERE id = :result_id
+                """
+            ),
+            {"result_id": survivor.result_id},
+        )
+        await db.commit()
+
+
+async def _update_ai_result(
+    survivor: Survivor,
+    *,
+    ai_status: str,
+    opinion: dict[str, Any] | None = None,
+    model: dict[str, Any] | None = None,
+    error: Exception | None = None,
+    ai_skip_reason: str | None = None,
+) -> None:
+    successful = ai_status in {"succeeded", "cached"}
+    legacy_status = (
+        "succeeded"
+        if successful
+        else "skipped"
+        if ai_status in {"paused", "not_requested", "budget_exhausted", "skipped"}
+        else "failed"
+    )
+    ai_fields = {
+        "ai_opinion": opinion,
+        "strengths": (opinion or {}).get("strengths", []),
+        "highlights": (opinion or {}).get("strengths", []),
+        "risks": (opinion or {}).get("risks", []),
+        "review_focus": (opinion or {}).get("review_focus", []),
+        "ai_skip_reason": ai_skip_reason,
+        "model": model,
+        "ai_error": (
+            {"type": type(error).__name__, "message": str(error)[:500]}
+            if error
+            else None
+        ),
+    }
+    if opinion is not None:
+        ai_fields["summary"] = opinion.get("summary")
+    async with async_session() as db:
+        await db.execute(
+            text(
+                """
+                UPDATE screening_results
+                SET ai_status = :ai_status,
+                    llm_status = :llm_status,
+                    llm_verdict = :llm_verdict,
+                    llm_flags = llm_flags || CAST(:ai_fields AS jsonb),
+                    llm_checked_at = now()
+                WHERE id = :result_id
+                """
+            ),
+            {
+                "result_id": survivor.result_id,
+                "ai_status": ai_status,
+                "llm_status": legacy_status,
+                "llm_verdict": (opinion or {}).get("verdict") if successful else None,
+                "ai_fields": json.dumps(ai_fields, separators=(",", ":")),
+            },
         )
         await db.commit()
 
@@ -369,52 +684,204 @@ async def _process_survivor(
         return "cancelled"
     await _set_run(analysis_run_id, survivor=survivor)
     await _set_item(analysis_run_id, survivor, status="fetching")
+    await _set_fundamental_running(survivor)
     snapshot: Snapshot | None = None
+    scorecard: dict[str, Any] | None = None
     try:
         snapshot = await _get_snapshot(survivor, fundamentals_client, force_refresh=force_refresh)
         scorecard = score_minervini_inspired(snapshot.facts)
         await _set_item(analysis_run_id, survivor, status="scoring", snapshot_id=snapshot.snapshot_id, provider_requests=0 if snapshot.cache_hit else 8)
+        await _update_fundamental_result(
+            survivor,
+            snapshot=snapshot,
+            scorecard=scorecard,
+        )
         ai_paused = await _ai_paused()
-        if scorecard["grade"] == "insufficient" or ai_paused or await _processing_paused():
-            status = "paused" if ai_paused else "not_requested"
-            skip_reason = "insufficient_data" if scorecard["grade"] == "insufficient" else ("ai_paused" if ai_paused else "processing_paused")
-            await _update_result(survivor, snapshot=snapshot, scorecard=scorecard, ai_status=status, ai_skip_reason=skip_reason)
+        if ai_paused or await _processing_paused():
+            status = "paused"
+            skip_reason = "ai_paused" if ai_paused else "processing_paused"
+            await _update_ai_result(
+                survivor,
+                ai_status=status,
+                ai_skip_reason=skip_reason,
+            )
             await _set_item(analysis_run_id, survivor, status="rules_only", snapshot_id=snapshot.snapshot_id)
             return "rules_only"
-        analysis_key = canonical_json_hash({"snapshot": snapshot.facts, "rubric": RUBRIC_VERSION, "model": llm_client.model, "reasoning": llm_client.reasoning_effort, "prompt": llm_client.prompt_version})
+        prepared = llm_client.prepare(snapshot.facts)
+        if not prepared.has_usable_facts:
+            await _update_ai_result(
+                survivor,
+                ai_status="skipped",
+                ai_skip_reason="no_usable_facts",
+            )
+            await _set_item(
+                analysis_run_id,
+                survivor,
+                status="rules_only",
+                snapshot_id=snapshot.snapshot_id,
+            )
+            return "rules_only"
+        analysis_key = canonical_json_hash(
+            {
+                "input_hash": prepared.input_hash,
+                "model": llm_client.model,
+                "reasoning": llm_client.reasoning_effort,
+                "prompt": llm_client.prompt_version,
+                "response_schema": "fundamental_second_opinion_v1",
+            }
+        )
         cached = await _cached_annotation(analysis_key)
         if cached:
-            explanation = dict(cached.get("payload") or {})
-            await _update_result(survivor, snapshot=snapshot, scorecard=scorecard, ai_status="cached", explanation=explanation)
+            opinion = dict(cached.get("payload") or {})
+            await _update_ai_result(
+                survivor,
+                ai_status="cached",
+                opinion=opinion,
+                model={
+                    "provider": "openrouter",
+                    "name": cached.get("model"),
+                    "reasoning_effort": cached.get("reasoning_effort"),
+                    "prompt_version": cached.get("prompt_version"),
+                    "request_id": cached.get("request_id"),
+                    "input_hash": cached.get("input_hash"),
+                    "cache_hit": True,
+                },
+            )
             await _set_item(analysis_run_id, survivor, status="succeeded", snapshot_id=snapshot.snapshot_id, analysis_key=analysis_key)
             return "cached"
-        request = llm_client.build_request(snapshot.facts, scorecard)
-        reserve = (len(json.dumps(request, separators=(",", ":"))) + 1) // 2 + settings.openrouter_max_tokens
+        reserve = (
+            len(json.dumps(prepared.request_payload, separators=(",", ":"))) + 1
+        ) // 2 + settings.openrouter_max_tokens
         if await _run_tokens(analysis_run_id) + reserve > settings.fundamental_run_token_budget:
-            await _update_result(survivor, snapshot=snapshot, scorecard=scorecard, ai_status="budget_exhausted", ai_skip_reason="budget_exhausted")
+            await _update_ai_result(
+                survivor,
+                ai_status="budget_exhausted",
+                ai_skip_reason="budget_exhausted",
+            )
             await _set_item(analysis_run_id, survivor, status="budget_exhausted", snapshot_id=snapshot.snapshot_id, analysis_key=analysis_key)
             return "budget_exhausted"
+        await _set_ai_running(survivor)
         await _set_item(analysis_run_id, survivor, status="ai_running", snapshot_id=snapshot.snapshot_id, analysis_key=analysis_key)
-        result = await llm_client.analyze(snapshot.facts, scorecard)
-        usage = _usage(result.usage)
-        await _store_annotation(analysis_key, llm_client, result.input_hash, result)
-        await _update_result(survivor, snapshot=snapshot, scorecard=scorecard, ai_status="succeeded", explanation=result.explanation.model_dump(mode="json"))
-        await _set_item(analysis_run_id, survivor, status="succeeded", snapshot_id=snapshot.snapshot_id, analysis_key=analysis_key, usage=usage, cost=result.cost)
-        return "succeeded"
+        for call_number in range(1, 3):
+            attempt_id, _ = await _start_ai_attempt(
+                analysis_run_id,
+                survivor,
+                llm_client,
+                prepared,
+            )
+            try:
+                result = await llm_client.send_once(prepared)
+            except FundamentalLLMError as exc:
+                await _finish_ai_attempt(
+                    attempt_id,
+                    status=exc.attempt_status,
+                    error=exc,
+                )
+                await _set_item(
+                    analysis_run_id,
+                    survivor,
+                    status="ai_running",
+                    snapshot_id=snapshot.snapshot_id,
+                    analysis_key=analysis_key,
+                    usage=_usage(exc.usage),
+                    cost=exc.cost,
+                    provider_requests=1,
+                    error=exc,
+                )
+                if exc.retryable and call_number == 1:
+                    await asyncio.sleep(0.5)
+                    continue
+                raise
+            await _finish_ai_attempt(
+                attempt_id,
+                status="succeeded",
+                result=result,
+            )
+            usage = _usage(result.usage)
+            await _set_item(
+                analysis_run_id,
+                survivor,
+                status="ai_running",
+                snapshot_id=snapshot.snapshot_id,
+                analysis_key=analysis_key,
+                usage=usage,
+                cost=result.cost,
+                provider_requests=1,
+            )
+            await _store_annotation(
+                analysis_key,
+                llm_client,
+                result,
+                attempt_id,
+            )
+            opinion = result.opinion.model_dump(mode="json")
+            await _update_ai_result(
+                survivor,
+                ai_status="succeeded",
+                opinion=opinion,
+                model={
+                    "provider": "openrouter",
+                    "name": llm_client.model,
+                    "reasoning_effort": llm_client.reasoning_effort,
+                    "prompt_version": llm_client.prompt_version,
+                    "request_id": result.request_id,
+                    "input_hash": result.input_hash,
+                    "cache_hit": False,
+                },
+            )
+            await _set_item(
+                analysis_run_id,
+                survivor,
+                status="succeeded",
+                snapshot_id=snapshot.snapshot_id,
+                analysis_key=analysis_key,
+            )
+            return "succeeded"
+        raise FundamentalLLMError("OpenRouter second opinion failed")
     except FundamentalsAuthError as exc:
         await _auto_pause("fundamentals_processing_paused", str(exc))
+        await _update_fundamental_result(
+            survivor,
+            snapshot=None,
+            scorecard=scorecard or _empty_scorecard(),
+            error=exc,
+        )
+        await _update_ai_result(
+            survivor,
+            ai_status="skipped",
+            ai_skip_reason="fundamental_unavailable",
+        )
         await _set_item(analysis_run_id, survivor, status="failed", snapshot_id=snapshot.snapshot_id if snapshot else None, error=exc)
         return "failed"
     except FundamentalLLMError as exc:
-        if "HTTP 401" in str(exc) or "HTTP 402" in str(exc) or "key was rejected" in str(exc):
+        if exc.http_status in {401, 402} or "key was rejected" in str(exc):
             await _auto_pause("fundamentals_ai_paused", str(exc))
-        scorecard = score_minervini_inspired(snapshot.facts) if snapshot else _empty_scorecard()
-        await _update_result(survivor, snapshot=snapshot, scorecard=scorecard, ai_status="failed", error=exc)
-        await _set_item(analysis_run_id, survivor, status="rules_only" if snapshot else "failed", snapshot_id=snapshot.snapshot_id if snapshot else None, error=exc)
-        return "rules_only" if snapshot else "failed"
+        await _update_ai_result(
+            survivor,
+            ai_status="failed",
+            error=exc,
+        )
+        await _set_item(
+            analysis_run_id,
+            survivor,
+            status="rules_only",
+            snapshot_id=snapshot.snapshot_id if snapshot else None,
+            error=exc,
+        )
+        return "rules_only"
     except (FundamentalsError, ValueError, TypeError) as exc:
-        scorecard = _empty_scorecard()
-        await _update_result(survivor, snapshot=snapshot, scorecard=scorecard, ai_status="failed", error=exc)
+        scorecard = scorecard or _empty_scorecard()
+        await _update_fundamental_result(
+            survivor,
+            snapshot=None,
+            scorecard=scorecard,
+            error=exc,
+        )
+        await _update_ai_result(
+            survivor,
+            ai_status="skipped",
+            ai_skip_reason="fundamental_unavailable",
+        )
         await _set_item(analysis_run_id, survivor, status="failed", snapshot_id=snapshot.snapshot_id if snapshot else None, error=exc)
         return "failed"
 
@@ -448,13 +915,17 @@ async def run_fundamental_pass(
     job_id = str(ctx.get("job_id") or f"fundamental-pass:{scan_run_id}")
     if not settings.p7_fundamental_pass_enabled:
         return {"status": "disabled", "scan_run_id": scan_run_id}
-    if not settings.upstox_analytics_token:
-        return {"status": "failed", "error": "UPSTOX_ANALYTICS_TOKEN is not configured"}
     analysis_run_id = await _ensure_analysis_run(scan_run_id, job_id)
     async with async_session() as lock_db:
         await lock_db.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": GLOBAL_P7_LOCK})
         try:
             if await _processing_paused():
+                await _finish_unprocessed_results(
+                    scan_run_id,
+                    llm_status="skipped",
+                    ai_status="paused",
+                    reason="Fundamental processing is paused",
+                )
                 await _set_run(analysis_run_id, status="cancelled", completed=True, error="Fundamental processing is paused")
                 return {"status": "cancelled", "scan_run_id": scan_run_id}
             survivors = await _load_survivors(scan_run_id)
@@ -488,10 +959,23 @@ async def run_fundamental_pass(
                     if outcome == "cancelled" or await _processing_paused():
                         break
             final_status = "cancelled" if await _processing_paused() else ("partial" if any(item not in {"succeeded", "cached", "rules_only"} for item in outcomes) else "succeeded")
+            if final_status == "cancelled":
+                await _finish_unprocessed_results(
+                    scan_run_id,
+                    llm_status="skipped",
+                    ai_status="paused",
+                    reason="Fundamental processing was paused before completion",
+                )
             await _set_run(analysis_run_id, status=final_status, completed=True)
             return {"status": final_status, "scan_run_id": scan_run_id, "analysis_run_id": str(analysis_run_id), "outcomes": {item: outcomes.count(item) for item in set(outcomes)}}
         except Exception as exc:
             logger.exception("P7 fundamental pass crashed for scan %s", scan_run_id)
+            await _finish_unprocessed_results(
+                scan_run_id,
+                llm_status="failed",
+                ai_status="failed",
+                reason=str(exc)[:500],
+            )
             await _set_run(analysis_run_id, status="failed", completed=True, error=str(exc)[:500])
             return {"status": "failed", "scan_run_id": scan_run_id, "error": str(exc)[:500]}
         finally:

@@ -20,6 +20,11 @@ architecture and component-boundary source of truth.
 - `migrations/006_p7_reliable_fundamentals.sql` - adds ordered P7 job/item
   state, deterministic scorecard projections, annotation cache, and separate
   fundamentals processing/AI pause controls.
+- `migrations/007_swyingify_auth.sql` - adds the Better Auth user, session,
+  account, and verification tables owned by the Swyingify Next.js app.
+- `migrations/008_p7_ai_trace.sql` - records every actual OpenRouter attempt,
+  links successful cached opinions to their source attempt, and constrains the
+  independent fundamentals/AI status vocabularies.
 
 ## Domain Layout
 
@@ -109,11 +114,12 @@ human instruction, order intent, fills, and position event trail.
 
 P7 annotations can be traced through:
 
-`screening_results.fundamental_snapshot_id -> fundamental_snapshots`
+`screening_results.fundamental_snapshot_id -> fundamental_snapshots` and
+`fundamental_analysis_items -> fundamental_ai_attempts -> fundamental_annotations`
 
-The screening result retains the model/prompt/input hash and evidence-backed
-verdict in `llm_flags`. Model reasoning details and provider credentials are
-never stored.
+The deterministic scorecard is authoritative. Each AI attempt retains its exact
+sanitized request/response, provider IDs, usage, cost, and error metadata.
+Model reasoning details and provider credentials are never stored.
 
 ## P3 Paper Execution
 

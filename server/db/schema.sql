@@ -1,5 +1,59 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- Swyingify Better Auth tables. These are intentionally separate from the
+-- personal money-path tables below; Better Auth writes them from Next.js.
+CREATE TABLE "user" (
+    id text PRIMARY KEY,
+    name text NOT NULL,
+    email text NOT NULL UNIQUE,
+    "emailVerified" boolean NOT NULL DEFAULT false,
+    image text,
+    "createdAt" timestamptz NOT NULL DEFAULT now(),
+    "updatedAt" timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE session (
+    id text PRIMARY KEY,
+    "expiresAt" timestamptz NOT NULL,
+    token text NOT NULL UNIQUE,
+    "createdAt" timestamptz NOT NULL DEFAULT now(),
+    "updatedAt" timestamptz NOT NULL DEFAULT now(),
+    "ipAddress" text,
+    "userAgent" text,
+    "userId" text NOT NULL REFERENCES "user" (id) ON DELETE CASCADE
+);
+
+CREATE INDEX session_user_id_idx ON session ("userId");
+
+CREATE TABLE account (
+    id text PRIMARY KEY,
+    "accountId" text NOT NULL,
+    "providerId" text NOT NULL,
+    "userId" text NOT NULL REFERENCES "user" (id) ON DELETE CASCADE,
+    "accessToken" text,
+    "refreshToken" text,
+    "idToken" text,
+    "accessTokenExpiresAt" timestamptz,
+    "refreshTokenExpiresAt" timestamptz,
+    scope text,
+    password text,
+    "createdAt" timestamptz NOT NULL DEFAULT now(),
+    "updatedAt" timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX account_user_id_idx ON account ("userId");
+
+CREATE TABLE verification (
+    id text PRIMARY KEY,
+    identifier text NOT NULL,
+    value text NOT NULL,
+    "expiresAt" timestamptz NOT NULL,
+    "createdAt" timestamptz NOT NULL DEFAULT now(),
+    "updatedAt" timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX verification_identifier_idx ON verification (identifier);
+
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -198,6 +252,17 @@ CREATE TABLE screening_results (
     CONSTRAINT screening_results_llm_verdict_check CHECK (
         llm_verdict IS NULL OR llm_verdict IN ('pass', 'fail', 'uncertain')
     ),
+    CONSTRAINT screening_results_fundamental_status_check CHECK (
+        fundamental_status IN (
+            'not_requested', 'queued', 'running', 'completed', 'failed', 'skipped'
+        )
+    ),
+    CONSTRAINT screening_results_ai_status_check CHECK (
+        ai_status IN (
+            'not_requested', 'queued', 'running', 'succeeded', 'cached',
+            'failed', 'paused', 'budget_exhausted', 'skipped'
+        )
+    ),
     CONSTRAINT screening_results_reviewer_status_check CHECK (
         reviewer_status IN ('pending', 'watchlisted', 'rejected', 'trade_planned')
     )
@@ -233,12 +298,51 @@ CREATE TABLE fundamental_analysis_items (
     UNIQUE (analysis_run_id, screening_result_id)
 );
 
+CREATE TABLE fundamental_ai_attempts (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    analysis_item_id uuid NOT NULL REFERENCES fundamental_analysis_items(id) ON DELETE CASCADE,
+    attempt_number integer NOT NULL,
+    status text NOT NULL DEFAULT 'started',
+    model text NOT NULL,
+    reasoning_effort text NOT NULL,
+    prompt_version text NOT NULL,
+    response_schema text NOT NULL,
+    input_hash text NOT NULL,
+    request_payload jsonb NOT NULL,
+    response_payload jsonb,
+    http_status integer,
+    request_id text,
+    usage jsonb NOT NULL DEFAULT '{}'::jsonb,
+    cost numeric(18, 8) NOT NULL DEFAULT 0,
+    error_code text,
+    error_message text,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    CONSTRAINT fundamental_ai_attempts_number_check CHECK (attempt_number > 0),
+    CONSTRAINT fundamental_ai_attempts_status_check CHECK (
+        status IN ('started', 'succeeded', 'invalid_response', 'provider_error', 'transport_unknown')
+    ),
+    CONSTRAINT fundamental_ai_attempts_http_status_check CHECK (
+        http_status IS NULL OR (http_status >= 100 AND http_status <= 599)
+    ),
+    CONSTRAINT fundamental_ai_attempts_cost_check CHECK (cost >= 0),
+    UNIQUE (analysis_item_id, attempt_number)
+);
+
+CREATE INDEX fundamental_ai_attempts_item_started_idx
+ON fundamental_ai_attempts (analysis_item_id, started_at);
+
 CREATE TABLE fundamental_annotations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), analysis_key text NOT NULL UNIQUE, status text NOT NULL DEFAULT 'succeeded',
     model text NOT NULL, reasoning_effort text NOT NULL, prompt_version text NOT NULL, input_hash text NOT NULL,
     payload jsonb NOT NULL, request_id text, usage jsonb NOT NULL DEFAULT '{}'::jsonb, cost numeric(18, 8) NOT NULL DEFAULT 0,
+    source_attempt_id uuid REFERENCES fundamental_ai_attempts(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE INDEX fundamental_annotations_source_attempt_idx
+ON fundamental_annotations (source_attempt_id)
+WHERE source_attempt_id IS NOT NULL;
 
 CREATE TABLE watchlists (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

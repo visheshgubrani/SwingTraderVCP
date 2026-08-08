@@ -1,15 +1,52 @@
 # AGENTS.md — Swing Trading System
 
-This file is the source of truth for architecture. If you are an AI coding
-agent working on this repo: **read this fully before writing any code.**
-When a request conflicts with this document, stop and flag the conflict —
-do not silently deviate, "improve," or reinterpret the architecture.
+This file is the source of truth for the **personal** swing trading system.
+If you are an AI coding agent working on this repo: **read this fully before
+writing any code** for the personal app / money path. When a request conflicts
+with this document, stop and flag the conflict — do not silently deviate,
+"improve," or reinterpret the architecture.
 
 If something here is genuinely ambiguous or missing, ask, or propose an
 addition to this file explicitly — don't invent structure and move on.
 
 Schema (tables, columns) lives in `server/db/` — not here. This file governs
-component boundaries, data flow, locked product decisions, and build order.
+component boundaries, data flow, locked product decisions, and build order
+for the personal trading system.
+
+---
+
+## 0. Dual product map (read first)
+
+This monorepo contains **two products**. Do not conflate them.
+
+| | Personal trading system (this file) | Swyingify SaaS |
+| --- | --- | --- |
+| Frontend | `client/` (Vite + React) | `swyingify/` (Next.js) |
+| Agent source of truth | **This file** (`AGENTS.md`) | [`swyingify/AGENTS.md`](swyingify/AGENTS.md) |
+| Audience | Single user (owner) | Multi-user SaaS |
+| Core job | Screen → **confirm trade** → automate execution / SL / TP | Screen → study → watchlist; free + paid scanners |
+| Money path | Yes — Fyers orders, position monitor, kill switch | **Never** — no orders, no positions, no broker execution |
+| Auth | None / single-user | Better Auth + paywall |
+| Markets (current) | Indian equities (Nifty 500) | V1: Indian equities only |
+
+**Shared infrastructure:** Postgres, Redis / `arq`, and Python `server/` (EOD
+candles, scan engine, workers). The server may serve both apps. Shared scan
+logic may be reused and expanded for Swyingify templates — but SaaS API
+surfaces must never expose or invoke the money path
+(`trade_instructions` confirm → execution, order gateway, position monitor,
+kill switch as an order blocker, reconciliation-as-trading-control, journal
+fills).
+
+**Agent routing rules:**
+
+1. Task is Swyingify / SaaS / Better Auth / public scanners / paywall → follow
+   [`swyingify/AGENTS.md`](swyingify/AGENTS.md). Do not add trade confirm,
+   execution, or position features to Swyingify.
+2. Task is personal trading / Fyers money path / P0–P9 personal phases →
+   follow **this** file. Do not turn the personal app into a multi-tenant SaaS.
+3. Task touches shared `server/` code used by both → state the impact on
+   **both** products, keep API / table ownership boundaries clear, and do not
+   silently widen either product's scope.
 
 ---
 
@@ -56,7 +93,7 @@ Do not substitute these without an explicit instruction from the user.
 | Broker/queue         | Redis                                             | (1) pub/sub for LTP fan-out, (2) hot LTP cache, (3) backing store for async job queue (`arq`)                                                        |
 | Market data & orders | Fyers API (REST + WebSocket)                      | See §2.1 for which Fyers surfaces we use                                                                                                            |
 | Fundamentals         | Upstox Company Fundamentals API                   | Read-only Analytics Token; ISIN-keyed snapshots for technical survivors only; never prices, sockets, or orders                                     |
-| LLM inference        | OpenRouter (`openai/gpt-5.6-luna-pro`)            | Strict structured annotation over normalized snapshots; no tools and no money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
+| LLM inference        | OpenRouter (`openai/gpt-5.6-luna-pro`)            | Blind structured second opinion over normalized snapshots; Python's deterministic fit remains authoritative. No tools or money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
 
 ### 2.1 Locked Fyers / trading product decisions
 
@@ -151,7 +188,8 @@ money-path workers into the API process.
   Triggered via Redis job queue (`arq`), never inline in an API request.
   P7 fetches read-only Upstox data by ISIN, persists a reproducible
   fundamentals snapshot, computes numeric facts in Python, and sends one
-  strict structured OpenRouter request per survivor. **Never places an
+  blind, strict structured OpenRouter second-opinion request per survivor.
+  AI failures never invalidate the Upstox snapshot or Python score. **Never places an
   order.**
 - **Scheduler (arq cron)** — EOD candle sync, optional EOD screen, **Fyers
   auth token refresh** (scheduled, not lazy-only), reconciliation cadence.
@@ -209,7 +247,7 @@ Technical filter (Stage-2 / VCP shortlist gates, volume, % from 52w high, etc.)
 Upstox fundamentals → durable normalized snapshot
         │
         ▼
-LLM fundamental pass (strict flag/verdict + evidence keys, not free prose)
+LLM second opinion (blind pass/fail/uncertain + packet reference IDs)
         │
         ▼
 Shortlist stored in DB, surfaced to frontend for manual review + charting
@@ -340,7 +378,7 @@ Do not build one “AI god service.” Split:
 
 | Surface            | Role                                              | Touches money? |
 | ------------------ | ------------------------------------------------- | -------------- |
-| Fundamental pass   | Structured pass/fail/uncertain on technical survivors | No          |
+| Fundamental pass   | Python-authoritative fit plus blind AI pass/fail/uncertain second opinion | No          |
 | Journal coach      | Post-trade patterns/mistakes from closed trades   | No             |
 | Nifty sentiment    | Optional regime tag / overlay                     | No             |
 

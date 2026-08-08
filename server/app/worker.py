@@ -1,10 +1,10 @@
-import urllib.parse
 from zoneinfo import ZoneInfo
+from typing import Any
 
 from arq import cron
-from arq.connections import RedisSettings
 
 from app.config import settings
+from app.redis_pool import redis_settings_from_config, tune_arq_redis_pool
 from app.services.fundamental_pass import run_fundamental_pass
 from app.services.historical_fetcher import run_historical_sync
 from app.services.journal_ai_coach import run_journal_ai_coach
@@ -13,11 +13,9 @@ from app.services.reconciliation import run_reconciliation
 from app.services.screener import run_technical_scan
 from app.services.token_refresh import run_token_refresh
 
-# Parse Redis URL dynamically from app settings
-url = urllib.parse.urlparse(settings.redis_url)
-redis_host = url.hostname or '127.0.0.1'
-redis_port = url.port or 6379
-redis_db = int(url.path.lstrip('/')) if url.path else 0
+async def worker_on_startup(ctx: dict[str, Any]) -> None:
+    await tune_arq_redis_pool(ctx["redis"])
+
 
 class WorkerSettings:
     # Functions that the worker can execute
@@ -90,10 +88,7 @@ class WorkerSettings:
     )
 
     job_timeout = 60 * 60
+    max_jobs = 1
+    on_startup = worker_on_startup
 
-    # Redis configuration matching our Docker setup (port 6380)
-    redis_settings = RedisSettings(
-        host=redis_host,
-        port=redis_port,
-        database=redis_db
-    )
+    redis_settings = redis_settings_from_config()

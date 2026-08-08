@@ -8,9 +8,10 @@ import json
 import math
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 
 class FundamentalsError(RuntimeError):
@@ -23,6 +24,190 @@ class FundamentalsAuthError(FundamentalsError):
 
 class FundamentalsDataUnavailable(FundamentalsError):
     """The provider has no usable data for the requested ISIN."""
+
+
+class FundamentalsDataContractError(FundamentalsError):
+    """Upstox returned a successful envelope with an unexpected data shape."""
+
+
+class _UpstoxModel(BaseModel):
+    """Provider DTOs accept additive fields while validating fields we consume."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class UpstoxHistoryPoint(_UpstoxModel):
+    period: str
+    value: float | int | str | None = None
+    change: float | int | str | None = None
+
+
+class UpstoxHistorySeries(_UpstoxModel):
+    history: list[UpstoxHistoryPoint] | None = None
+
+
+class UpstoxCategorySeries(UpstoxHistorySeries):
+    category: str
+
+
+class UpstoxStatementLine(UpstoxHistorySeries):
+    particular: str
+
+
+class UpstoxProfileData(_UpstoxModel):
+    company_profile: str | None = None
+    sector: str | None = None
+
+
+class UpstoxIncomeData(_UpstoxModel):
+    type: str | None = None
+    time_period: str | None = None
+    units_in: str | None = None
+    income_statement: list[UpstoxCategorySeries] | None = None
+    full_statement: list[UpstoxStatementLine] | None = None
+
+
+class UpstoxBalanceSheetData(_UpstoxModel):
+    type: str | None = None
+    time_period: str | None = None
+    units_in: str | None = None
+    history: list[dict[str, Any]] | None = None
+    full_statement: list[UpstoxStatementLine] | None = None
+
+
+class UpstoxCashFlowData(_UpstoxModel):
+    type: str | None = None
+    time_period: str | None = None
+    units_in: str | None = None
+    cash_flow: list[UpstoxCategorySeries] | None = None
+    full_statement: list[UpstoxStatementLine] | None = None
+
+
+class UpstoxKeyRatio(_UpstoxModel):
+    name: str
+    company_value: float | int | str | None = None
+    sector_value: float | int | str | None = None
+
+
+class UpstoxShareHolding(UpstoxHistorySeries):
+    category: str
+
+
+class UpstoxCorporateAction(_UpstoxModel):
+    name: str | None = None
+    expiry_date: str | None = None
+    amount: float | int | str | None = None
+    ratio: float | int | str | None = None
+    event_details: list[dict[str, Any]] | None = None
+
+
+class UpstoxProfileEnvelope(_UpstoxModel):
+    status: Literal["success"]
+    data: UpstoxProfileData
+
+
+class UpstoxIncomeEnvelope(_UpstoxModel):
+    status: Literal["success"]
+    data: UpstoxIncomeData
+
+
+class UpstoxBalanceSheetEnvelope(_UpstoxModel):
+    status: Literal["success"]
+    data: UpstoxBalanceSheetData
+
+
+class UpstoxCashFlowEnvelope(_UpstoxModel):
+    status: Literal["success"]
+    data: UpstoxCashFlowData
+
+
+class UpstoxKeyRatiosEnvelope(_UpstoxModel):
+    status: Literal["success"]
+    data: list[UpstoxKeyRatio]
+
+
+class UpstoxShareHoldingsEnvelope(_UpstoxModel):
+    status: Literal["success"]
+    data: list[UpstoxShareHolding]
+
+
+class UpstoxCorporateActionsEnvelope(_UpstoxModel):
+    status: Literal["success"]
+    data: list[UpstoxCorporateAction]
+
+
+UPSTOX_FUNDAMENTALS_ENDPOINTS: tuple[tuple[str, str, dict[str, str] | None], ...] = (
+    ("company_profile", "profile", None),
+    (
+        "income_yearly",
+        "income-statement",
+        {"type": "consolidated", "time_period": "yearly", "fs": "true"},
+    ),
+    (
+        "income_quarterly",
+        "income-statement",
+        {"type": "consolidated", "time_period": "quarterly", "fs": "false"},
+    ),
+    ("balance_sheet", "balance-sheet", {"type": "consolidated", "fs": "true"}),
+    ("cash_flow", "cash-flow", {"type": "consolidated", "fs": "true"}),
+    ("key_ratios", "key-ratios", None),
+    ("share_holdings", "share-holdings", None),
+    ("corporate_actions", "corporate-actions", None),
+)
+
+
+_UPSTOX_BUNDLE_CONTRACTS: dict[str, type[BaseModel]] = {
+    "company_profile": UpstoxProfileEnvelope,
+    "income_yearly": UpstoxIncomeEnvelope,
+    "income_quarterly": UpstoxIncomeEnvelope,
+    "balance_sheet": UpstoxBalanceSheetEnvelope,
+    "cash_flow": UpstoxCashFlowEnvelope,
+    "key_ratios": UpstoxKeyRatiosEnvelope,
+    "share_holdings": UpstoxShareHoldingsEnvelope,
+    "corporate_actions": UpstoxCorporateActionsEnvelope,
+}
+
+
+def validate_upstox_section(section: str, payload: Any) -> None:
+    """Validate one endpoint boundary without replacing its exact raw JSON."""
+
+    contract = _UPSTOX_BUNDLE_CONTRACTS[section]
+    try:
+        contract.model_validate(payload)
+    except ValidationError as exc:
+        raise FundamentalsDataContractError(
+            f"Upstox {section} response did not match its contract: {exc.errors(include_url=False)}"
+        ) from exc
+
+
+def validate_upstox_bundle(bundle: Mapping[str, Any]) -> None:
+    """Validate every endpoint boundary without discarding the raw provider JSON."""
+
+    for section in _UPSTOX_BUNDLE_CONTRACTS:
+        validate_upstox_section(section, bundle.get(section))
+
+
+def upstox_endpoint_manifest(
+    isin: str,
+    *,
+    statement_type: str = "consolidated",
+) -> list[dict[str, Any]]:
+    """Return the token-free request manifest shown in the personal trace UI."""
+
+    manifest: list[dict[str, Any]] = []
+    for section, endpoint, default_params in UPSTOX_FUNDAMENTALS_ENDPOINTS:
+        params = dict(default_params or {})
+        if "type" in params:
+            params["type"] = statement_type
+        manifest.append(
+            {
+                "section": section,
+                "method": "GET",
+                "path": f"/fundamentals/{isin}/{endpoint}",
+                "params": params,
+            }
+        )
+    return manifest
 
 
 def canonical_json_hash(payload: Mapping[str, Any]) -> str:
@@ -84,32 +269,17 @@ class UpstoxFundamentalsClient:
         if not isin:
             raise FundamentalsDataUnavailable("Instrument has no ISIN")
 
-        common = {"type": statement_type}
-        requests = (
-            ("company_profile", "profile", None),
-            (
-                "income_yearly",
-                "income-statement",
-                {**common, "time_period": "yearly", "fs": "true"},
-            ),
-            (
-                "income_quarterly",
-                "income-statement",
-                {**common, "time_period": "quarterly", "fs": "false"},
-            ),
-            ("balance_sheet", "balance-sheet", {**common, "fs": "true"}),
-            ("cash_flow", "cash-flow", {**common, "fs": "true"}),
-            ("key_ratios", "key-ratios", None),
-            ("share_holdings", "share-holdings", None),
-            ("corporate_actions", "corporate-actions", None),
-        )
-
         bundle: dict[str, Any] = {}
-        for key, endpoint, params in requests:
-            bundle[key] = await self._get(
+        for key, endpoint, default_params in UPSTOX_FUNDAMENTALS_ENDPOINTS:
+            params = dict(default_params or {})
+            if "type" in params:
+                params["type"] = statement_type
+            payload = await self._get(
                 f"/fundamentals/{isin}/{endpoint}",
-                params=params,
+                params=params or None,
             )
+            validate_upstox_section(key, payload)
+            bundle[key] = payload
         return bundle
 
     async def _get(

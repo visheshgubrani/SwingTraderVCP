@@ -3,12 +3,11 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
-import urllib.parse
-from arq import create_pool
-from arq.connections import RedisSettings, ArqRedis
 import redis.asyncio as aioredis
+from arq.connections import ArqRedis
 
 from app.config import settings
+from app.redis_pool import create_arq_pool
 from app.database import db_dep
 from app.routers.auth import router as auth_router
 from app.routers.historical import router as historical_router
@@ -38,15 +37,7 @@ async def get_redis(request: Request) -> AsyncIterator[ArqRedis]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _arq_pool
-    # Setup Redis Connection Pool for arq enqueuing
-    url = urllib.parse.urlparse(settings.redis_url)
-    redis_host = url.hostname or '127.0.0.1'
-    redis_port = url.port or 6379
-    redis_db = int(url.path.lstrip('/')) if url.path else 0
-
-    _arq_pool = await create_pool(
-        RedisSettings(host=redis_host, port=redis_port, database=redis_db)
-    )
+    _arq_pool = await create_arq_pool()
     app.state.redis = _arq_pool
 
     # Separate async Redis connection for WS manager (pub/sub needs dedicated conn)

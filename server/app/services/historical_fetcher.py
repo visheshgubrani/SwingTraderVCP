@@ -20,6 +20,7 @@ SYNC_STATUS_KEY = "historical:eod_sync:status"
 SYNC_LOCK_KEY = "historical:eod_sync:lock"
 SYNC_CANCEL_KEY = "historical:eod_sync:cancel"
 SYNC_LOCK_SECONDS = 60 * 60
+SYNC_STATUS_TTL_SECONDS = 60 * 60 * 2
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
 EOD_AVAILABLE_AFTER = datetime.time(hour=18, minute=0)
 
@@ -41,6 +42,7 @@ class SyncProgress:
     logs: list[str] = field(default_factory=list)
     target_date: str | None = None
     started_at: str | None = None
+    enqueued_at: str | None = None
     completed_at: str | None = None
 
     def log(self, message: str) -> None:
@@ -86,7 +88,48 @@ async def get_sync_status(redis: ArqRedis) -> dict[str, Any]:
 
 
 async def save_sync_status(redis: ArqRedis, progress: SyncProgress) -> None:
-    await redis.set(SYNC_STATUS_KEY, json.dumps(asdict(progress)))
+    await redis.set(
+        SYNC_STATUS_KEY,
+        json.dumps(asdict(progress)),
+        ex=SYNC_STATUS_TTL_SECONDS,
+    )
+
+
+def _parse_utc_timestamp(value: str | None) -> datetime.datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+async def sync_status_blocks_enqueue(
+    redis: ArqRedis,
+    status: dict[str, Any],
+    *,
+    now: datetime.datetime | None = None,
+) -> bool:
+    """Return True when a new sync should be rejected as already active."""
+    state = status.get("state")
+    if state == "running":
+        lock = await redis.get(SYNC_LOCK_KEY)
+        return lock is not None
+
+    if state == "queued":
+        current = now or datetime.datetime.now(datetime.timezone.utc)
+        enqueued_at = _parse_utc_timestamp(
+            status.get("enqueued_at") or status.get("started_at")
+        )
+        if enqueued_at is None:
+            return False
+        age_seconds = (current - enqueued_at).total_seconds()
+        return age_seconds < settings.sync_queued_stale_seconds
+
+    return False
 
 
 def build_date_chunks(

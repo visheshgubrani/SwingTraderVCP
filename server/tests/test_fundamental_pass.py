@@ -2,6 +2,8 @@ import asyncio
 import datetime
 import json
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -9,21 +11,34 @@ import httpx
 
 from app.services.fundamental_data import (
     FundamentalsAuthError,
+    FundamentalsDataContractError,
     FundamentalsError,
     UpstoxFundamentalsClient,
+    canonical_json_hash,
     normalize_fundamentals,
 )
 from app.services.fundamental_llm import (
     FundamentalLLMError,
+    FundamentalLLMResult,
+    FundamentalSecondOpinion,
     OpenRouterFundamentalClient,
+    sanitize_provider_payload,
 )
 from app.services.fundamental_pass import (
     Snapshot,
     Survivor,
+    _finish_ai_attempt,
+    _finish_unprocessed_results,
     _get_snapshot,
     _load_survivors,
+    _start_ai_attempt,
+    _store_annotation,
 )
-from app.services.fundamental_rules import score_balanced_sepa
+from app.services.fundamental_rules import (
+    score_balanced_sepa,
+    score_minervini_inspired,
+    unresolved_scorecard_evidence,
+)
 from app.worker import WorkerSettings
 
 
@@ -186,6 +201,41 @@ def fundamentals_bundle(*, financial_sector: bool = False):
 
 
 class FundamentalNormalizationTests(unittest.TestCase):
+    def test_bhel_composite_ownership_cites_real_provider_keys(self) -> None:
+        bundle = fundamentals_bundle()
+        fixture = Path(__file__).parent / "fixtures" / "upstox_bhel_shareholdings.json"
+        bundle["share_holdings"] = json.loads(fixture.read_text())
+        facts = normalize_fundamentals(
+            bundle,
+            isin="INE257A01026",
+            symbol="BHEL",
+            company_name="Bharat Heavy Electricals Ltd.",
+        )
+
+        scorecard = score_minervini_inspired(facts)
+        sponsorship = next(
+            item for item in scorecard["components"] if item["name"] == "sponsorship"
+        )
+        institutional = next(
+            item for item in sponsorship["metrics"] if item["key"] == "institutional_change"
+        )
+        self.assertAlmostEqual(institutional["value"], 7.09, places=2)
+        self.assertEqual(
+            set(institutional["evidence_keys"]),
+            {
+                "ownership.fii_change",
+                "ownership.mutual_funds_change",
+                "ownership.other_dii_change",
+            },
+        )
+        self.assertEqual(unresolved_scorecard_evidence(facts, scorecard), [])
+        prepared = OpenRouterFundamentalClient(api_key="unused").prepare(facts)
+        allowed = {
+            reference.id for reference in prepared.packet.references
+        }
+        self.assertNotIn("ownership.institutional_change", allowed)
+        self.assertTrue(set(institutional["evidence_keys"]) <= allowed)
+
     def test_normalizes_growth_quality_and_explicit_unknowns(self) -> None:
         facts = normalize_fundamentals(
             fundamentals_bundle(),
@@ -286,6 +336,8 @@ class UpstoxFundamentalsClientTests(unittest.IsolatedAsyncioTestCase):
                 profile_attempts += 1
                 if profile_attempts == 1:
                     return httpx.Response(429, headers={"Retry-After": "0"})
+            if request.url.path.endswith(("/key-ratios", "/share-holdings", "/corporate-actions")):
+                return httpx.Response(200, json=success([]))
             return httpx.Response(200, json=success({}))
 
         client = UpstoxFundamentalsClient(
@@ -309,6 +361,48 @@ class UpstoxFundamentalsClientTests(unittest.IsolatedAsyncioTestCase):
             all("/fundamentals/INE000000001/" in request.url.path for request in requests)
         )
         self.assertEqual(requests[0].url.path, "/v2/fundamentals/INE000000001/profile")
+
+    async def test_contract_accepts_additive_fields_and_missing_histories(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/key-ratios"):
+                data = [{"name": "ROE", "company_value": "12%", "future_field": 1}]
+            elif request.url.path.endswith(("/share-holdings", "/corporate-actions")):
+                data = []
+            elif request.url.path.endswith("/income-statement"):
+                data = {
+                    "full_statement": [
+                        {
+                            "particular": "EPS - Basic",
+                            "history": [{"period": "Mar 2026"}],
+                        }
+                    ],
+                    "income_statement": None,
+                    "future_field": {"nested": True},
+                }
+            else:
+                data = {"future_field": {"nested": True}}
+            return httpx.Response(200, json={"status": "success", "data": data, "added": True})
+
+        client = UpstoxFundamentalsClient(
+            analytics_token="token",
+            base_url="https://upstox.test/v2",
+            transport=httpx.MockTransport(handler),
+        )
+        bundle = await client.fetch_company_bundle("INE000000001")
+        self.assertTrue(bundle["company_profile"]["data"]["future_field"]["nested"])
+
+    async def test_contract_rejects_incorrect_data_shape(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            data = {} if request.url.path.endswith("/key-ratios") else []
+            return httpx.Response(200, json=success(data))
+
+        client = UpstoxFundamentalsClient(
+            analytics_token="token",
+            base_url="https://upstox.test/v2",
+            transport=httpx.MockTransport(handler),
+        )
+        with self.assertRaises(FundamentalsDataContractError):
+            await client.fetch_company_bundle("INE000000001")
 
     async def test_401_is_terminal_and_not_retried(self) -> None:
         handler = AsyncMock(return_value=httpx.Response(401, json={}))
@@ -349,15 +443,184 @@ class UpstoxFundamentalsClientTests(unittest.IsolatedAsyncioTestCase):
 class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
     def facts(self):
         return {
-            "schema_version": "fundamental_facts_v1",
+            "schema_version": "fundamental_facts_v3",
+            "statement_type": "consolidated",
+            "company": {"isin": "INE000000001", "symbol": "EXAMPLE"},
+            "periods": {"latest_annual": "Mar 2026"},
             "evidence": {
                 "growth.annual_revenue_cagr": {
                     "label": "Revenue CAGR",
                     "value": 20,
+                    "unit": "percent",
                 }
             },
-            "missing_data": ["quarterly_eps"],
+            "provider_limitations": ["quarterly_eps_yoy"],
         }
+
+    @staticmethod
+    def opinion(reference_id: str, *, verdict: str = "pass") -> dict:
+        return {
+            "verdict": verdict,
+            "summary": "Available growth evidence supports a grounded second opinion.",
+            "verdict_reference_ids": [reference_id],
+            "strengths": [
+                {"text": "Revenue growth is supportive.", "reference_ids": [reference_id]}
+            ],
+            "risks": [],
+            "review_focus": [],
+        }
+
+    def test_builds_bounded_blind_packet_and_dynamic_reference_enums(self) -> None:
+        client = OpenRouterFundamentalClient(
+            api_key="openrouter-key",
+            prompt_max_chars=6_000,
+        )
+        prepared = client.prepare(self.facts())
+        request = prepared.request_payload
+        user_content = request["messages"][1]["content"]
+        packet = json.loads(user_content)
+
+        self.assertLessEqual(len(user_content), 6_000)
+        self.assertEqual(packet["prompt_version"], "fundamental_second_opinion_v1")
+        self.assertNotIn("score", user_content)
+        self.assertNotIn("grade", user_content)
+        self.assertNotIn("red_flags", user_content)
+        self.assertNotIn("rubric", user_content)
+        allowed = {item["id"] for item in packet["references"]}
+        self.assertIn("growth.annual_revenue_cagr", allowed)
+        self.assertIn("limitation.quarterly_eps_yoy", allowed)
+        schema = request["response_format"]["json_schema"]["schema"]
+        self.assertEqual(
+            set(schema["properties"]["verdict_reference_ids"]["items"]["enum"]),
+            allowed,
+        )
+        self.assertEqual(
+            set(schema["$defs"]["ReferenceNote"]["properties"]["reference_ids"]["items"]["enum"]),
+            allowed,
+        )
+
+    def test_rejects_irreducible_packet_over_configured_limit(self) -> None:
+        facts = self.facts()
+        facts["evidence"]["large"] = {"label": "Large", "value": "x" * 7_000}
+        client = OpenRouterFundamentalClient(
+            api_key="openrouter-key",
+            prompt_max_chars=6_000,
+        )
+
+        with self.assertRaisesRegex(
+            FundamentalLLMError,
+            "second-opinion packet exceeds configured size limit",
+        ):
+            client.build_request(facts)
+
+    def test_no_usable_facts_is_detected_without_a_model_call(self) -> None:
+        prepared = OpenRouterFundamentalClient(api_key="unused").prepare(
+            {
+                "schema_version": "fundamental_facts_v3",
+                "provider_limitations": ["quarterly_eps_yoy"],
+            }
+        )
+        self.assertFalse(prepared.has_usable_facts)
+        self.assertEqual(
+            [reference.kind for reference in prepared.packet.references],
+            ["limitation"],
+        )
+
+    async def test_hashes_exact_packet_and_accepts_valid_opinion(self) -> None:
+        seen_packet = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            request_payload = json.loads(request.content)
+            seen_packet.update(json.loads(request_payload["messages"][1]["content"]))
+            reference_id = seen_packet["references"][0]["id"]
+            return httpx.Response(
+                200,
+                json={
+                    "id": "or-compact-1",
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20, "cost": 0.002},
+                    "choices": [
+                        {"message": {"content": json.dumps(self.opinion(reference_id))}}
+                    ],
+                },
+            )
+
+        client = OpenRouterFundamentalClient(
+            api_key="openrouter-key",
+            api_url="https://openrouter.test/chat/completions",
+            transport=httpx.MockTransport(handler),
+        )
+
+        result = await client.analyze(self.facts())
+
+        self.assertEqual(result.input_hash, canonical_json_hash(seen_packet))
+        self.assertEqual(result.request_id, "or-compact-1")
+        self.assertEqual(result.opinion.verdict, "pass")
+        self.assertEqual(result.cost, 0.002)
+
+    async def test_sparse_facts_can_return_uncertain(self) -> None:
+        async def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    self.opinion(
+                                        "growth.annual_revenue_cagr",
+                                        verdict="uncertain",
+                                    )
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = OpenRouterFundamentalClient(
+            api_key="key",
+            api_url="https://openrouter.test/chat/completions",
+            transport=httpx.MockTransport(handler),
+        )
+        result = await client.analyze(self.facts())
+        self.assertEqual(result.opinion.verdict, "uncertain")
+
+    async def test_invalid_paid_output_is_not_retried_and_keeps_usage(self) -> None:
+        calls = 0
+
+        async def handler(_: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                200,
+                json={
+                    "id": "invalid-paid",
+                    "usage": {"prompt_tokens": 33, "completion_tokens": 10, "cost": 0.004},
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    self.opinion("ownership.institutional_change")
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = OpenRouterFundamentalClient(
+            api_key="openrouter-key",
+            api_url="https://openrouter.test/chat/completions",
+            transport=httpx.MockTransport(handler),
+        )
+
+        with self.assertRaises(FundamentalLLMError) as context:
+            await client.analyze(self.facts())
+        self.assertEqual(calls, 1)
+        self.assertEqual(context.exception.attempt_status, "invalid_response")
+        self.assertEqual(context.exception.request_id, "invalid-paid")
+        self.assertEqual(context.exception.cost, 0.004)
+        self.assertEqual(context.exception.usage["prompt_tokens"], 33)
 
     async def test_sends_strict_non_streaming_reasoning_excluded_request(self) -> None:
         seen_payload = {}
@@ -374,20 +637,7 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
                             "message": {
                                 "content": json.dumps(
                                     {
-                                        "verdict": "pass",
-                                        "summary": "Growth evidence is supportive.",
-                                        "criteria": [
-                                            {
-                                                "name": "sales_growth",
-                                                "status": "positive",
-                                                "explanation": "Revenue CAGR is positive.",
-                                                "evidence_keys": [
-                                                    "growth.annual_revenue_cagr"
-                                                ],
-                                            }
-                                        ],
-                                        "red_flags": [],
-                                        "missing_data": ["quarterly_eps"],
+                                        **self.opinion("growth.annual_revenue_cagr"),
                                     }
                                 )
                             }
@@ -404,7 +654,7 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await client.analyze(self.facts())
 
-        self.assertEqual(result.verdict.verdict, "pass")
+        self.assertEqual(result.opinion.verdict, "pass")
         self.assertEqual(result.request_id, "or-request-1")
         self.assertEqual(seen_payload["model"], "openai/gpt-5.6-luna-pro")
         self.assertFalse(seen_payload["stream"])
@@ -418,7 +668,7 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
         schema = seen_payload["response_format"]["json_schema"]["schema"]
         self.assertEqual(
             set(schema["required"]),
-            {"verdict", "summary", "criteria", "red_flags", "missing_data"},
+            {"verdict", "summary", "verdict_reference_ids", "strengths", "risks", "review_focus"},
         )
         self.assertEqual(
             seen_payload["provider"],
@@ -431,49 +681,6 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen_payload["temperature"], 0)
         self.assertNotIn("enabled", seen_payload["reasoning"])
         self.assertNotIn("reasoning_details", json.dumps(seen_payload))
-
-    async def test_includes_temperature_only_when_explicitly_configured(self) -> None:
-        seen_payload = {}
-
-        async def handler(request: httpx.Request) -> httpx.Response:
-            seen_payload.update(json.loads(request.content))
-            return httpx.Response(
-                200,
-                json={
-                    "choices": [
-                        {
-                            "message": {
-                                "content": json.dumps(
-                                    {
-                                        "verdict": "uncertain",
-                                        "summary": "Only limited evidence is available.",
-                                        "criteria": [
-                                            {
-                                                "name": "sales_growth",
-                                                "status": "unknown",
-                                                "explanation": "Evidence is limited.",
-                                                "evidence_keys": [],
-                                            }
-                                        ],
-                                        "red_flags": [],
-                                        "missing_data": ["quarterly_eps"],
-                                    }
-                                )
-                            }
-                        }
-                    ]
-                },
-            )
-
-        client = OpenRouterFundamentalClient(
-            api_key="openrouter-key",
-            api_url="https://openrouter.test/chat/completions",
-            temperature=0.2,
-            transport=httpx.MockTransport(handler),
-            sleep=AsyncMock(),
-        )
-        await client.analyze(self.facts())
-        self.assertEqual(seen_payload["temperature"], 0.2)
 
     async def test_surfaces_openrouter_error_message(self) -> None:
         async def handler(_: httpx.Request) -> httpx.Response:
@@ -499,51 +706,7 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
             str(ctx.exception),
         )
 
-    async def test_parses_content_parts_array(self) -> None:
-        verdict_payload = {
-            "verdict": "pass",
-            "summary": "Growth evidence is supportive.",
-            "criteria": [
-                {
-                    "name": "sales_growth",
-                    "status": "positive",
-                    "explanation": "Revenue CAGR is positive.",
-                    "evidence_keys": ["growth.annual_revenue_cagr"],
-                }
-            ],
-            "red_flags": [],
-            "missing_data": ["quarterly_eps"],
-        }
-
-        async def handler(_: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "choices": [
-                        {
-                            "message": {
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": json.dumps(verdict_payload),
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                },
-            )
-
-        client = OpenRouterFundamentalClient(
-            api_key="openrouter-key",
-            api_url="https://openrouter.test/chat/completions",
-            transport=httpx.MockTransport(handler),
-            sleep=AsyncMock(),
-        )
-        result = await client.analyze(self.facts())
-        self.assertEqual(result.verdict.verdict, "pass")
-
-    async def test_null_content_fails_with_finish_reason_after_retries(self) -> None:
+    async def test_invalid_200_is_not_retried(self) -> None:
         calls = 0
 
         async def handler(_: httpx.Request) -> httpx.Response:
@@ -574,40 +737,23 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(FundamentalLLMError) as ctx:
             await client.analyze(self.facts())
-        self.assertEqual(calls, 2)
+        self.assertEqual(calls, 1)
         self.assertIn("finish_reason='length'", str(ctx.exception))
         self.assertIn("reasoning_tokens=1500", str(ctx.exception))
 
-    async def test_rejects_unverifiable_evidence_after_bounded_retries(self) -> None:
+    async def test_retries_one_clearly_transient_http_error(self) -> None:
         calls = 0
 
         async def handler(_: httpx.Request) -> httpx.Response:
             nonlocal calls
             calls += 1
+            if calls == 1:
+                return httpx.Response(503, json={"error": {"message": "temporarily unavailable"}})
             return httpx.Response(
                 200,
                 json={
                     "choices": [
-                        {
-                            "message": {
-                                "content": json.dumps(
-                                    {
-                                        "verdict": "pass",
-                                        "summary": "Unsupported.",
-                                        "criteria": [
-                                            {
-                                                "name": "sales_growth",
-                                                "status": "positive",
-                                                "explanation": "Invented evidence.",
-                                                "evidence_keys": ["invented.metric"],
-                                            }
-                                        ],
-                                        "red_flags": [],
-                                        "missing_data": [],
-                                    }
-                                )
-                            }
-                        }
+                        {"message": {"content": json.dumps(self.opinion("growth.annual_revenue_cagr"))}}
                     ]
                 },
             )
@@ -619,12 +765,199 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.MockTransport(handler),
             sleep=AsyncMock(),
         )
-        with self.assertRaises(FundamentalLLMError):
-            await client.analyze(self.facts())
+        result = await client.analyze(self.facts())
         self.assertEqual(calls, 2)
+        self.assertEqual(result.opinion.verdict, "pass")
+
+    async def test_transport_unknown_is_not_retried(self) -> None:
+        calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            raise httpx.ConnectError("unknown outcome", request=request)
+
+        client = OpenRouterFundamentalClient(
+            api_key="key",
+            api_url="https://openrouter.test/chat/completions",
+            max_attempts=2,
+            transport=httpx.MockTransport(handler),
+            sleep=AsyncMock(),
+        )
+        with self.assertRaises(FundamentalLLMError) as context:
+            await client.analyze(self.facts())
+        self.assertEqual(calls, 1)
+        self.assertEqual(context.exception.attempt_status, "transport_unknown")
+
+    def test_reasoning_details_are_removed_recursively(self) -> None:
+        sanitized = sanitize_provider_payload(
+            {
+                "reasoning_details": "secret",
+                "nested": [{"reasoning_details": {"secret": True}, "safe": 1}],
+            }
+        )
+        self.assertEqual(sanitized, {"nested": [{"safe": 1}]})
+
+
+class FundamentalAttemptPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_started_and_invalid_attempt_keep_exact_trace_fields(self) -> None:
+        captured: list[dict] = []
+        attempt_id = uuid4()
+
+        class FakeResult:
+            def one(self):
+                return SimpleNamespace(id=attempt_id, attempt_number=1)
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def execute(self, _query, params):
+                captured.append(params)
+                return FakeResult()
+
+            async def commit(self):
+                return None
+
+        survivor = Survivor(
+            result_id=uuid4(),
+            scan_run_id=uuid4(),
+            instrument_id=uuid4(),
+            isin="INE000000001",
+            symbol="EXAMPLE",
+            company_name="Example",
+        )
+        client = OpenRouterFundamentalClient(api_key="key")
+        prepared = client.prepare(
+            {
+                "schema_version": "fundamental_facts_v3",
+                "evidence": {
+                    "growth.annual_revenue_cagr": {
+                        "label": "Revenue CAGR",
+                        "value": 20,
+                    }
+                },
+            }
+        )
+        error = FundamentalLLMError(
+            "invalid paid output",
+            response_payload={"id": "request", "choices": []},
+            http_status=200,
+            request_id="request",
+            usage={"prompt_tokens": 10, "cost": 0.003},
+            cost=0.003,
+            attempt_status="invalid_response",
+        )
+
+        with patch(
+            "app.services.fundamental_pass.async_session",
+            side_effect=FakeSession,
+        ):
+            stored_id, number = await _start_ai_attempt(
+                uuid4(), survivor, client, prepared
+            )
+            await _finish_ai_attempt(
+                stored_id,
+                status="invalid_response",
+                error=error,
+            )
+
+        self.assertEqual(stored_id, attempt_id)
+        self.assertEqual(number, 1)
+        self.assertEqual(
+            json.loads(captured[0]["request_payload"]),
+            prepared.request_payload,
+        )
+        self.assertEqual(captured[1]["status"], "invalid_response")
+        self.assertEqual(captured[1]["request_id"], "request")
+        self.assertEqual(captured[1]["cost"], 0.003)
+        self.assertEqual(
+            json.loads(captured[1]["usage"])["prompt_tokens"],
+            10,
+        )
+
+    async def test_successful_annotation_links_to_source_attempt(self) -> None:
+        captured: dict = {}
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def execute(self, _query, params):
+                captured.update(params)
+
+            async def commit(self):
+                return None
+
+        client = OpenRouterFundamentalClient(api_key="key")
+        attempt_id = uuid4()
+        result = FundamentalLLMResult(
+            opinion=FundamentalSecondOpinion(
+                **OpenRouterFundamentalClientTests.opinion(
+                    "growth.annual_revenue_cagr"
+                )
+            ),
+            request_id="request",
+            usage={"prompt_tokens": 5},
+            input_hash="input-hash",
+            cost=0.001,
+            request_payload={"messages": []},
+            response_payload={"id": "request"},
+        )
+        with patch(
+            "app.services.fundamental_pass.async_session",
+            side_effect=FakeSession,
+        ):
+            await _store_annotation("analysis-key", client, result, attempt_id)
+
+        self.assertEqual(captured["source_attempt_id"], attempt_id)
+        self.assertEqual(captured["input_hash"], "input-hash")
+        self.assertEqual(json.loads(captured["payload"])["verdict"], "pass")
 
 
 class FundamentalPassOrchestrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_finishes_unprocessed_results_with_terminal_status(self) -> None:
+        captured_sql = ""
+        captured_params = {}
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def execute(self, query, params):
+                nonlocal captured_sql, captured_params
+                captured_sql = str(query)
+                captured_params = params
+
+            async def commit(self):
+                return None
+
+        scan_run_id = str(uuid4())
+        with patch(
+            "app.services.fundamental_pass.async_session",
+            side_effect=FakeSession,
+        ):
+            await _finish_unprocessed_results(
+                scan_run_id,
+                llm_status="skipped",
+                ai_status="paused",
+                reason="Fundamental processing is paused",
+            )
+
+        self.assertIn("llm_status IN ('queued', 'running')", captured_sql)
+        self.assertEqual(captured_params["scan_run_id"], scan_run_id)
+        self.assertEqual(captured_params["llm_status"], "skipped")
+        self.assertEqual(captured_params["ai_status"], "paused")
+
     async def test_survivor_loader_reads_persisted_technical_results_only(self) -> None:
         captured_sql = ""
 
@@ -677,12 +1010,47 @@ class FundamentalPassOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         provider = AsyncMock()
 
         with patch(
+            "app.services.fundamental_pass._linked_snapshot",
+            return_value=None,
+        ), patch(
             "app.services.fundamental_pass._cached_snapshot",
             return_value=snapshot,
         ):
             result = await _get_snapshot(survivor, provider)
 
         self.assertEqual(result, snapshot)
+        provider.fetch_company_bundle.assert_not_awaited()
+
+    async def test_result_linked_snapshot_ignores_ttl_on_retry(self) -> None:
+        survivor = Survivor(
+            result_id=uuid4(),
+            scan_run_id=uuid4(),
+            instrument_id=uuid4(),
+            isin="INE000000001",
+            symbol="EXAMPLE",
+            company_name="Example",
+        )
+        linked = Snapshot(
+            snapshot_id=uuid4(),
+            facts={"schema_version": "fundamental_facts_v3"},
+            fetched_at=datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc),
+            latest_annual_period="Mar 2020",
+            latest_quarterly_period="Mar 2020",
+            cache_hit=True,
+        )
+        provider = AsyncMock()
+
+        with patch(
+            "app.services.fundamental_pass._linked_snapshot",
+            return_value=linked,
+        ), patch(
+            "app.services.fundamental_pass._cached_snapshot",
+            new=AsyncMock(),
+        ) as ttl_cache:
+            result = await _get_snapshot(survivor, provider)
+
+        self.assertEqual(result, linked)
+        ttl_cache.assert_not_awaited()
         provider.fetch_company_bundle.assert_not_awaited()
 
     def test_rules_are_authoritative_and_provider_limitations_are_neutral(self) -> None:

@@ -310,7 +310,9 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         avg_volume_20,
                         pct_from_52w_high,
                         technical_metrics,
-                        llm_status
+                        llm_status,
+                        fundamental_status,
+                        ai_status
                     )
                     VALUES (
                         :scan_run_id,
@@ -324,7 +326,9 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         :avg_volume_20,
                         :pct_from_52w_high,
                         CAST(:technical_metrics AS jsonb),
-                        :llm_status
+                        :llm_status,
+                        CASE WHEN :llm_status = 'queued' THEN 'queued' ELSE 'not_requested' END,
+                        CASE WHEN :llm_status = 'queued' THEN 'queued' ELSE 'not_requested' END
                     )
                 """)
                 await session.execute(insert_query, survivors)
@@ -376,15 +380,15 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                 )
                 failure_flags = json.dumps(
                     {
-                        "schema_version": "fundamental_result_v3",
+                        "schema_version": "fundamental_result_v4",
                         "summary": (
-                            "Fundamental annotation could not be queued; "
+                            "Fundamental analysis could not be queued; "
                             "manual review remains available."
                         ),
                         "criteria": [],
                         "red_flags": [],
                         "missing_data": [],
-                        "error": {
+                        "fundamental_error": {
                             "type": type(enqueue_error).__name__,
                             "message": str(enqueue_error)[:500],
                         },
@@ -397,6 +401,8 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                             """
                             UPDATE screening_results
                             SET
+                                fundamental_status = 'failed',
+                                ai_status = 'skipped',
                                 llm_status = 'failed',
                                 llm_verdict = NULL,
                                 llm_flags = CAST(:flags AS jsonb),

@@ -4,10 +4,11 @@
 
 P7 runs as a separate arq job after a technical scan has persisted its
 shortlist. It queries only those `screening_results` rows, fetches read-only
-Upstox fundamentals by ISIN, stores a normalized snapshot, and requests one
-strict OpenRouter verdict per survivor. P7 never imports or calls the
-execution engine, and any provider/model failure leaves chart review and the
-manual trade checkpoint available.
+Upstox fundamentals by ISIN, stores a normalized snapshot, computes the
+authoritative Python fit, and may request a blind strict OpenRouter second
+opinion. AI failure never changes a valid source/rules result. P7 never imports
+or calls the execution engine, and any provider/model failure leaves chart
+review and the manual trade checkpoint available.
 
 Apply the P7 migration after the earlier migrations:
 
@@ -15,6 +16,15 @@ Apply the P7 migration after the earlier migrations:
 docker exec -i algo-trading-postgres \
   psql -v ON_ERROR_STOP=1 -U algo -d algo_trading \
   < server/db/migrations/003_p7_fundamental_pass.sql
+```
+
+Existing databases also require the additive reliability and trace migrations
+in numeric order, ending with:
+
+```bash
+docker exec -i algo-trading-postgres \
+  psql -v ON_ERROR_STOP=1 -U algo -d algo_trading \
+  < server/db/migrations/008_p7_ai_trace.sql
 ```
 
 Configure the worker without committing credentials:
@@ -26,22 +36,26 @@ OPENROUTER_API_KEY=<openrouter-key>
 OPENROUTER_MODEL=deepseek/deepseek-v4-flash
 OPENROUTER_REASONING_EFFORT=xhigh  # low | medium | high | xhigh
 FUNDAMENTAL_RUN_TOKEN_BUDGET=150000
-FUNDAMENTAL_PROMPT_MAX_CHARS=6000
+FUNDAMENTAL_PROMPT_MAX_CHARS=12000
 ```
 
 Defaults lock the provider/model behavior:
 
 - consolidated Upstox Company Fundamentals statements
-- a 24-hour snapshot cache and at most five concurrent survivors
+- a 24-hour snapshot cache for new work; retry-incomplete reuses the exact
+  result-linked snapshot regardless of TTL
+- one survivor and one provider/model call at a time
 - OpenRouter remains runtime-configurable: set `OPENROUTER_MODEL` and
   `OPENROUTER_REASONING_EFFORT` in `server/.env`. P7 records the exact model,
   reasoning effort, prompt version, and usage for each annotation.
-- strict JSON Schema with reasoning enabled but excluded from the response
+- a packet-derived strict JSON Schema whose reference enums exactly match the
+  blind request packet; reasoning is enabled but excluded from the response
 - provider data collection denied
 
-If P7 is disabled, existing scans retain `llm_status=not_requested`. If it is
-enabled but credentials are absent or rejected, survivor annotations become
-`failed`; the technical scan remains successful.
+If P7 is disabled, existing scans retain `llm_status=not_requested`. Source and
+AI state are independent: Upstox/normalization errors fail `fundamental_status`,
+while OpenRouter errors affect only `ai_status`. Legacy `llm_status` remains a
+compatibility mirror for journal readers.
 
 ## P4 execution modes
 

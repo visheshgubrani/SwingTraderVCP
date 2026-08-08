@@ -15,7 +15,7 @@ CriterionStatus = Literal["positive", "negative", "mixed", "unknown", "not_appli
 LegacyVerdict = Literal["pass", "fail", "uncertain"]
 AssessmentGrade = Literal["A", "B", "C", "D", "insufficient"]
 
-RUBRIC_VERSION = "minervini_inspired_v1"
+RUBRIC_VERSION = "minervini_inspired_v2"
 FACTS_SCHEMA_VERSION = "fundamental_facts_v3"
 
 
@@ -110,11 +110,15 @@ def _metric_status(value: float | None, *, red_flag: bool = False, strong_at: fl
     return "mixed"
 
 
-def _ownership_value(facts: dict[str, Any], names: tuple[str, ...]) -> float | None:
+def _ownership_observation(
+    facts: dict[str, Any],
+    names: tuple[str, ...],
+) -> tuple[float | None, tuple[str, ...]]:
     evidence = facts.get("evidence")
     if not isinstance(evidence, dict):
-        return None
+        return None, ()
     values: list[float] = []
+    keys: list[str] = []
     for key, item in evidence.items():
         if not isinstance(key, str) or not key.startswith("ownership.") or not isinstance(item, dict):
             continue
@@ -125,13 +129,15 @@ def _ownership_value(facts: dict[str, Any], names: tuple[str, ...]) -> float | N
                 raw = raw.get("change_percentage_points")
             if isinstance(raw, (int, float)) and not isinstance(raw, bool):
                 values.append(float(raw))
-    return sum(values) if values else None
+                keys.append(key)
+    return (sum(values), tuple(sorted(keys))) if values else (None, ())
 
 
 def _metric(
     rule: MetricRule,
     value: float | None,
     *,
+    evidence_keys: tuple[str, ...] | None = None,
     red_flag: bool = False,
     strong_at: float | None = None,
 ) -> dict[str, Any]:
@@ -146,7 +152,11 @@ def _metric(
         "points": points,
         "available": value is not None,
         "status": status,
-        "evidence_keys": list(rule.evidence_keys),
+        "evidence_keys": (
+            list(evidence_keys if evidence_keys is not None else rule.evidence_keys)
+            if value is not None and rule.applicable
+            else []
+        ),
         "unavailable_reason": "Not applicable to this sector." if not rule.applicable else (None if value is not None else rule.unavailable_reason),
     }
 
@@ -223,10 +233,16 @@ def score_minervini_inspired(facts: dict[str, Any]) -> dict[str, Any]:
             MetricRule("cash_conversion", "CFO / PAT", 10, 0.5, 1.0, ("quality.cash_from_operations_to_pat_3y",), "ratio", "Operating cash flow and PAT history are unavailable.", applicable=not financial),
         ],
         "sponsorship": [
-            MetricRule("institutional_change", "Institutional holding change", 6, -3, 3, ("ownership.institutional_change",), "percentage_points", "Comparable FII/MF/DII holdings are unavailable."),
+            MetricRule("institutional_change", "Institutional holding change", 6, -3, 3, (), "percentage_points", "Comparable FII/MF/DII holdings are unavailable."),
             MetricRule("promoter_stability", "Promoter stability", 4, -2, 0, ("ownership.promoters_change",), "percentage_points", "Comparable promoter holdings are unavailable."),
         ],
     }
+
+    institutional_change, institutional_keys = _ownership_observation(
+        facts,
+        ("institutional", "fii", "foreign", "mutual", "dii"),
+    )
+    promoter_change, promoter_keys = _ownership_observation(facts, ("promoter",))
 
     values = {
         "quarterly_eps_yoy": _value(facts, "growth.latest_quarter_eps_yoy"),
@@ -240,8 +256,12 @@ def score_minervini_inspired(facts: dict[str, Any]) -> dict[str, Any]:
         "roce": _ratio(facts, "roce"),
         "annual_margin_change": _value(facts, "margins.latest_annual_yoy_change"),
         "cash_conversion": _value(facts, "quality.cash_from_operations_to_pat_3y") if not financial else None,
-        "institutional_change": _ownership_value(facts, ("institutional", "fii", "foreign", "mutual", "dii")),
-        "promoter_stability": _ownership_value(facts, ("promoter",)),
+        "institutional_change": institutional_change,
+        "promoter_stability": promoter_change,
+    }
+    resolved_evidence = {
+        "institutional_change": institutional_keys,
+        "promoter_stability": promoter_keys,
     }
 
     red_flags: list[str] = []
@@ -262,6 +282,18 @@ def score_minervini_inspired(facts: dict[str, Any]) -> dict[str, Any]:
     if values["institutional_change"] is not None and values["institutional_change"] <= -3:
         red_flags.append("institutional_selling")
 
+    metric_red_flags = {
+        "latest_annual_eps_growth": {"latest_annual_eps_decline"},
+        "annual_eps_cagr": {"non_positive_eps_cagr"},
+        "annual_revenue_cagr": {"non_positive_revenue_cagr"},
+        "annual_margin_change": {"annual_margin_compression"},
+        "cash_conversion": {"weak_cash_conversion"},
+        "roe": {"low_returns"},
+        "roce": {"low_returns"},
+        "promoter_stability": {"promoter_reduction"},
+        "institutional_change": {"institutional_selling"},
+    }
+
     components: list[dict[str, Any]] = []
     applicable_weight = 0.0
     available_weight = 0.0
@@ -274,7 +306,8 @@ def score_minervini_inspired(facts: dict[str, Any]) -> dict[str, Any]:
             metric = _metric(
                 rule,
                 values[rule.key] if rule.applicable else None,
-                red_flag=rule.key in red_flags,
+                evidence_keys=resolved_evidence.get(rule.key),
+                red_flag=bool(metric_red_flags.get(rule.key, set()) & set(red_flags)),
                 strong_at=rule.high,
             )
             if rule.applicable and metric["available"]:
@@ -304,7 +337,7 @@ def score_minervini_inspired(facts: dict[str, Any]) -> dict[str, Any]:
         grade = "A" if score is not None and score >= 80 else "B" if score is not None and score >= 65 else "C" if score is not None and score >= 50 else "D"
 
     criteria = _legacy_criteria(components, red_flags)
-    return {
+    scorecard = {
         "rubric_version": RUBRIC_VERSION,
         "score": score,
         "grade": grade,
@@ -322,6 +355,31 @@ def score_minervini_inspired(facts: dict[str, Any]) -> dict[str, Any]:
         # field is retained only for callers/tests of the old rule API.
         "verdict": None,
     }
+    unresolved = unresolved_scorecard_evidence(facts, scorecard)
+    if unresolved:
+        raise ValueError(
+            f"Scorecard cited evidence absent from normalized facts: {unresolved}"
+        )
+    return scorecard
+
+
+def unresolved_scorecard_evidence(
+    facts: dict[str, Any],
+    scorecard: dict[str, Any],
+) -> list[str]:
+    """Return unresolved scorecard references for preflight checks and traces."""
+
+    evidence = facts.get("evidence") if isinstance(facts.get("evidence"), dict) else {}
+    cited = {
+        key
+        for component in scorecard.get("components", [])
+        if isinstance(component, dict)
+        for metric in component.get("metrics", [])
+        if isinstance(metric, dict)
+        for key in metric.get("evidence_keys", [])
+        if isinstance(key, str)
+    }
+    return sorted(cited - set(evidence))
 
 
 def score_balanced_sepa(facts: dict[str, Any]) -> dict[str, Any]:

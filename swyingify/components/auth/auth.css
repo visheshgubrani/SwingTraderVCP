@@ -1,0 +1,67 @@
+.auth-page .auth-card {
+  max-width: 448px;
+  margin-inline: auto;
+  background: var(--landing-surface);
+  border: 1px solid var(--landing-border);
+  padding: 36px 36px 32px;
+}
+
+.auth-page .auth-display {
+  font: 300 1rem/1.15 var(--font-landing-mono), ui-monospace, monospace;
+  font-size: clamp(34px, 5.4vw, 46px);
+  color: var(--landing-fg);
+  max-width: 14em;
+}
+
+.auth-page .auth-field input {
+  width: 100%;
+  min-height: 50px;
+  padding: 0 56px 0 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 0;
+  color: var(--landing-fg);
+  font-size: 16px;
+  line-height: 1.4;
+  transition:
+    border-color 150ms cubic-bezier(0.2, 0, 0, 1),
+    background 150ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.auth-page .auth-field input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.32);
+  box-shadow: var(--landing-focus);
+}
+
+.auth-page .auth-field input::placeholder {
+  color: var(--landing-meta);
+}
+
+.auth-page .auth-field.has-error input {
+  border-color: color-mix(in oklab, #dc2626 72%, white);
+}
+
+.auth-page .auth-submit-ghost {
+  width: 100%;
+  background: transparent;
+  color: var(--landing-fg);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.auth-page .auth-submit-ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+@media (max-width: 640px) {
+  .auth-page .auth-card {
+    padding: 28px 20px 26px;
+  }
+}
+
+@media (max-width: 480px) {
+  .auth-page .auth-display {
+    font-size: 32px;
+  }
+}

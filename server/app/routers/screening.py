@@ -12,12 +12,21 @@ from app.schemas.screening import (
     FundamentalDetailResponse,
     FundamentalPassProgressResponse,
     FundamentalPassRequest,
+    FundamentalTraceResponse,
     ScanResultResponse,
     ScanRunResponse,
     ScanTriggerResponse,
 )
-from app.services.screening_config import TechnicalScreeningConfig
+from app.services.fundamental_controls import is_fundamental_control_paused
+from app.services.fundamental_data import (
+    FundamentalsDataContractError,
+    upstox_endpoint_manifest,
+    validate_upstox_bundle,
+)
+from app.services.fundamental_llm import sanitize_provider_payload
 from app.services.fundamental_pass import p7_run_config
+from app.services.fundamental_rules import unresolved_scorecard_evidence
+from app.services.screening_config import TechnicalScreeningConfig
 
 router = APIRouter(prefix="/screening", tags=["screening"])
 
@@ -37,7 +46,7 @@ async def get_fundamental_detail(
     result_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> FundamentalDetailResponse:
-    """Return normalized fundamentals and safe AI annotation metadata."""
+    """Return authoritative fundamentals and the separate AI second opinion."""
 
     result = await db.execute(
         text(
@@ -76,6 +85,11 @@ async def get_fundamental_detail(
         raise HTTPException(status_code=404, detail="Screening result not found")
 
     flags = dict(row.llm_flags or {})
+    persisted_opinion = (
+        flags.get("ai_opinion")
+        if isinstance(flags.get("ai_opinion"), dict)
+        else None
+    )
     snapshot = None
     if row.snapshot_id is not None:
         snapshot = {
@@ -97,27 +111,176 @@ async def get_fundamental_detail(
                 "name": row.name,
                 "fyers_symbol": row.fyers_symbol,
             },
-            "annotation": {
-                "status": row.llm_status,
+            "fundamental": {
+                "status": row.fundamental_status,
+                "assessment": _fundamental_assessment(
+                    row.fundamental_scorecard
+                    or flags.get("assessment")
+                    or flags.get("rules", {})
+                ),
+                "scorecard": row.fundamental_scorecard
+                or flags.get("rules", {}),
+                "missing_data": flags.get("missing_data") or [],
+                "provider_limitations": flags.get("provider_limitations") or [],
+                "error": None,
+            },
+            "ai_opinion": {
+                "status": row.ai_status,
                 "verdict": row.llm_verdict,
                 "checked_at": row.llm_checked_at,
-                "summary": flags.get("summary"),
-                "criteria": flags.get("criteria") or [],
-                "red_flags": flags.get("red_flags") or [],
-                "missing_data": flags.get("missing_data") or [],
-                "error": flags.get("error"),
-                "model": flags.get("model"),
-                "rules_verdict": getattr(row, "fundamental_verdict", None) or flags.get("rules", {}).get("verdict"),
-                "scorecard": getattr(row, "fundamental_scorecard", None) or flags.get("rules", {}),
-                "assessment": _fundamental_assessment(getattr(row, "fundamental_scorecard", None) or flags.get("assessment") or flags.get("rules", {})),
-                "provider_limitations": flags.get("provider_limitations", []),
-                "ai_status": getattr(row, "ai_status", None),
-                "strengths": flags.get("strengths") or flags.get("highlights") or [],
+                "summary": (
+                    persisted_opinion.get("summary")
+                    if persisted_opinion
+                    else flags.get("summary")
+                    if flags.get("schema_version") != "fundamental_result_v4"
+                    else None
+                ),
+                "verdict_reference_ids": (
+                    persisted_opinion or {}
+                ).get("verdict_reference_ids", []),
+                "strengths": flags.get("strengths") or [],
                 "risks": flags.get("risks") or [],
                 "review_focus": flags.get("review_focus") or [],
-                "ai_skip_reason": flags.get("ai_skip_reason"),
+                "skip_reason": flags.get("ai_skip_reason"),
+                "error": None,
+                "model": flags.get("model"),
             },
             "snapshot": snapshot,
+        }
+    )
+
+
+@router.get(
+    "/results/{result_id}/fundamentals/trace",
+    response_model=FundamentalTraceResponse,
+)
+async def get_fundamental_trace(
+    result_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> FundamentalTraceResponse:
+    """Return the lazy, sanitized P7 source-to-model audit trail."""
+
+    result = await db.execute(
+        text(
+            """
+            SELECT s.id, s.fundamental_scorecard, s.llm_flags,
+                   s.fundamental_status, s.ai_status, i.isin,
+                   f.id AS snapshot_id, f.provider, f.statement_type,
+                   f.fetched_at, f.content_hash, f.raw_payload,
+                   f.normalized_facts,
+                   item.id AS analysis_item_id, item.analysis_key
+            FROM screening_results s
+            JOIN instruments i ON i.id = s.instrument_id
+            LEFT JOIN fundamental_snapshots f ON f.id = s.fundamental_snapshot_id
+            LEFT JOIN LATERAL (
+                SELECT id, analysis_key
+                FROM fundamental_analysis_items
+                WHERE screening_result_id = s.id
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) item ON true
+            WHERE s.id = :result_id
+            """
+        ),
+        {"result_id": result_id},
+    )
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Screening result not found")
+
+    attempts: list[dict] = []
+    if row.analysis_item_id is not None:
+        attempt_result = await db.execute(
+            text(
+                """
+                SELECT attempt.*
+                FROM fundamental_ai_attempts attempt
+                WHERE attempt.analysis_item_id = :analysis_item_id
+                   OR attempt.id = (
+                        SELECT annotation.source_attempt_id
+                        FROM fundamental_annotations annotation
+                        WHERE annotation.analysis_key = :analysis_key
+                   )
+                ORDER BY attempt.started_at, attempt.attempt_number
+                """
+            ),
+            {
+                "analysis_item_id": row.analysis_item_id,
+                "analysis_key": row.analysis_key,
+            },
+        )
+        for attempt in attempt_result.mappings():
+            item = dict(attempt)
+            item["request_payload"] = sanitize_provider_payload(
+                dict(item.get("request_payload") or {})
+            )
+            response_payload = item.get("response_payload")
+            item["response_payload"] = (
+                sanitize_provider_payload(dict(response_payload))
+                if isinstance(response_payload, dict)
+                else None
+            )
+            item["usage"] = sanitize_provider_payload(dict(item.get("usage") or {}))
+            item["cost"] = float(item.get("cost") or 0)
+            attempts.append(item)
+
+    facts = dict(row.normalized_facts or {})
+    scorecard = dict(row.fundamental_scorecard or {})
+    flags = dict(row.llm_flags or {})
+    unresolved = unresolved_scorecard_evidence(facts, scorecard)
+    latest_request = attempts[-1]["request_payload"] if attempts else None
+    raw_payload = dict(row.raw_payload or {}) if row.snapshot_id else None
+    source_contract_valid: bool | None = None
+    source_contract_error: str | None = None
+    if raw_payload is not None:
+        try:
+            validate_upstox_bundle(raw_payload)
+            source_contract_valid = True
+        except FundamentalsDataContractError as exc:
+            source_contract_valid = False
+            source_contract_error = str(exc)[:1000]
+    return FundamentalTraceResponse.model_validate(
+        {
+            "result_id": row.id,
+            "source": {
+                "snapshot_id": row.snapshot_id,
+                "provider": row.provider,
+                "statement_type": row.statement_type,
+                "fetched_at": row.fetched_at,
+                "content_hash": row.content_hash,
+                "endpoint_manifest": (
+                    upstox_endpoint_manifest(
+                        row.isin,
+                        statement_type=row.statement_type or "consolidated",
+                    )
+                    if row.isin
+                    else []
+                ),
+                "raw_payload": sanitize_provider_payload(raw_payload),
+                "contract_valid": source_contract_valid,
+                "contract_error": source_contract_error,
+            },
+            "normalized": {
+                "schema_version": facts.get("schema_version"),
+                "facts": facts,
+            },
+            "python_fit": {
+                "rubric_version": scorecard.get("rubric_version"),
+                "scorecard": scorecard,
+                "contract_valid": not unresolved,
+                "unresolved_reference_ids": unresolved,
+            },
+            "ai_request": latest_request,
+            "ai_attempts": attempts,
+            "legacy_response_captured": bool(attempts),
+            "pipeline_errors": sanitize_provider_payload(
+                {
+                    "fundamental": flags.get("fundamental_error")
+                    or (flags.get("error") if row.fundamental_status == "failed" else None),
+                    "ai": flags.get("ai_error")
+                    or (flags.get("error") if row.ai_status == "failed" else None),
+                }
+            ),
         }
     )
 
@@ -260,6 +423,15 @@ async def trigger_fundamental_pass(
     if res.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Scan run not found")
 
+    if await is_fundamental_control_paused(db, "processing"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Fundamental processing is paused. Resume processing before "
+                "queueing another pass."
+            ),
+        )
+
     active = await db.execute(
         text("""SELECT id FROM fundamental_analysis_runs WHERE scan_run_id = :run_id
                  AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1"""),
@@ -284,18 +456,37 @@ async def trigger_fundamental_pass(
             )
         """
     )
-    await db.execute(reset_query, {"run_id": run_id, "mode": (payload.mode if payload else "retry_incomplete")})
+    mode = payload.mode if payload else "retry_incomplete"
+    analysis_run_id = uuid.uuid4()
+    queue_job_id = f"fundamental-pass:{run_id}:{analysis_run_id}"
+
+    await db.execute(reset_query, {"run_id": run_id, "mode": mode})
     await db.execute(
         text(
             """
-            INSERT INTO fundamental_analysis_runs (scan_run_id, status, mode, queue_job_id, config)
-            VALUES (:run_id, 'queued', :mode, :job_id, CAST(:config AS jsonb))
+            INSERT INTO fundamental_analysis_runs (
+                id,
+                scan_run_id,
+                status,
+                mode,
+                queue_job_id,
+                config
+            )
+            VALUES (
+                :analysis_run_id,
+                :run_id,
+                'queued',
+                :mode,
+                :queue_job_id,
+                CAST(:config AS jsonb)
+            )
             """
         ),
         {
+            "analysis_run_id": analysis_run_id,
             "run_id": run_id,
-            "mode": payload.mode if payload else "retry_incomplete",
-            "job_id": f"fundamental-pass:{run_id}",
+            "mode": mode,
+            "queue_job_id": queue_job_id,
             "config": json.dumps(p7_run_config()),
         },
     )
@@ -309,23 +500,28 @@ async def trigger_fundamental_pass(
         )
 
     try:
-        await redis_pool.enqueue_job(
+        queued_job = await redis_pool.enqueue_job(
             "run_fundamental_pass",
             str(run_id),
-            payload.mode if payload else "retry_incomplete",
-            _job_id=f"fundamental-pass:{run_id}",
+            mode,
+            _job_id=queue_job_id,
         )
+        if queued_job is None:
+            raise RuntimeError("Redis rejected the duplicate fundamentals queue job ID.")
     except Exception as enqueue_error:
         await db.execute(
             text(
                 """UPDATE fundamental_analysis_runs SET status = 'failed', error_message = :error,
-                   completed_at = now() WHERE scan_run_id = :run_id AND status = 'queued'"""
+                   completed_at = now() WHERE id = :analysis_run_id AND status = 'queued'"""
             ),
-            {"run_id": run_id, "error": str(enqueue_error)[:500]},
+            {
+                "analysis_run_id": analysis_run_id,
+                "error": str(enqueue_error)[:500],
+            },
         )
         await db.commit()
         raise HTTPException(
-            status_code=500,
+            status_code=503,
             detail=f"Failed to enqueue fundamental pass job: {enqueue_error}",
         ) from enqueue_error
 
@@ -347,7 +543,21 @@ async def get_fundamental_pass_progress(
     result = await db.execute(
         text(
             """
-            SELECT r.*, COALESCE(items.counts, '{}'::jsonb) AS counts
+            SELECT
+                r.id AS analysis_run_id,
+                r.scan_run_id,
+                r.status,
+                r.current_rank,
+                r.current_symbol,
+                r.provider_requests,
+                r.input_tokens,
+                r.reasoning_tokens,
+                r.output_tokens,
+                r.cached_tokens,
+                r.total_cost,
+                r.error_message,
+                r.heartbeat_at,
+                COALESCE(items.counts, '{}'::jsonb) AS counts
             FROM fundamental_analysis_runs r
             LEFT JOIN LATERAL (
                 SELECT jsonb_object_agg(status, count) AS counts

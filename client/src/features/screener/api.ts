@@ -194,25 +194,26 @@ export interface FundamentalDetail {
     name: string | null
     fyers_symbol: string
   }
-  annotation: {
-    status: ScanResult["llm_status"]
+  fundamental: {
+    status: string
+    assessment: FundamentalAssessment | null
+    scorecard: Record<string, unknown>
+    missing_data: string[]
+    provider_limitations: string[]
+    error: { type?: string | null; message?: string | null } | null
+  }
+  ai_opinion: {
+    status: string
     verdict: ScanResult["llm_verdict"]
     checked_at: string | null
     summary: string | null
-    criteria: NonNullable<ScanResult["llm_flags"]["criteria"]>
-    red_flags: string[]
-    missing_data: string[]
+    verdict_reference_ids: string[]
     error: { type?: string | null; message?: string | null } | null
     model: Record<string, unknown> | null
-    rules_verdict: "pass" | "fail" | "uncertain" | null
-    scorecard: Record<string, unknown>
-    assessment: FundamentalAssessment | null
-    provider_limitations: string[]
-    ai_status: string | null
-    strengths: Array<{ text: string; evidence_keys: string[] }>
-    risks: Array<{ text: string; evidence_keys: string[] }>
-    review_focus: Array<{ text: string; evidence_keys: string[] }>
-    ai_skip_reason: string | null
+    strengths: Array<{ text: string; reference_ids: string[] }>
+    risks: Array<{ text: string; reference_ids: string[] }>
+    review_focus: Array<{ text: string; reference_ids: string[] }>
+    skip_reason: string | null
   }
   snapshot: {
     id: string
@@ -223,6 +224,54 @@ export interface FundamentalDetail {
     latest_quarterly_period: string | null
     normalized_facts: FundamentalNormalizedFacts
   } | null
+}
+
+export interface FundamentalTrace {
+  result_id: string
+  source: {
+    snapshot_id: string | null
+    provider: string | null
+    statement_type: string | null
+    fetched_at: string | null
+    content_hash: string | null
+    endpoint_manifest: Array<Record<string, unknown>>
+    raw_payload: Record<string, unknown> | null
+    contract_valid: boolean | null
+    contract_error: string | null
+  }
+  normalized: {
+    schema_version: string | null
+    facts: FundamentalNormalizedFacts
+  }
+  python_fit: {
+    rubric_version: string | null
+    scorecard: Record<string, unknown>
+    contract_valid: boolean
+    unresolved_reference_ids: string[]
+  }
+  ai_request: Record<string, unknown> | null
+  ai_attempts: Array<{
+    id: string
+    attempt_number: number
+    status: string
+    model: string
+    reasoning_effort: string
+    prompt_version: string
+    response_schema: string
+    input_hash: string
+    request_payload: Record<string, unknown>
+    response_payload: Record<string, unknown> | null
+    http_status: number | null
+    request_id: string | null
+    usage: Record<string, unknown>
+    cost: number
+    error_code: string | null
+    error_message: string | null
+    started_at: string
+    completed_at: string | null
+  }>
+  legacy_response_captured: boolean
+  pipeline_errors: Record<string, unknown>
 }
 
 interface ScanTriggerResponse {
@@ -259,6 +308,10 @@ export const screeningKeys = {
     [...screeningKeys.all, "fundamental-details"] as const,
   fundamentalDetail: (resultId: string | null) =>
     [...screeningKeys.fundamentalDetails(), { resultId }] as const,
+  fundamentalTraces: () =>
+    [...screeningKeys.all, "fundamental-traces"] as const,
+  fundamentalTrace: (resultId: string | null) =>
+    [...screeningKeys.fundamentalTraces(), { resultId }] as const,
   fundamentalPass: (runId: string | null) =>
     [...screeningKeys.all, "fundamental-pass", { runId }] as const,
 }
@@ -315,16 +368,36 @@ export function useFundamentalDetail(resultId: string | null) {
       ),
     enabled: Boolean(resultId),
     staleTime: (query) => {
-      const status = query.state.data?.annotation.status
-      return status === "queued" || status === "running"
+      const fundamentalStatus = query.state.data?.fundamental.status
+      const aiStatus = query.state.data?.ai_opinion.status
+      return fundamentalStatus === "queued" || fundamentalStatus === "running" ||
+        aiStatus === "queued" || aiStatus === "running"
         ? 1_000
         : Number.POSITIVE_INFINITY
     },
     refetchInterval: (query) => {
-      const status = query.state.data?.annotation.status
-      return status === "queued" || status === "running" ? 1_500 : false
+      const fundamentalStatus = query.state.data?.fundamental.status
+      const aiStatus = query.state.data?.ai_opinion.status
+      return fundamentalStatus === "queued" || fundamentalStatus === "running" ||
+        aiStatus === "queued" || aiStatus === "running" ? 1_500 : false
     },
     retry: 1,
+  })
+}
+
+export function useFundamentalTrace(
+  resultId: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: screeningKeys.fundamentalTrace(resultId),
+    queryFn: () =>
+      apiRequest<FundamentalTrace>(
+        `/screening/results/${resultId}/fundamentals/trace`,
+      ),
+    enabled: Boolean(resultId) && enabled,
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
   })
 }
 
@@ -374,6 +447,9 @@ export function useTriggerFundamentalPass() {
       })
       void queryClient.invalidateQueries({
         queryKey: screeningKeys.fundamentalDetails(),
+      })
+      void queryClient.invalidateQueries({
+        queryKey: screeningKeys.fundamentalTraces(),
       })
       void queryClient.invalidateQueries({ queryKey: screeningKeys.fundamentalPass(runId) })
     },

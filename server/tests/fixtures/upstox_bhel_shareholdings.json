@@ -1,0 +1,40 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "category": "promoters",
+      "history": [
+        {"period": "Jun 2026", "value": 58.17},
+        {"period": "Jun 2025", "value": 63.17}
+      ]
+    },
+    {
+      "category": "fii",
+      "history": [
+        {"period": "Jun 2026", "value": 12.64},
+        {"period": "Jun 2025", "value": 9.36}
+      ]
+    },
+    {
+      "category": "other_dii",
+      "history": [
+        {"period": "Jun 2026", "value": 7.41},
+        {"period": "Jun 2025", "value": 7.36}
+      ]
+    },
+    {
+      "category": "mutual_funds",
+      "history": [
+        {"period": "Jun 2026", "value": 11.28},
+        {"period": "Jun 2025", "value": 7.52}
+      ]
+    },
+    {
+      "category": "retail_and_other",
+      "history": [
+        {"period": "Jun 2026", "value": 10.50},
+        {"period": "Jun 2025", "value": 12.59}
+      ]
+    }
+  ]
+}

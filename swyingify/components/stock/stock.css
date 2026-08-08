@@ -1,0 +1,35 @@
+.scanner-board .stock-page-title {
+  font: 300 1rem/1.1 var(--font-landing-mono), ui-monospace, monospace;
+  font-size: clamp(34px, 4.6vw, 58px);
+  color: var(--landing-fg);
+}
+
+.scanner-board .stock-section-title {
+  font-size: 30px;
+  line-height: 1.2;
+  color: var(--landing-fg);
+}
+
+.scanner-board .stock-check.weak .stock-check-dot {
+  background: var(--landing-meta);
+}
+
+.scanner-board .stock-check.weak .stock-check-label {
+  color: var(--landing-fg-2);
+}
+
+@media (max-width: 900px) {
+  .scanner-board .stock-detail-grid {
+    grid-template-columns: 1fr;
+    gap: 40px;
+  }
+  .scanner-board .stock-stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .scanner-board .stock-stat-grid {
+    gap: 18px 20px;
+  }
+}

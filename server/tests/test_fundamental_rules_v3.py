@@ -69,6 +69,28 @@ class FundamentalRulesV3Tests(unittest.TestCase):
         assessment = score_minervini_inspired(facts)
         self.assertIn("non_positive_eps_cagr", assessment["red_flags"])
         self.assertIn("annual_margin_compression", assessment["red_flags"])
+        earnings = next(
+            component
+            for component in assessment["components"]
+            if component["name"] == "earnings"
+        )
+        eps_cagr = next(
+            metric
+            for metric in earnings["metrics"]
+            if metric["key"] == "annual_eps_cagr"
+        )
+        profitability = next(
+            component
+            for component in assessment["components"]
+            if component["name"] == "profitability"
+        )
+        margin = next(
+            metric
+            for metric in profitability["metrics"]
+            if metric["key"] == "annual_margin_change"
+        )
+        self.assertEqual(eps_cagr["status"], "negative")
+        self.assertEqual(margin["status"], "negative")
 
 
 if __name__ == "__main__":

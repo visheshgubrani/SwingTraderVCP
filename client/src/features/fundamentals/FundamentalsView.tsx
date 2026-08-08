@@ -51,12 +51,17 @@ import {
   type ScanRun,
   useFundamentalDetail,
   useFundamentalPassProgress,
+  useFundamentalTrace,
   useScanResults,
   useScanRuns,
   useTriggerFundamentalPass,
 } from "@/features/screener/api"
 import { useFundamentalControls, useSetFundamentalControl } from "@/features/admin/api"
 import { cn } from "@/lib/utils"
+import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@/components/ui/toggle-group"
 
 type FitFilter =
   | "all"
@@ -83,7 +88,7 @@ function fitBadge(result: Pick<ScanResult, "fundamental_assessment" | "fundament
     return <Badge variant="secondary">Processing</Badge>
   }
   if (result.fundamental_status === "failed") {
-    return <Badge variant="destructive">System failed</Badge>
+    return <Badge variant="destructive">Data unavailable</Badge>
   }
   if (result.fundamental_status === "not_requested") {
     return <Badge variant="outline">Not selected</Badge>
@@ -214,24 +219,143 @@ function HistoryTable({
   )
 }
 
+type TraceStage = "upstox" | "normalized" | "rules" | "request" | "response"
+
+function FundamentalPipelineTrace({
+  detail,
+}: {
+  detail: FundamentalDetail
+}) {
+  const [opened, setOpened] = useState(false)
+  const [stage, setStage] = useState<TraceStage>("upstox")
+  const traceQuery = useFundamentalTrace(detail.result_id, opened)
+  const trace = traceQuery.data
+  const latestAttempt = trace?.ai_attempts.at(-1)
+  const stages: Array<{ id: TraceStage; label: string; status: string }> = [
+    { id: "upstox", label: "Upstox", status: trace?.source.snapshot_id ? "captured" : "unavailable" },
+    { id: "normalized", label: "Normalized", status: trace?.normalized.schema_version ? "validated" : "unavailable" },
+    { id: "rules", label: "Python fit", status: trace?.python_fit.contract_valid ? "valid" : "invalid" },
+    { id: "request", label: "AI request", status: trace?.ai_request ? "captured" : "not captured" },
+    { id: "response", label: "AI response", status: latestAttempt?.status ?? "not captured" },
+  ]
+  const selectedPayload = trace
+    ? stage === "upstox"
+      ? trace.source
+      : stage === "normalized"
+        ? trace.normalized
+        : stage === "rules"
+          ? trace.python_fit
+          : stage === "request"
+            ? trace.ai_request
+            : {
+                legacy_response_captured: trace.legacy_response_captured,
+                attempts: trace.ai_attempts,
+              }
+    : null
+
+  if (!opened) {
+    return (
+      <section className="rounded-lg border border-dashed p-4">
+        <h3 className="text-sm font-semibold">Pipeline audit trace</h3>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          Load the stored Upstox payload, normalization, Python contract, and sanitized model attempts only when needed.
+        </p>
+        <Button className="mt-3" onClick={() => setOpened(true)} size="sm" variant="outline">
+          Open audit trace
+        </Button>
+      </section>
+    )
+  }
+
+  return (
+    <section className="flex flex-col gap-3 rounded-lg border p-4">
+      <div>
+        <h3 className="text-sm font-semibold">Pipeline audit trace</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Upstox → Normalized → Python fit → AI request → AI response
+        </p>
+      </div>
+      {traceQuery.isLoading ? (
+        <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+          <Spinner className="size-4" /> Loading stored trace…
+        </div>
+      ) : traceQuery.isError ? (
+        <Alert variant="destructive">
+          <XCircleIcon aria-hidden="true" />
+          <AlertTitle>Could not load trace</AlertTitle>
+          <AlertDescription>
+            {traceQuery.error instanceof Error ? traceQuery.error.message : "The trace endpoint is unavailable."}
+          </AlertDescription>
+        </Alert>
+      ) : (
+        <>
+          <ToggleGroup className="flex w-full flex-wrap justify-start" size="sm" variant="outline">
+            {stages.map((item) => (
+              <ToggleGroupItem
+                aria-label={`Show ${item.label} trace`}
+                key={item.id}
+                onPressedChange={(pressed) => pressed && setStage(item.id)}
+                pressed={stage === item.id}
+              >
+                <span>{item.label}</span>
+                <Badge
+                  className="ml-1"
+                  variant={
+                    ["invalid", "invalid_response", "provider_error", "transport_unknown", "unavailable"].includes(item.status)
+                      ? "destructive"
+                      : item.status === "not captured"
+                        ? "outline"
+                        : "secondary"
+                  }
+                >
+                  {item.status}
+                </Badge>
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+          <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/30 p-3 text-[11px] whitespace-pre-wrap">
+            {JSON.stringify(selectedPayload, null, 2)}
+          </pre>
+        </>
+      )}
+    </section>
+  )
+}
+
 function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
   const facts = detail.snapshot?.normalized_facts
   const evidence = facts?.evidence ?? {}
   const ratios = Object.entries(facts?.ratios ?? {})
   const holdings = Object.entries(facts?.histories?.shareholding ?? {})
   const corporateActions = evidence["corporate_actions.recent"]?.value
-  const assessment = detail.annotation.assessment
+  const assessment = detail.fundamental.assessment
+  const criteria = Array.isArray(detail.fundamental.scorecard.criteria)
+    ? detail.fundamental.scorecard.criteria as Array<{
+        name: string
+        status: "positive" | "negative" | "mixed" | "unknown" | "not_applicable"
+        explanation: string
+        evidence_keys: string[]
+      }>
+    : []
 
   return (
     <div className="flex flex-col gap-6 px-4 pb-8">
-      {detail.annotation.status === "failed" && (
+      {detail.fundamental.status === "failed" && (
         <Alert variant="destructive">
           <DatabaseZapIcon aria-hidden="true" />
-          <AlertTitle>Annotation system failed</AlertTitle>
+          <AlertTitle>Fundamental data unavailable</AlertTitle>
           <AlertDescription>
-            {detail.annotation.error?.type ?? "Unknown error"}: {" "}
-            {detail.annotation.error?.message ??
-              "The provider or model did not return a usable result."}
+            Upstox data or deterministic normalization could not be completed. Open the audit trace for the stored error.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {detail.ai_opinion.status === "failed" && (
+        <Alert>
+          <BrainCircuitIcon aria-hidden="true" />
+          <AlertTitle>AI second opinion unavailable</AlertTitle>
+          <AlertDescription>
+            The Python fit remains authoritative. Open the audit trace for model-attempt details.
           </AlertDescription>
         </Alert>
       )}
@@ -239,10 +363,12 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
       <section className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
           {fitBadge({
-            fundamental_status: detail.annotation.status,
+            fundamental_status: detail.fundamental.status,
             fundamental_assessment: assessment,
           })}
-          <Badge variant="outline">AI: {detail.annotation.ai_status ?? detail.annotation.status}</Badge>
+          <Badge variant="outline">
+            AI: {detail.ai_opinion.verdict ?? detail.ai_opinion.status.replaceAll("_", " ")}
+          </Badge>
           {detail.snapshot && (
             <>
               <Badge variant="outline">{detail.snapshot.provider}</Badge>
@@ -253,8 +379,8 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
           )}
         </div>
         <p className="leading-6 text-muted-foreground">
-          {detail.annotation.summary ??
-            "No AI explanation is available; the deterministic fundamental fit remains available."}
+          {detail.ai_opinion.summary ??
+            "Minervini-inspired fundamental fit is available. The independent AI second opinion is not available."}
         </p>
       </section>
 
@@ -301,19 +427,19 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
         </section>
       )}
 
-      {(detail.annotation.strengths.length > 0 || detail.annotation.risks.length > 0 || detail.annotation.review_focus.length > 0) && (
+      {(detail.ai_opinion.strengths.length > 0 || detail.ai_opinion.risks.length > 0 || detail.ai_opinion.review_focus.length > 0) && (
         <section className="grid gap-4 md:grid-cols-3">
           {([
-            ["Strengths", detail.annotation.strengths, "default"],
-            ["Risks", detail.annotation.risks, "destructive"],
-            ["Review focus", detail.annotation.review_focus, "outline"],
+            ["Strengths", detail.ai_opinion.strengths, "default"],
+            ["Risks", detail.ai_opinion.risks, "destructive"],
+            ["Review focus", detail.ai_opinion.review_focus, "outline"],
           ] as const).map(([title, notes, variant]) => notes.length > 0 && (
             <div className="flex flex-col gap-2 rounded-lg border p-3" key={title}>
               <h3 className="text-sm font-semibold">{title}</h3>
               {notes.map((note, index) => (
                 <div className="flex flex-col gap-1" key={`${title}-${index}`}>
                   <Badge className="w-fit max-w-full whitespace-normal text-left" variant={variant}>{note.text}</Badge>
-                  {note.evidence_keys.length > 0 && <span className="text-[11px] text-muted-foreground">Evidence: {note.evidence_keys.join(", ")}</span>}
+                  {note.reference_ids.length > 0 && <span className="text-[11px] text-muted-foreground">References: {note.reference_ids.join(", ")}</span>}
                 </div>
               ))}
             </div>
@@ -357,14 +483,14 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
         </section>
       )}
 
-      {detail.annotation.criteria.length > 0 && (
+      {criteria.length > 0 && (
         <section className="flex flex-col gap-3">
           <div className="flex items-center gap-2">
             <BrainCircuitIcon aria-hidden="true" />
             <h3 className="text-sm font-semibold">Scoring evidence</h3>
           </div>
           <div className="flex flex-col gap-2">
-            {detail.annotation.criteria.map((criterion) => (
+            {criteria.map((criterion) => (
               <article className="rounded-lg border p-3" key={criterion.name}>
                 <div className="flex items-center justify-between gap-3">
                   <strong>{prettyKey(criterion.name)}</strong>
@@ -474,17 +600,17 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
         </section>
       )}
 
-      {(detail.annotation.red_flags.length > 0 ||
-        detail.annotation.missing_data.length > 0) && (
+      {((assessment?.red_flags.length ?? 0) > 0 ||
+        detail.fundamental.missing_data.length > 0) && (
         <section className="flex flex-col gap-3">
           <h3 className="text-sm font-semibold">Review warnings</h3>
           <div className="flex flex-wrap gap-2">
-            {detail.annotation.red_flags.map((flag) => (
+            {(assessment?.red_flags ?? []).map((flag) => (
               <Badge key={flag} variant="destructive">
                 {prettyKey(flag)}
               </Badge>
             ))}
-            {detail.annotation.missing_data.map((field) => (
+            {detail.fundamental.missing_data.map((field) => (
               <Badge key={field} variant="outline">
                 Missing: {prettyKey(field)}
               </Badge>
@@ -493,11 +619,11 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
         </section>
       )}
 
-      {detail.annotation.provider_limitations.length > 0 && (
+      {detail.fundamental.provider_limitations.length > 0 && (
         <section className="flex flex-col gap-3">
           <h3 className="text-sm font-semibold">Provider limitations</h3>
           <div className="flex flex-wrap gap-2">
-            {detail.annotation.provider_limitations.map((field) => (
+            {detail.fundamental.provider_limitations.map((field) => (
               <Badge key={field} variant="outline">
                 Upstox does not provide: {prettyKey(field)}
               </Badge>
@@ -505,6 +631,8 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
           </div>
         </section>
       )}
+
+      <FundamentalPipelineTrace detail={detail} />
 
       <Separator />
       <section className="grid grid-cols-2 gap-3 text-xs text-muted-foreground">
@@ -520,22 +648,22 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
               }).format(new Date(detail.snapshot.fetched_at))
             : "Not available"}
         </span>
-        {detail.annotation.model && (
+        {detail.ai_opinion.model && (
           <>
             <span>
-              Model: {String(detail.annotation.model.provider ?? "unknown")} · {String(detail.annotation.model.name ?? "unknown")}
+              Model: {String(detail.ai_opinion.model.provider ?? "unknown")} · {String(detail.ai_opinion.model.name ?? "unknown")}
             </span>
             <span>
-              Prompt: {String(detail.annotation.model.prompt_version ?? "—")} · Request {String(detail.annotation.model.request_id ?? "—")}
+              Prompt: {String(detail.ai_opinion.model.prompt_version ?? "—")} · Request {String(detail.ai_opinion.model.request_id ?? "—")}
             </span>
           </>
         )}
         <span>
-          AI checked: {detail.annotation.checked_at
+          AI checked: {detail.ai_opinion.checked_at
             ? new Intl.DateTimeFormat("en-IN", {
                 dateStyle: "medium",
                 timeStyle: "short",
-              }).format(new Date(detail.annotation.checked_at))
+              }).format(new Date(detail.ai_opinion.checked_at))
             : "Not available"}
         </span>
       </section>
@@ -605,7 +733,7 @@ export function FundamentalsView() {
             <h1 className="text-lg font-semibold">Fundamental analysis</h1>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Minervini-inspired fundamental fit ranks the available evidence; AI explains what to review next.
+            Python grades the available evidence; AI provides a separate, grounded second opinion.
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-3">
@@ -689,7 +817,8 @@ export function FundamentalsView() {
               activeRun?.status === "queued" ||
               activeRun?.status === "running" ||
               triggerPassMutation.isPending ||
-              isProcessing
+              isProcessing ||
+              controlsQuery.data?.processing.paused
             }
             onClick={() => {
               if (selectedRunId) {
@@ -710,7 +839,12 @@ export function FundamentalsView() {
                 : "Run missing analysis"}
           </Button>
           <Button
-            disabled={!selectedRunId || triggerPassMutation.isPending || isProcessing}
+            disabled={
+              !selectedRunId ||
+              triggerPassMutation.isPending ||
+              isProcessing ||
+              controlsQuery.data?.processing.paused
+            }
             onClick={() => setRefreshConfirmOpen(true)}
             size="icon"
             title="Refresh Upstox source data"

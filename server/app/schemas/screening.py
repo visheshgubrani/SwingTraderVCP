@@ -9,19 +9,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-class FundamentalCriterionResponse(BaseModel):
-    name: str
-    status: Literal[
-        "positive",
-        "negative",
-        "mixed",
-        "unknown",
-        "not_applicable",
-    ]
-    explanation: str
-    evidence_keys: list[str] = Field(default_factory=list)
-
-
 class FundamentalErrorResponse(BaseModel):
     type: str | None = None
     message: str | None = None
@@ -72,34 +59,6 @@ class FundamentalAssessmentResponse(BaseModel):
     insufficient_reason: str | None = None
 
 
-class FundamentalAnnotationResponse(BaseModel):
-    status: Literal[
-        "not_requested",
-        "queued",
-        "running",
-        "succeeded",
-        "failed",
-        "skipped",
-    ]
-    verdict: Literal["pass", "fail", "uncertain"] | None = None
-    checked_at: datetime.datetime | None = None
-    summary: str | None = None
-    criteria: list[FundamentalCriterionResponse] = Field(default_factory=list)
-    red_flags: list[str] = Field(default_factory=list)
-    missing_data: list[str] = Field(default_factory=list)
-    error: FundamentalErrorResponse | None = None
-    model: FundamentalModelResponse | None = None
-    rules_verdict: Literal["pass", "fail", "uncertain"] | None = None
-    scorecard: dict[str, Any] = Field(default_factory=dict)
-    assessment: FundamentalAssessmentResponse | None = None
-    provider_limitations: list[str] = Field(default_factory=list)
-    ai_status: str | None = None
-    strengths: list[dict[str, Any]] = Field(default_factory=list)
-    risks: list[dict[str, Any]] = Field(default_factory=list)
-    review_focus: list[dict[str, Any]] = Field(default_factory=list)
-    ai_skip_reason: str | None = None
-
-
 class FundamentalInstrumentResponse(BaseModel):
     symbol: str
     name: str | None = None
@@ -116,12 +75,104 @@ class FundamentalSnapshotResponse(BaseModel):
     normalized_facts: dict[str, Any]
 
 
+class FundamentalSourceResponse(BaseModel):
+    status: Literal[
+        "not_requested", "queued", "running", "completed", "failed", "skipped"
+    ]
+    assessment: FundamentalAssessmentResponse | None = None
+    scorecard: dict[str, Any] = Field(default_factory=dict)
+    missing_data: list[str] = Field(default_factory=list)
+    provider_limitations: list[str] = Field(default_factory=list)
+    error: FundamentalErrorResponse | None = None
+
+
+class FundamentalAIOpinionResponse(BaseModel):
+    status: Literal[
+        "not_requested",
+        "queued",
+        "running",
+        "succeeded",
+        "cached",
+        "failed",
+        "paused",
+        "budget_exhausted",
+        "skipped",
+    ]
+    verdict: Literal["pass", "fail", "uncertain"] | None = None
+    checked_at: datetime.datetime | None = None
+    summary: str | None = None
+    verdict_reference_ids: list[str] = Field(default_factory=list)
+    strengths: list[dict[str, Any]] = Field(default_factory=list)
+    risks: list[dict[str, Any]] = Field(default_factory=list)
+    review_focus: list[dict[str, Any]] = Field(default_factory=list)
+    skip_reason: str | None = None
+    error: FundamentalErrorResponse | None = None
+    model: FundamentalModelResponse | None = None
+
+
 class FundamentalDetailResponse(BaseModel):
     result_id: uuid.UUID
     scan_run_id: uuid.UUID
     instrument: FundamentalInstrumentResponse
-    annotation: FundamentalAnnotationResponse
+    fundamental: FundamentalSourceResponse
+    ai_opinion: FundamentalAIOpinionResponse
     snapshot: FundamentalSnapshotResponse | None = None
+
+
+class FundamentalTraceSourceResponse(BaseModel):
+    snapshot_id: uuid.UUID | None = None
+    provider: str | None = None
+    statement_type: str | None = None
+    fetched_at: datetime.datetime | None = None
+    content_hash: str | None = None
+    endpoint_manifest: list[dict[str, Any]] = Field(default_factory=list)
+    raw_payload: dict[str, Any] | None = None
+    contract_valid: bool | None = None
+    contract_error: str | None = None
+
+
+class FundamentalTraceNormalizedResponse(BaseModel):
+    schema_version: str | None = None
+    facts: dict[str, Any] = Field(default_factory=dict)
+
+
+class FundamentalTraceRulesResponse(BaseModel):
+    rubric_version: str | None = None
+    scorecard: dict[str, Any] = Field(default_factory=dict)
+    contract_valid: bool
+    unresolved_reference_ids: list[str] = Field(default_factory=list)
+
+
+class FundamentalAIAttemptResponse(BaseModel):
+    id: uuid.UUID
+    attempt_number: int
+    status: str
+    model: str
+    reasoning_effort: str
+    prompt_version: str
+    response_schema: str
+    input_hash: str
+    request_payload: dict[str, Any]
+    response_payload: dict[str, Any] | None = None
+    http_status: int | None = None
+    request_id: str | None = None
+    usage: dict[str, Any] = Field(default_factory=dict)
+    cost: float = 0.0
+    error_code: str | None = None
+    error_message: str | None = None
+    started_at: datetime.datetime
+    completed_at: datetime.datetime | None = None
+
+
+class FundamentalTraceResponse(BaseModel):
+    result_id: uuid.UUID
+    source: FundamentalTraceSourceResponse
+    normalized: FundamentalTraceNormalizedResponse
+    python_fit: FundamentalTraceRulesResponse
+    ai_request: dict[str, Any] | None = None
+    ai_attempts: list[FundamentalAIAttemptResponse] = Field(default_factory=list)
+    legacy_response_captured: bool = False
+    pipeline_errors: dict[str, Any] = Field(default_factory=dict)
 
 
 class ScanTriggerResponse(BaseModel):

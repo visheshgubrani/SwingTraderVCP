@@ -7,6 +7,11 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://algo:algo@localhost:5480/algo_trading"
     redis_url: str = "redis://localhost:6380/0"
+    # redis-py 8 defaults socket_timeout=5s; arq does not override it. Tune for long jobs.
+    redis_socket_timeout: float = Field(default=30.0, gt=0, le=300)
+    redis_health_check_interval: float = Field(default=30.0, ge=0, le=300)
+    redis_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    sync_queued_stale_seconds: int = Field(default=300, ge=60, le=3600)
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:3000", "http://localhost:3000"]
 
     fyers_app_id: str = ""
@@ -49,7 +54,7 @@ class Settings(BaseSettings):
     # conservative but deployment may choose another supported OpenRouter model.
     openrouter_model: str = "deepseek/deepseek-v4-flash"
     openrouter_reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "xhigh"
-    openrouter_prompt_version: str = "minervini_fundamentals_v1"
+    openrouter_prompt_version: str = "fundamental_second_opinion_v1"
     openrouter_http_referer: str = ""
     openrouter_app_title: str = "SwingTraderVCP"
     fundamentals_snapshot_ttl_hours: int = Field(default=24, ge=1, le=168)
@@ -60,7 +65,7 @@ class Settings(BaseSettings):
     fundamentals_http_max_attempts: int = Field(default=3, ge=1, le=5)
     openrouter_max_tokens: int = Field(default=3200, ge=256, le=4096)
     fundamental_run_token_budget: int = Field(default=150_000, ge=1_000, le=500_000)
-    fundamental_prompt_max_chars: int = Field(default=6_000, ge=1_000, le=12_000)
+    fundamental_prompt_max_chars: int = Field(default=12_000, ge=1_000, le=12_000)
     openrouter_http_timeout_seconds: float = Field(default=60.0, gt=0, le=120)
     # GPT-5.6 reasoning endpoints do not support sampling temperature. Keep
     # this opt-in for model overrides that do support it.

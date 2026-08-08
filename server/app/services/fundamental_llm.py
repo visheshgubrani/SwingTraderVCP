@@ -1,4 +1,4 @@
-"""Strict, compact OpenRouter explanations for deterministic P7 scorecards."""
+"""Auditable, grounded OpenRouter second opinions for P7 fundamentals."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -16,65 +16,165 @@ from app.services.openrouter_content import parse_openrouter_structured_content
 
 
 class FundamentalLLMError(RuntimeError):
-    """The read-only explanation request or its response was not usable."""
+    """A model request failed, with safe provider metadata retained for tracing."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        response_payload: dict[str, Any] | None = None,
+        http_status: int | None = None,
+        request_id: str | None = None,
+        usage: dict[str, Any] | None = None,
+        cost: float = 0.0,
+        retryable: bool = False,
+        attempt_status: Literal[
+            "invalid_response",
+            "provider_error",
+            "transport_unknown",
+        ] = "provider_error",
+    ) -> None:
+        super().__init__(message)
+        self.response_payload = response_payload
+        self.http_status = http_status
+        self.request_id = request_id
+        self.usage = usage or {}
+        self.cost = cost
+        self.retryable = retryable
+        self.attempt_status = attempt_status
 
 
-class EvidenceNote(BaseModel):
+class FundamentalReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=100)
+    kind: Literal["metric", "history", "limitation"]
+    label: str = Field(min_length=1, max_length=160)
+    value: Any = None
+    unit: str | None = None
+    periods: list[str] = Field(default_factory=list, max_length=6)
+
+
+class FundamentalCompanyContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    isin: str | None = None
+    symbol: str | None = None
+    name: str | None = None
+    sector: str | None = None
+    industry: str | None = None
+    is_financial_sector: bool = False
+
+
+class FundamentalPeriodContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    latest_annual: str | None = None
+    latest_quarterly: str | None = None
+
+
+class FundamentalSecondOpinionPacketV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["fundamental_second_opinion_packet_v1"] = (
+        "fundamental_second_opinion_packet_v1"
+    )
+    prompt_version: str
+    source_provider: Literal["upstox"] = "upstox"
+    statement_type: Literal["consolidated", "standalone"] = "consolidated"
+    company: FundamentalCompanyContext
+    periods: FundamentalPeriodContext
+    references: list[FundamentalReference] = Field(default_factory=list, max_length=64)
+
+
+class ReferenceNote(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1, max_length=180)
-    evidence_keys: list[str] = Field(max_length=3)
+    reference_ids: list[str] = Field(min_length=1, max_length=3)
 
 
-class FundamentalExplanation(BaseModel):
+class FundamentalSecondOpinion(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    verdict: Literal["pass", "fail", "uncertain"]
     summary: str = Field(min_length=1, max_length=400)
-    strengths: list[EvidenceNote] = Field(max_length=3)
-    risks: list[EvidenceNote] = Field(max_length=3)
-    review_focus: list[EvidenceNote] = Field(max_length=2)
-
-    @property
-    def highlights(self) -> list[EvidenceNote]:
-        """Compatibility alias for persisted v2 annotation consumers."""
-        return self.strengths
+    verdict_reference_ids: list[str] = Field(min_length=1, max_length=5)
+    strengths: list[ReferenceNote] = Field(default_factory=list, max_length=3)
+    risks: list[ReferenceNote] = Field(default_factory=list, max_length=3)
+    review_focus: list[ReferenceNote] = Field(default_factory=list, max_length=2)
 
 
-# Compatibility parser for historical v1 snapshots/tests. P7 v2 never calls
-# this path: it always supplies a deterministic scorecard.
-class LegacyCriterion(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str
-    status: str
-    explanation: str
-    evidence_keys: list[str]
-
-
-class LegacyVerdict(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    verdict: str
-    summary: str
-    criteria: list[LegacyCriterion]
-    red_flags: list[str]
-    missing_data: list[str]
+@dataclass(frozen=True)
+class PreparedFundamentalRequest:
+    packet: FundamentalSecondOpinionPacketV1
+    request_payload: dict[str, Any]
+    input_hash: str
+    has_usable_facts: bool
 
 
 @dataclass(frozen=True)
 class FundamentalLLMResult:
-    explanation: FundamentalExplanation
+    opinion: FundamentalSecondOpinion
     request_id: str | None
     usage: dict[str, Any]
     input_hash: str
     cost: float
-    verdict: LegacyVerdict | None = None
+    request_payload: dict[str, Any]
+    response_payload: dict[str, Any]
 
 
 async def _default_sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+def sanitize_provider_payload(value: Any) -> Any:
+    """Remove reasoning payloads recursively before persistence or exposure."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): sanitize_provider_payload(item)
+            for key, item in value.items()
+            if str(key) != "reasoning_details"
+        }
+    if isinstance(value, list):
+        return [sanitize_provider_payload(item) for item in value]
+    return value
+
+
+def _humanize_reference(value: str) -> str:
+    return value.replace(".", " ").replace("_", " ").title()
+
+
+def _compact_corporate_actions(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    compact: list[dict[str, Any]] = []
+    for action in value[:5]:
+        if not isinstance(action, Mapping):
+            continue
+        compact.append(
+            {
+                key: action.get(key)
+                for key in ("name", "expiry_date", "amount", "ratio")
+                if action.get(key) is not None
+            }
+        )
+    return compact
+
+
+def _usage_and_cost(payload: Mapping[str, Any]) -> tuple[dict[str, Any], float]:
+    raw_usage = payload.get("usage")
+    usage = dict(raw_usage) if isinstance(raw_usage, Mapping) else {}
+    try:
+        cost = float(usage.get("cost", 0) or 0)
+    except (TypeError, ValueError):
+        cost = 0.0
+    return usage, cost
+
+
 class OpenRouterFundamentalClient:
-    """One OpenRouter call per scorecard; it may explain, never decide."""
+    """One blind, grounded AI opinion over normalized facts; never a trade action."""
 
     def __init__(
         self,
@@ -83,13 +183,13 @@ class OpenRouterFundamentalClient:
         api_url: str = "https://openrouter.ai/api/v1/chat/completions",
         model: str = "openai/gpt-5.6-luna-pro",
         reasoning_effort: str = "low",
-        prompt_version: str = "sepa_fundamentals_v1",
+        prompt_version: str = "fundamental_second_opinion_v1",
         app_title: str = "SwingTraderVCP",
         http_referer: str = "",
         timeout_seconds: float = 60.0,
         max_attempts: int = 2,
         max_tokens: int = 3200,
-        prompt_max_chars: int = 6000,
+        prompt_max_chars: int = 12000,
         temperature: float | None = 0,
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Awaitable[None]] = _default_sleep,
@@ -121,68 +221,176 @@ class OpenRouterFundamentalClient:
     def reasoning_effort(self) -> str:
         return self._reasoning_effort
 
-    def _packet(self, facts: Mapping[str, Any], scorecard: Mapping[str, Any]) -> dict[str, Any]:
-        evidence = facts.get("evidence") if isinstance(facts.get("evidence"), Mapping) else {}
-        packet = {
-            "prompt_version": self._prompt_version,
-            "rules_are_authoritative": True,
-            "assessment": {
-                "rubric_version": scorecard.get("rubric_version"),
-                "score": scorecard.get("score"),
-                "grade": scorecard.get("grade"),
-                "coverage_pct": scorecard.get("coverage_pct"),
-                "components": scorecard.get("components", []),
-                "red_flags": scorecard.get("red_flags", []),
-            },
-            "provider_limitations": scorecard.get("provider_limitations", []),
-            "company": facts.get("company", {}),
-            "periods": facts.get("periods", {}),
-            "evidence": evidence,
-        }
-        encoded = json.dumps(packet, sort_keys=True, separators=(",", ":"))
+    @staticmethod
+    def _packet_references(facts: Mapping[str, Any]) -> list[FundamentalReference]:
+        references: dict[str, FundamentalReference] = {}
+        raw_evidence = facts.get("evidence")
+        if isinstance(raw_evidence, Mapping):
+            for key, raw in raw_evidence.items():
+                if not isinstance(key, str) or not isinstance(raw, Mapping):
+                    continue
+                value = raw.get("value")
+                if key == "corporate_actions.recent":
+                    value = _compact_corporate_actions(value)
+                references[key] = FundamentalReference(
+                    id=key,
+                    kind="metric",
+                    label=str(raw.get("label") or _humanize_reference(key)),
+                    value=value,
+                    unit=str(raw["unit"]) if raw.get("unit") is not None else None,
+                    periods=[
+                        str(period)
+                        for period in raw.get("periods", [])[:6]
+                        if isinstance(period, str)
+                    ]
+                    if isinstance(raw.get("periods"), list)
+                    else [],
+                )
+
+        histories = facts.get("histories")
+        if isinstance(histories, Mapping):
+            for scope in ("annual", "quarterly"):
+                series = histories.get(scope)
+                if not isinstance(series, Mapping):
+                    continue
+                for metric, points in series.items():
+                    if not isinstance(metric, str) or not isinstance(points, list) or not points:
+                        continue
+                    compact_points = [dict(point) for point in points[:5] if isinstance(point, Mapping)]
+                    if not compact_points:
+                        continue
+                    reference_id = f"history.{scope}.{metric}"
+                    references[reference_id] = FundamentalReference(
+                        id=reference_id,
+                        kind="history",
+                        label=f"{scope.title()} {_humanize_reference(metric)} history",
+                        value=compact_points,
+                        periods=[
+                            str(point["period"])
+                            for point in compact_points
+                            if isinstance(point.get("period"), str)
+                        ][:5],
+                    )
+
+            shareholding = histories.get("shareholding")
+            if isinstance(shareholding, Mapping):
+                for category, points in shareholding.items():
+                    if not isinstance(category, str) or not isinstance(points, list) or not points:
+                        continue
+                    compact_points = [dict(point) for point in points[:4] if isinstance(point, Mapping)]
+                    reference_id = f"history.shareholding.{category}"
+                    references[reference_id] = FundamentalReference(
+                        id=reference_id,
+                        kind="history",
+                        label=f"{_humanize_reference(category)} shareholding history",
+                        value=compact_points,
+                        unit="percent",
+                        periods=[
+                            str(point["period"])
+                            for point in compact_points
+                            if isinstance(point.get("period"), str)
+                        ][:4],
+                    )
+
+        limitations = facts.get("provider_limitations")
+        if isinstance(limitations, list):
+            for limitation in limitations:
+                if not isinstance(limitation, str):
+                    continue
+                reference_id = f"limitation.{limitation}"
+                references[reference_id] = FundamentalReference(
+                    id=reference_id,
+                    kind="limitation",
+                    label=f"Upstox limitation: {_humanize_reference(limitation)}",
+                )
+        return [references[key] for key in sorted(references)]
+
+    def build_packet(self, facts: Mapping[str, Any]) -> FundamentalSecondOpinionPacketV1:
+        raw_company = facts.get("company") if isinstance(facts.get("company"), Mapping) else {}
+        raw_periods = facts.get("periods") if isinstance(facts.get("periods"), Mapping) else {}
+        packet = FundamentalSecondOpinionPacketV1(
+            prompt_version=self._prompt_version,
+            statement_type=(
+                facts.get("statement_type")
+                if facts.get("statement_type") in {"consolidated", "standalone"}
+                else "consolidated"
+            ),
+            company=FundamentalCompanyContext(
+                isin=raw_company.get("isin"),
+                symbol=raw_company.get("symbol"),
+                name=raw_company.get("name"),
+                sector=raw_company.get("sector"),
+                industry=raw_company.get("industry"),
+                is_financial_sector=bool(raw_company.get("is_financial_sector")),
+            ),
+            periods=FundamentalPeriodContext(
+                latest_annual=raw_periods.get("latest_annual"),
+                latest_quarterly=raw_periods.get("latest_quarterly"),
+            ),
+            references=self._packet_references(facts),
+        )
+        encoded = json.dumps(packet.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
         if len(encoded) > self._prompt_max_chars:
-            # Evidence values are deterministic facts. Trim labels/descriptions first,
-            # never the scorecard or evidence keys, to preserve citation validity.
-            compact_evidence = {
-                key: {"value": value.get("value"), "unit": value.get("unit")}
-                for key, value in evidence.items()
-                if isinstance(value, Mapping)
-            }
-            packet["evidence"] = compact_evidence
-            encoded = json.dumps(packet, sort_keys=True, separators=(",", ":"))
-        if len(encoded) > self._prompt_max_chars:
-            raise FundamentalLLMError("Fundamental analysis packet exceeds configured size limit")
+            raise FundamentalLLMError(
+                "Fundamental second-opinion packet exceeds configured size limit",
+                attempt_status="invalid_response",
+            )
         return packet
 
-    def build_request(
+    @staticmethod
+    def _response_schema(allowed_ids: list[str]) -> dict[str, Any]:
+        schema = FundamentalSecondOpinion.model_json_schema()
+        schema["required"] = [
+            "verdict",
+            "summary",
+            "verdict_reference_ids",
+            "strengths",
+            "risks",
+            "review_focus",
+        ]
+        enum_items = {"type": "string", "enum": allowed_ids}
+        schema["properties"]["verdict_reference_ids"]["items"] = enum_items
+        note_schema = schema.get("$defs", {}).get("ReferenceNote")
+        if isinstance(note_schema, dict):
+            note_schema["properties"]["reference_ids"]["items"] = enum_items
+        return schema
+
+    def _request_from_packet(
         self,
-        facts: Mapping[str, Any],
-        scorecard: Mapping[str, Any],
+        packet: FundamentalSecondOpinionPacketV1,
     ) -> dict[str, Any]:
-        packet = self._packet(facts, scorecard)
+        allowed_ids = [reference.id for reference in packet.references]
         request: dict[str, Any] = {
             "model": self._model,
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "You are a read-only explanation layer for a deterministic, Minervini-inspired "
-                        "Indian-equity fundamental fit assessment. The supplied score, grade, coverage, "
-                        "components, and red flags are authoritative. Do not change them, issue a verdict, "
-                        "recommend a trade, or mention an entry, exit, size, or order. Write a concise factual "
-                        "summary, up to three strengths, up to three risks, and up to two review-focus items. "
-                        "Every note may cite only evidence keys in the packet. Never infer missing data. "
-                        "Provider limitations are neutral context, not risks."
+                        "You are a read-only independent second-opinion analyst for Indian-equity "
+                        "fundamentals. Assess Minervini-style earnings and sales growth, profitability, "
+                        "cash quality, ownership sponsorship, and data coverage using only the supplied "
+                        "references. You cannot see the deterministic Python score and must not infer it. "
+                        "Return pass, fail, or uncertain; use uncertain when evidence is sparse or conflicting. "
+                        "Every conclusion must cite only reference IDs in the packet. Provider limitations are "
+                        "neutral coverage constraints, not negative evidence. Never recommend a trade or mention "
+                        "an entry, exit, position size, order, or execution action."
                     ),
                 },
-                {"role": "user", "content": json.dumps(packet, sort_keys=True, separators=(",", ":"))},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        packet.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                },
             ],
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "fundamental_explanation",
+                    "name": "fundamental_second_opinion_v1",
                     "strict": True,
-                    "schema": FundamentalExplanation.model_json_schema(),
+                    "schema": self._response_schema(allowed_ids),
                 },
             },
             "provider": {"require_parameters": True, "data_collection": "deny"},
@@ -194,128 +402,137 @@ class OpenRouterFundamentalClient:
             request["temperature"] = self._temperature
         return request
 
-    def _build_legacy_request(self, facts: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "model": self._model,
-            "messages": [{"role": "system", "content": "Read-only fundamental analyst. Cite only supplied evidence."}, {"role": "user", "content": json.dumps({"prompt_version": self._prompt_version, "fundamental_facts": facts}, sort_keys=True, separators=(",", ":"))}],
-            "response_format": {"type": "json_schema", "json_schema": {"name": "fundamental_verdict", "strict": True, "schema": LegacyVerdict.model_json_schema()}},
-            "provider": {"require_parameters": True, "data_collection": "deny"},
-            "reasoning": {"effort": self._reasoning_effort, "exclude": True},
-            "max_tokens": self._max_tokens,
-            "stream": False,
-            **({"temperature": self._temperature} if self._temperature is not None else {}),
-        }
+    def prepare(self, facts: Mapping[str, Any]) -> PreparedFundamentalRequest:
+        packet = self.build_packet(facts)
+        packet_json = packet.model_dump(mode="json")
+        return PreparedFundamentalRequest(
+            packet=packet,
+            request_payload=self._request_from_packet(packet),
+            input_hash=canonical_json_hash(packet_json),
+            has_usable_facts=any(reference.kind != "limitation" for reference in packet.references),
+        )
 
-    async def analyze(
+    def build_request(self, facts: Mapping[str, Any]) -> dict[str, Any]:
+        return self.prepare(facts).request_payload
+
+    async def send_once(
         self,
-        facts: Mapping[str, Any],
-        scorecard: Mapping[str, Any] | None = None,
+        prepared: PreparedFundamentalRequest,
     ) -> FundamentalLLMResult:
         if not self._api_key:
             raise FundamentalLLMError("OPENROUTER_API_KEY is not configured")
-        if scorecard is None:
-            return await self._analyze_legacy(facts)
-        request_payload = self.build_request(facts, scorecard)
-        input_hash = canonical_json_hash({"facts": dict(facts), "scorecard": dict(scorecard), "model": self._model, "reasoning": self._reasoning_effort, "prompt": self._prompt_version})
-        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json", "X-Title": self._app_title}
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "X-Title": self._app_title,
+        }
         if self._http_referer:
             headers["HTTP-Referer"] = self._http_referer
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+                response = await client.post(
+                    self._api_url,
+                    headers=headers,
+                    json=prepared.request_payload,
+                )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise FundamentalLLMError(
+                f"OpenRouter request outcome is unknown: {type(exc).__name__}",
+                attempt_status="transport_unknown",
+            ) from exc
 
-        for attempt in range(1, self._max_attempts + 1):
-            try:
-                async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                    response = await client.post(self._api_url, headers=headers, json=request_payload)
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                # An ambiguous transport error may have reached the provider: never retry it.
-                raise FundamentalLLMError(f"OpenRouter request outcome is unknown: {type(exc).__name__}") from exc
+        try:
+            raw_payload: Any = response.json()
+        except ValueError:
+            raw_payload = {"unparsed_body": response.text[:2000]}
+        safe_payload = sanitize_provider_payload(raw_payload)
+        payload = safe_payload if isinstance(safe_payload, dict) else {"response": safe_payload}
+        usage, cost = _usage_and_cost(payload)
+        request_id = (
+            str(payload["id"])
+            if payload.get("id") is not None
+            else response.headers.get("X-Generation-Id")
+        )
 
-            if response.status_code in (401, 402):
-                raise FundamentalLLMError(_format_openrouter_http_error(response))
-            if response.status_code == 429 or response.status_code >= 500:
-                if attempt < self._max_attempts:
-                    await self._sleep(0.5 * (2 ** (attempt - 1)))
-                    continue
-                raise FundamentalLLMError(_format_openrouter_http_error(response))
-            if response.status_code >= 400:
-                raise FundamentalLLMError(_format_openrouter_http_error(response))
-            try:
-                payload = response.json()
-                explanation = self._parse_explanation(payload, facts)
-            except (ValueError, KeyError, TypeError, ValidationError) as exc:
-                # A 200 response can be billable. Never retry malformed output.
-                raise FundamentalLLMError(f"OpenRouter structured response was invalid: {exc}") from exc
-            usage = payload.get("usage")
-            usage_map = dict(usage) if isinstance(usage, Mapping) else {}
-            return FundamentalLLMResult(
-                explanation=explanation,
-                request_id=str(payload["id"]) if payload.get("id") is not None else None,
-                usage=usage_map,
-                input_hash=input_hash,
-                cost=float(payload.get("usage", {}).get("cost", 0) or 0) if isinstance(payload.get("usage"), Mapping) else 0.0,
+        if response.status_code >= 400:
+            raise FundamentalLLMError(
+                _format_openrouter_http_error(response, payload),
+                response_payload=payload,
+                http_status=response.status_code,
+                request_id=request_id,
+                usage=usage,
+                cost=cost,
+                retryable=response.status_code == 429 or response.status_code >= 500,
             )
-        raise FundamentalLLMError("OpenRouter annotation failed")
+        if isinstance(payload.get("error"), Mapping):
+            message = str(payload["error"].get("message") or "provider error")
+            raise FundamentalLLMError(
+                f"OpenRouter returned an embedded provider error: {message[:500]}",
+                response_payload=payload,
+                http_status=response.status_code,
+                request_id=request_id,
+                usage=usage,
+                cost=cost,
+            )
 
-    async def _analyze_legacy(self, facts: Mapping[str, Any]) -> FundamentalLLMResult:
-        """Compatibility only; retains v1 retry behavior for old persisted callers."""
-        if not self._api_key:
-            raise FundamentalLLMError("OPENROUTER_API_KEY is not configured")
-        payload = self._build_legacy_request(facts)
-        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json", "X-Title": self._app_title}
-        last_error: Exception | None = None
+        try:
+            choices = payload.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+                raise ValueError("OpenRouter response has no usable choices")
+            choice_error = choices[0].get("error")
+            if isinstance(choice_error, Mapping):
+                raise ValueError(
+                    f"provider error: {choice_error.get('message') or choice_error.get('code')}"
+                )
+            parsed = parse_openrouter_structured_content(choices[0], usage=usage)
+            opinion = FundamentalSecondOpinion.model_validate(parsed)
+            allowed = {reference.id for reference in prepared.packet.references}
+            cited = set(opinion.verdict_reference_ids)
+            for note in [*opinion.strengths, *opinion.risks, *opinion.review_focus]:
+                cited.update(note.reference_ids)
+            unknown = sorted(cited - allowed)
+            if unknown:
+                raise ValueError(f"Model cited references absent from the request packet: {unknown}")
+        except (ValueError, KeyError, TypeError, ValidationError) as exc:
+            raise FundamentalLLMError(
+                f"OpenRouter structured response was invalid: {exc}",
+                response_payload=payload,
+                http_status=response.status_code,
+                request_id=request_id,
+                usage=usage,
+                cost=cost,
+                attempt_status="invalid_response",
+            ) from exc
+
+        return FundamentalLLMResult(
+            opinion=opinion,
+            request_id=request_id,
+            usage=usage,
+            input_hash=prepared.input_hash,
+            cost=cost,
+            request_payload=prepared.request_payload,
+            response_payload=payload,
+        )
+
+    async def analyze(self, facts: Mapping[str, Any]) -> FundamentalLLMResult:
+        """Convenience path; the worker uses send_once so it can persist each call."""
+
+        prepared = self.prepare(facts)
         for attempt in range(1, self._max_attempts + 1):
             try:
-                async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                    response = await client.post(self._api_url, headers=headers, json=payload)
-                if response.status_code == 401:
-                    raise FundamentalLLMError("OpenRouter API key was rejected")
-                if response.status_code >= 400:
-                    raise FundamentalLLMError(_format_openrouter_http_error(response))
-                data = response.json()
-                choices = data.get("choices")
-                if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
-                    raise ValueError("OpenRouter response has no usable choices")
-                parsed = parse_openrouter_structured_content(choices[0], usage=dict(data.get("usage") or {}))
-                verdict = LegacyVerdict.model_validate(parsed)
-                evidence = facts.get("evidence") if isinstance(facts.get("evidence"), Mapping) else {}
-                unknown = {key for criterion in verdict.criteria for key in criterion.evidence_keys} - set(evidence)
-                if unknown:
-                    raise ValueError(f"Model cited evidence keys absent from the snapshot: {sorted(unknown)}")
-                explanation = FundamentalExplanation(summary=verdict.summary[:400], strengths=[], risks=[], review_focus=[])
-                return FundamentalLLMResult(explanation=explanation, request_id=str(data.get("id")) if data.get("id") else None, usage=dict(data.get("usage") or {}), input_hash=canonical_json_hash(dict(facts)), cost=0.0, verdict=verdict)
-            except FundamentalLLMError:
-                raise
-            except Exception as exc:
-                last_error = exc
-                if attempt < self._max_attempts:
-                    await self._sleep(0.5 * (2 ** (attempt - 1)))
-        raise FundamentalLLMError(f"OpenRouter annotation failed after {self._max_attempts} attempts: {last_error or 'unknown error'}")
-
-    @staticmethod
-    def _parse_explanation(payload: Mapping[str, Any], facts: Mapping[str, Any]) -> FundamentalExplanation:
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
-            raise ValueError("OpenRouter response has no usable choices")
-        usage = payload.get("usage")
-        parsed = parse_openrouter_structured_content(choices[0], usage=dict(usage) if isinstance(usage, Mapping) else None)
-        explanation = FundamentalExplanation.model_validate(parsed)
-        evidence = facts.get("evidence") if isinstance(facts.get("evidence"), Mapping) else {}
-        cited = {
-            key
-            for note in [*explanation.strengths, *explanation.risks, *explanation.review_focus]
-            for key in note.evidence_keys
-        }
-        unknown = sorted(cited - set(evidence))
-        if unknown:
-            raise ValueError(f"Model cited evidence keys absent from the snapshot: {unknown}")
-        return explanation
+                return await self.send_once(prepared)
+            except FundamentalLLMError as exc:
+                if not exc.retryable or attempt >= self._max_attempts:
+                    raise
+                await self._sleep(0.5 * (2 ** (attempt - 1)))
+        raise FundamentalLLMError("OpenRouter second opinion failed")
 
 
-def _format_openrouter_http_error(response: httpx.Response) -> str:
+def _format_openrouter_http_error(
+    response: httpx.Response,
+    payload: Mapping[str, Any] | None = None,
+) -> str:
     detail: str | None = None
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
     if isinstance(payload, Mapping):
         error = payload.get("error")
         if isinstance(error, Mapping) and isinstance(error.get("message"), str):

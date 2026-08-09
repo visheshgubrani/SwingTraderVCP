@@ -11,6 +11,9 @@ export function sparklineSeries(close: number, dayChangePct: number, sparkSeed: 
 }
 
 export function sparklinePath(series: number[], width = 96, height = 30, padding = 3) {
+  if (series.length < 2) {
+    return { line: "", area: "" }
+  }
   const min = Math.min(...series)
   const max = Math.max(...series)
   const span = max - min || 1

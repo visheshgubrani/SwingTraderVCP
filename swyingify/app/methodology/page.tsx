@@ -35,9 +35,9 @@ export default function MethodologyPage() {
           <section className="mt-12 space-y-4 text-base leading-relaxed text-[var(--landing-fg-2)]">
             <h2 className="landing-h2 text-[clamp(22px,3vw,30px)]">Minervini family (live)</h2>
             <p>
-              Wide and Standard presets approximate Stage 2 trend structure, near-high / pivot context, volatility
-              contraction proxies, volume dry-up, and relative strength. Exact thresholds live in versioned template
-              config — not in marketing copy.
+              The Standard preset approximates Stage 2 trend structure, near-high / pivot context, volatility
+              contraction proxies, volume dry-up, and relative strength. Beta publishes the top 25 names after
+              each close. Exact thresholds live in versioned template config — not in marketing copy.
             </p>
             <p>
               Open the live board:{" "}

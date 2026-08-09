@@ -270,6 +270,16 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
     }
   }, [queryClient, scanRuns.data, state.phase, state.scanRunId])
 
+  // Keep runs list fresh while a scan is in flight (avoids a stuck spinner if
+  // the initial invalidate races ahead of the insert becoming visible).
+  useEffect(() => {
+    if (state.phase !== "scanning" && state.phase !== "queueing_scan") return
+    const timer = window.setInterval(() => {
+      void queryClient.invalidateQueries({ queryKey: screeningKeys.runs() })
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [queryClient, state.phase])
+
   const reset = useCallback(() => setState(INITIAL_STATE), [])
 
   return {

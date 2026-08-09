@@ -10,8 +10,10 @@ from app.services.historical_fetcher import run_historical_sync
 from app.services.journal_ai_coach import run_journal_ai_coach
 from app.services.journal_processor import run_journal_dispatcher
 from app.services.reconciliation import run_reconciliation
+from app.services.saas_scan import run_saas_global_standard_scan
 from app.services.screener import run_technical_scan
 from app.services.token_refresh import run_token_refresh
+
 
 async def worker_on_startup(ctx: dict[str, Any]) -> None:
     await tune_arq_redis_pool(ctx["redis"])
@@ -27,6 +29,7 @@ class WorkerSettings:
         run_reconciliation,
         run_journal_dispatcher,
         run_journal_ai_coach,
+        run_saas_global_standard_scan,
     ]
 
     # arq evaluates cron expressions in this explicit timezone.
@@ -42,6 +45,20 @@ class WorkerSettings:
                 weekday={0, 1, 2, 3, 4},
                 hour=settings.eod_sync_hour,
                 minute=settings.eod_sync_minute,
+                second=0,
+                timeout=60 * 60,
+                max_tries=1,
+            )
+        )
+
+    if settings.saas_standard_scan_fallback_enabled:
+        cron_jobs.append(
+            cron(
+                run_saas_global_standard_scan,
+                name="saas_standard_scan_fallback",
+                weekday={0, 1, 2, 3, 4},
+                hour=settings.saas_standard_scan_fallback_hour,
+                minute=settings.saas_standard_scan_fallback_minute,
                 second=0,
                 timeout=60 * 60,
                 max_tries=1,

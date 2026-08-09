@@ -171,6 +171,27 @@ ON market_ticks (instrument_id, tick_ts DESC);
 CREATE INDEX market_ticks_received_idx
 ON market_ticks (received_at DESC);
 
+CREATE TABLE scan_templates (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    family text NOT NULL,
+    code text NOT NULL,
+    display_name text NOT NULL,
+    access_tier text NOT NULL DEFAULT 'public',
+    version integer NOT NULL DEFAULT 1,
+    config jsonb NOT NULL DEFAULT '{}'::jsonb,
+    is_active boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT scan_templates_access_tier_check CHECK (
+        access_tier IN ('public', 'auth', 'paid')
+    ),
+    CONSTRAINT scan_templates_family_code_version_unique UNIQUE (family, code, version)
+);
+
+CREATE INDEX scan_templates_active_idx
+ON scan_templates (family, code)
+WHERE is_active = true;
+
 CREATE TABLE scan_runs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     universe_code text NOT NULL,
@@ -178,12 +199,19 @@ CREATE TABLE scan_runs (
     triggered_by text NOT NULL,
     technical_config jsonb NOT NULL DEFAULT '{}'::jsonb,
     llm_config jsonb NOT NULL DEFAULT '{}'::jsonb,
+    template_id uuid REFERENCES scan_templates(id),
+    visibility text NOT NULL DEFAULT 'personal',
+    owner_user_id text,
+    as_of_date date,
     started_at timestamptz,
     completed_at timestamptz,
     error_message text,
     created_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT scan_runs_status_check CHECK (
         status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')
+    ),
+    CONSTRAINT scan_runs_visibility_check CHECK (
+        visibility IN ('global', 'user', 'personal')
     ),
     CONSTRAINT scan_runs_dates_check CHECK (
         completed_at IS NULL OR started_at IS NULL OR completed_at >= started_at
@@ -192,6 +220,14 @@ CREATE TABLE scan_runs (
 
 CREATE INDEX scan_runs_created_idx
 ON scan_runs (created_at DESC);
+
+CREATE INDEX scan_runs_global_template_as_of_idx
+ON scan_runs (template_id, as_of_date DESC, created_at DESC)
+WHERE visibility = 'global';
+
+CREATE UNIQUE INDEX scan_runs_global_template_as_of_succeeded_uidx
+ON scan_runs (template_id, as_of_date)
+WHERE visibility = 'global' AND status = 'succeeded' AND template_id IS NOT NULL;
 
 CREATE TABLE fundamental_snapshots (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

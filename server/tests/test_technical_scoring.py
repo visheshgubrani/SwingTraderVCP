@@ -8,6 +8,8 @@ from app.services.screening_config import TechnicalScreeningConfig
 from app.services.technical_scoring import (
     evaluate_technical_setup,
     linear_score,
+    pocket_pivot_points,
+    signed_linear_score,
 )
 
 
@@ -26,14 +28,17 @@ def scoring_frame(**overrides: float) -> pd.DataFrame:
         "bb_width": 0.05,
         "bb_width_percentile": 0.10,
         "volume_dry_up_ratio": 0.60,
+        "up_down_volume_ratio": 1.50,
+        "rs_line_pct_off_high": 1.0,
+        "pocket_pivot_age": 0.0,
     }
     values.update(overrides)
     return pd.DataFrame([values])
 
 
-class TechnicalScoringTests(unittest.TestCase):
+class TechnicalScoringV2Tests(unittest.TestCase):
     def setUp(self) -> None:
-        self.config = TechnicalScreeningConfig()
+        self.config = TechnicalScreeningConfig.for_version("vcp_score_v2")
 
     def evaluate(self, frame: pd.DataFrame, rs_rating: int = 90):
         return evaluate_technical_setup(
@@ -53,6 +58,8 @@ class TechnicalScoringTests(unittest.TestCase):
             sum(item["points"] for item in result["components"].values()),
             100.0,
         )
+        self.assertIn("atr_contraction", result["components"])
+        self.assertIn("bollinger_contraction", result["components"])
 
     def test_four_of_five_core_checks_is_eligible(self) -> None:
         result = self.evaluate(scoring_frame(close=179.0, high_52w=200.0))
@@ -187,11 +194,120 @@ class TechnicalScoringTests(unittest.TestCase):
         payload = self.config.model_dump()
 
         self.assertEqual(payload["pipeline_version"], "vcp_score_v2")
-        self.assertEqual(payload["shortlist_limit"], 50)
+        self.assertEqual(payload["shortlist_limit"], 500)
         self.assertEqual(payload["fundamental_limit"], 20)
         self.assertIn("bb_percentile_zero", payload)
         with self.assertRaises(ValidationError):
             TechnicalScreeningConfig(rs_weight=21)
+
+
+class TechnicalScoringV3Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = TechnicalScreeningConfig.for_version("vcp_score_v3")
+
+    def evaluate(self, frame: pd.DataFrame, rs_rating: int = 90):
+        return evaluate_technical_setup(
+            frame,
+            rs_rating=rs_rating,
+            history_days=252,
+            config=self.config,
+        )
+
+    def test_default_remains_v2_until_shadow_flip(self) -> None:
+        self.assertEqual(TechnicalScreeningConfig().pipeline_version, "vcp_score_v2")
+
+    def test_perfect_setup_scores_100(self) -> None:
+        result = self.evaluate(scoring_frame())
+
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["score"], 100.0)
+        self.assertEqual(result["grade"], "A")
+        self.assertIn("volatility_contraction", result["components"])
+        self.assertIn("rs_line_high", result["components"])
+        self.assertIn("up_down_volume", result["components"])
+        self.assertIn("pocket_pivot", result["components"])
+        self.assertNotIn("atr_contraction", result["components"])
+
+    def test_contraction_averages_atr_and_bb_units(self) -> None:
+        # ATR at midpoint of [1.0, 1.4] => 0.5 unit; BB perfect => 1.0
+        # average 0.75 * 20 = 15
+        result = self.evaluate(scoring_frame(atr_ratio=1.2, atr_ratio_3m_low=1.0))
+        contraction = result["components"]["volatility_contraction"]
+
+        self.assertAlmostEqual(contraction["raw_value"]["atr_unit"], 0.5)
+        self.assertAlmostEqual(contraction["raw_value"]["bb_unit"], 1.0)
+        self.assertAlmostEqual(contraction["points"], 15.0)
+        self.assertEqual(contraction["max_points"], 20.0)
+
+    def test_up_down_volume_can_go_negative(self) -> None:
+        at_zero = signed_linear_score(
+            0.8,
+            full_at=1.5,
+            zero_at=0.8,
+            points=10,
+            negative_floor=-2,
+        )
+        below = signed_linear_score(
+            0.66,
+            full_at=1.5,
+            zero_at=0.8,
+            points=10,
+            negative_floor=-2,
+        )
+        floored = signed_linear_score(
+            0.1,
+            full_at=1.5,
+            zero_at=0.8,
+            points=10,
+            negative_floor=-2,
+        )
+
+        self.assertEqual(at_zero, 0.0)
+        self.assertAlmostEqual(below, -2.0, places=5)
+        self.assertEqual(floored, -2.0)
+
+        result = self.evaluate(scoring_frame(up_down_volume_ratio=0.5))
+        self.assertEqual(result["components"]["up_down_volume"]["points"], -2.0)
+        self.assertGreaterEqual(result["score"], 0.0)
+
+    def test_pocket_pivot_recency_curve(self) -> None:
+        self.assertEqual(pocket_pivot_points(0, self.config), 5.0)
+        self.assertEqual(pocket_pivot_points(1, self.config), 5.0)
+        self.assertEqual(pocket_pivot_points(7, self.config), 0.0)
+        self.assertEqual(pocket_pivot_points(None, self.config), 0.0)
+        mid = pocket_pivot_points(4, self.config)
+        self.assertAlmostEqual(mid, 2.5)
+
+    def test_rs_line_proximity_ramp(self) -> None:
+        full = self.evaluate(scoring_frame(rs_line_pct_off_high=2.0))
+        zero = self.evaluate(scoring_frame(rs_line_pct_off_high=12.0))
+        mid = self.evaluate(scoring_frame(rs_line_pct_off_high=7.0))
+
+        self.assertEqual(full["components"]["rs_line_high"]["points"], 10.0)
+        self.assertEqual(zero["components"]["rs_line_high"]["points"], 0.0)
+        self.assertAlmostEqual(mid["components"]["rs_line_high"]["points"], 5.0)
+
+    def test_v3_weights_total_100(self) -> None:
+        payload = self.config.model_dump()
+        self.assertEqual(payload["pipeline_version"], "vcp_score_v3")
+        self.assertEqual(payload["stage2_weight"], 20.0)
+        self.assertEqual(payload["contraction_weight"], 20.0)
+        with self.assertRaises(ValidationError):
+            TechnicalScreeningConfig(
+                pipeline_version="vcp_score_v3",
+                stage2_weight=20.0,
+                stage2_core_check_points=3.0,
+                stage2_52w_low_points=5.0,
+                rs_weight=20.0,
+                rs_line_high_weight=10.0,
+                high_proximity_weight=10.0,
+                atr_contraction_weight=0.0,
+                bb_contraction_weight=0.0,
+                contraction_weight=20.0,
+                volume_dry_up_weight=10.0,
+                up_down_volume_weight=10.0,
+                pocket_pivot_weight=5.0,
+            )
 
 
 if __name__ == "__main__":

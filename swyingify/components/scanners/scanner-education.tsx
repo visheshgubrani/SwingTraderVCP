@@ -20,8 +20,8 @@ export function ScannerEducation({ asOfDate, isLiveData }: { asOfDate: string; i
         </h2>
         <p className="mt-4 text-base leading-relaxed text-[var(--landing-fg-2)]">
           Swyingify runs an independent rule-based approximation of Mark Minervini&apos;s Stage 2 / volatility
-          contraction ideas over the Nifty 500 after each cash-market close. Wide casts a broader net. Standard
-          tightens quality. Neither preset places orders or issues buy signals.
+          contraction ideas over the Nifty 500 after each cash-market close. The beta board ships the Standard
+          shortlist (top 25). Neither the board nor any future preset places orders or issues buy signals.
         </p>
         <p className="mt-4 text-sm text-[var(--landing-muted)]">
           Latest close date on this board: <time dateTime={asOfDate}>{asOfDate}</time>

@@ -541,7 +541,7 @@ export function FundamentalsView() {
   const [selectedResultId, setSelectedResultId] = useState<string | null>(null)
   const [search, setSearch] = useState("")
   const [filter, setFilter] = useState<FitFilter>("all")
-  const [sortMode, setSortMode] = useState<SortMode>("fundamental")
+  const [sortMode, setSortMode] = useState<SortMode>("technical")
   const [refreshConfirmOpen, setRefreshConfirmOpen] = useState(false)
 
   const activeRun = runsQuery.data?.find((run) => run.id === selectedRunId)

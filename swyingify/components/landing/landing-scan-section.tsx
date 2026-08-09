@@ -1,7 +1,14 @@
 import { ScannerDemo } from "@/components/landing/scanner-demo"
 import { Reveal } from "@/components/landing/reveal"
+import type { ScanDemoItem } from "@/lib/landing/demo-data"
 
-export function LandingScanSection() {
+type LandingScanSectionProps = {
+  scans: ScanDemoItem[]
+  asOfDate: string
+  isLiveData: boolean
+}
+
+export function LandingScanSection({ scans, asOfDate, isLiveData }: LandingScanSectionProps) {
   return (
     <section id="scan" className="landing-block">
       <div className="landing-container">
@@ -14,13 +21,13 @@ export function LandingScanSection() {
           </Reveal>
           <Reveal>
             <p className="landing-lead mt-6">
-              The standard template checks the Nifty 500, ranks the candidates, and exposes the six checks
-              behind each result. Use it to decide which charts deserve your time. The preview below uses
-              real symbols; the live shortlist publishes after every close.
+              The Standard template checks the Nifty 500, ranks the candidates, and exposes the checks behind each
+              result. Use it to decide which charts deserve your time. The board below shows tonight&apos;s Standard
+              shortlist{isLiveData ? "" : " preview"} after every cash-market close.
             </p>
           </Reveal>
         </div>
-        <ScannerDemo />
+        <ScannerDemo scans={scans} asOfDate={asOfDate} isLiveData={isLiveData} />
       </div>
     </section>
   )

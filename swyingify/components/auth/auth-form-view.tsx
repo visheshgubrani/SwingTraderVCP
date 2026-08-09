@@ -20,7 +20,7 @@ function safeReturnTo(value: string | null): string {
 const copy = {
   "sign-up": {
     title: "Start with today's shortlist.",
-    sub: "An account is for watchlists and the stricter scans. Today's shortlist stays free either way.",
+    sub: "Create a free account for past scans during beta. Today's Standard top 25 stays public either way.",
     submit: "Create account",
     pwPlaceholder: "At least 8 characters",
     pwError: "Password must be at least 8 characters.",
@@ -31,7 +31,7 @@ const copy = {
   },
   "sign-in": {
     title: "Welcome back.",
-    sub: "Sign in to pick up your watchlists and the stricter scans. Today's shortlist is always free.",
+    sub: "Sign in for past EOD shortlists. Today's Standard board is always free — no paywall in beta.",
     submit: "Sign in",
     pwPlaceholder: "Your password",
     pwError: "Enter your password.",

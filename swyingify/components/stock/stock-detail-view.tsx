@@ -44,7 +44,7 @@ export function StockDetailView({
       generateStockCandles({
         close: result.close,
         dayChangePct: result.dayChangePct,
-        sparkSeed: result.sparkSeed,
+        sparkSeed: result.sparkSeed ?? 0,
         adtvCrore: result.adtvCrore,
         pivot: levels.pivot,
         baseLow: levels.baseLow,

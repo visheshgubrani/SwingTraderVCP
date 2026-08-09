@@ -1,4 +1,6 @@
+import datetime
 import json
+import logging
 import uuid
 from typing import Annotated
 
@@ -29,6 +31,7 @@ from app.services.fundamental_rules import unresolved_scorecard_evidence
 from app.services.screening_config import TechnicalScreeningConfig
 
 router = APIRouter(prefix="/screening", tags=["screening"])
+logger = logging.getLogger(__name__)
 
 
 def _fundamental_assessment(scorecard: object) -> dict | None:
@@ -354,6 +357,21 @@ async def trigger_scan(
             detail=f"Failed to enqueue scan job: {enqueue_error}",
         ) from enqueue_error
 
+    # Personal "Run EOD SCAN" often skips candle sync when data is already
+    # current — still refresh the public Swyingify Standard board for today.
+    try:
+        await redis_pool.enqueue_job(
+            "run_saas_global_standard_scan",
+            None,
+            "manual_eod_scan",
+            _job_id=f"saas-standard-manual:{datetime.date.today().isoformat()}",
+        )
+    except Exception:
+        logger.exception(
+            "Personal scan queued, but SaaS Standard enqueue failed for %s",
+            scan_run_id,
+        )
+
     return ScanTriggerResponse(
         status="queued",
         scan_run_id=scan_run_id,
@@ -677,6 +695,33 @@ async def get_scan_results(
             "avg_volume_10": int(tech_metrics.get("avg_volume_10", 0)),
             "avg_volume_50": int(tech_metrics.get("avg_volume_50", 0)),
             "volume_dry_up_ratio": float(tech_metrics.get("volume_dry_up_ratio", 0.0)),
+            "up_down_volume_ratio": (
+                float(tech_metrics["up_down_volume_ratio"])
+                if tech_metrics.get("up_down_volume_ratio") is not None
+                else None
+            ),
+            "pocket_pivot_age": (
+                float(tech_metrics["pocket_pivot_age"])
+                if tech_metrics.get("pocket_pivot_age") is not None
+                else None
+            ),
+            "rs_line": (
+                float(tech_metrics["rs_line"])
+                if tech_metrics.get("rs_line") is not None
+                else None
+            ),
+            "rs_line_high_52w": (
+                float(tech_metrics["rs_line_high_52w"])
+                if tech_metrics.get("rs_line_high_52w") is not None
+                else None
+            ),
+            "rs_line_pct_off_high": (
+                float(tech_metrics["rs_line_pct_off_high"])
+                if tech_metrics.get("rs_line_pct_off_high") is not None
+                else None
+            ),
+            "rs_benchmark_symbol": tech_metrics.get("rs_benchmark_symbol"),
+            "rs_benchmark_source": tech_metrics.get("rs_benchmark_source"),
             "criteria_matches": tech_metrics.get("criteria_matches", {}),
             "fundamental_selected": bool(
                 tech_metrics.get(

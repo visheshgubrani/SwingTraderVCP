@@ -9,8 +9,16 @@ import { LandingNav } from "@/components/landing/landing-nav"
 import { LandingRoadmapSection } from "@/components/landing/landing-roadmap-section"
 import { LandingScanSection } from "@/components/landing/landing-scan-section"
 import "@/components/landing/landing.css"
+import type { ScanDemoItem } from "@/lib/landing/demo-data"
 
-export function LandingPage() {
+type LandingPageProps = {
+  scans: ScanDemoItem[]
+  heroPreview: Array<{ sym: string; stage: string; score: number }>
+  asOfDate: string
+  isLiveData: boolean
+}
+
+export function LandingPage({ scans, heroPreview, asOfDate, isLiveData }: LandingPageProps) {
   return (
     <div
       className={`landing min-h-screen overflow-x-hidden ${GeistSans.variable} ${GeistMono.variable}`}
@@ -23,8 +31,8 @@ export function LandingPage() {
     >
       <LandingNav />
       <main id="top">
-        <LandingHero />
-        <LandingScanSection />
+        <LandingHero heroPreview={heroPreview} isLiveData={isLiveData} />
+        <LandingScanSection scans={scans} asOfDate={asOfDate} isLiveData={isLiveData} />
         <LandingMethodSection />
         <LandingRoadmapSection />
         <LandingCtaSection />

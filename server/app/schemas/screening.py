@@ -259,6 +259,13 @@ class ScanResultResponse(BaseModel):
     avg_volume_10: int
     avg_volume_50: int
     volume_dry_up_ratio: float
+    up_down_volume_ratio: float | None = None
+    pocket_pivot_age: float | None = None
+    rs_line: float | None = None
+    rs_line_high_52w: float | None = None
+    rs_line_pct_off_high: float | None = None
+    rs_benchmark_symbol: str | None = None
+    rs_benchmark_source: str | None = None
     criteria_matches: dict[str, bool] = Field(default_factory=dict)
     fundamental_selected: bool
     llm_status: Literal[

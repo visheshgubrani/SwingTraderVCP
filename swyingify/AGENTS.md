@@ -127,14 +127,17 @@ roster.
     once; all users browse the same results.
   - **Paid advanced:** authenticated subscribers may run allowlisted
     tighten/variant scans (quota + rate limits).
-- Aggression presets (Minervini):
-  1. **Wide** — Stage-2 style pool (~150–200 of 500); free/public.
-  2. **Standard** — higher-quality shortlist (closer to today’s personal
-     score/rank quality); free/public.
-  3. **Strict** — tighter VCP/contraction/volume gates; **paid**.
-- Auth required for: watchlists, richer stats/history, Strict and other
-  advanced packs (e.g. predefined OBV), paid variant runs.
-- Basic public scans (Wide + Standard results for today) need **no** auth.
+- **Beta UI (shipping now):** Minervini **Standard only** — public top **25**
+  by rank after each weekday EOD. **Wide is deferred** (not shown in the
+  product UI until reintroduced). Strict remains paid / later (S3).
+- Aggression presets (Minervini) — product roadmap:
+  1. **Wide** — Stage-2 style pool (~150–200 of 500); deferred from beta UI.
+  2. **Standard** — higher-quality shortlist; **beta ships top 25**, free/public
+     for today’s EOD.
+  3. **Strict** — tighter VCP/contraction/volume gates; **paid** (S3).
+- Auth: Better Auth accounts work. Today’s Standard board needs **no** auth.
+  **Past / as-of scan history** requires sign-in when that surface is built.
+  Watchlists, Strict, and paid variant runs still require auth / paid later.
 - No FII/FPI data, no broker integration, no auto-entry from scores.
 
 ### V2 — later (do not build until asked)
@@ -150,16 +153,18 @@ roster.
 
 | Capability | Anonymous | Signed-in free | Paid |
 | --- | --- | --- | --- |
-| Browse Minervini Wide + Standard (today’s EOD) | Yes | Yes | Yes |
-| Basic results table + chart | Yes | Yes | Yes |
+| Browse Minervini Standard today (top 25) | Yes | Yes | Yes |
+| Basic results table + chart / spark | Yes | Yes | Yes |
+| Past / as-of scan history | No (sign-in) | Yes | Yes |
+| Wide preset (when reintroduced) | TBD | TBD | TBD |
 | Strict / tight VCP, OBV / advanced presets | No | Upgrade prompt | Yes |
-| Deeper stats / component breakdown / multi-day history | Limited | Limited | Full |
+| Deeper stats / component breakdown | Limited | Limited | Full |
 | Personal watchlists | No | Yes | Yes |
 | Custom tighten / allowlisted variant run | No | No | Yes (quota) |
 | Other legend families | — | — | V2+ |
 
 Legal copy on public scanners: educational / not SEBI-registered / not
-investment advice.
+investment advice. Beta: no paywall on today’s Standard board.
 
 ---
 
@@ -197,15 +202,15 @@ in a request path for the whole universe.
 **Reuse:** `instruments`, `universe_memberships`, `market_candles`, and the
 core shape of `scan_runs` / `screening_results` (extend, don’t fork candles).
 
-**Add (when implementing — propose migrations in `server/db/`):**
+**Add / extend (propose migrations in `server/db/`):**
 
-- Better Auth tables (`user`, `session`, `account`, `verification`, …)
+- Better Auth tables (`user`, `session`, `account`, `verification`, …) — done
 - `scan_templates` — legend, aggression, access tier, versioned config
-- `scan_runs` extensions — `template_id`, `visibility` (`global` \| `user`),
-  `owner_user_id`, `as_of_date`
+- `scan_runs` extensions — `template_id`, `visibility`
+  (`global` \| `user` \| `personal`), `owner_user_id`, `as_of_date`
 - SaaS watchlists (do not silently overload personal `watchlists` without an
-  app discriminant)
-- `subscriptions` / `entitlements` / Razorpay references
+  app discriminant) — S4
+- `subscriptions` / `entitlements` / Razorpay references — S3
 
 **Never expose via Swyingify:** personal order/position/journal money-path
 tables.
@@ -240,7 +245,7 @@ Status tags: `[done]`, `[next]`, `[ ]`.
 | --- | --- | --- |
 | S0 | Dual-product agent docs (this file + root §0) | `[done]` |
 | S1 | Better Auth + landing + scanner shell | `[done]` |
-| S2 | Global daily Minervini Wide + Standard; public results + chart (India) | `[next]` |
+| S2 | Global daily Minervini Standard (top 25); public results + chart; Wide deferred | `[done]` |
 | S3 | Razorpay entitlements + Strict template behind paywall | `[ ]` |
 | S4 | Watchlists + richer stats + paid allowlisted variants | `[ ]` |
 | V2 | O’Neil → Qullamaggie → Darvas → Livermore (one-by-one); optional S&P 500 | `[ ]` |

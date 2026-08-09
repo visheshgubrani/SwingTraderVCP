@@ -9,7 +9,7 @@ const ROWS = [
     status: "Live",
     live: true,
     href: CANONICAL_SCANNER_PATH,
-    desc: "Stage 2 and volatility contraction pattern approximation for the Nifty 500. Wide and Standard boards update after the close.",
+    desc: "Stage 2 and volatility contraction pattern approximation for the Nifty 500. Standard top 25 updates after the close.",
   },
   {
     name: "William O’Neil (CAN SLIM)",

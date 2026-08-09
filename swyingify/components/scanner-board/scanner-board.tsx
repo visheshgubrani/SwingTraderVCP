@@ -1,17 +1,16 @@
 "use client"
 
 import Link from "next/link"
-import { useMemo, useTransition } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useEffect, useMemo, useRef, useTransition } from "react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 
 import { ChangeCell, formatAdtv, formatInr, padRank, ScoreCell } from "@/components/scanner-board/board-formatters"
 import { TrendSparkline } from "@/components/scanner-board/trend-sparkline"
 import { Reveal } from "@/components/landing/reveal"
 import { stockPath } from "@/lib/scanner/board-data"
-import { scannerResultsQuery } from "@/lib/scanner/queries"
+import { scannerKeys, scannerLatestQuery, scannerResultsQuery } from "@/lib/scanner/queries"
 import type { ScannerPreset, ScannerResultPreview } from "@/lib/scanner/types"
-import { cn } from "@/lib/utils"
 
 const sortOptions = ["score", "rs", "nearHigh", "price"] as const
 type SortKey = (typeof sortOptions)[number]
@@ -44,15 +43,16 @@ type ScannerBoardProps = {
 export function ScannerBoard({
   initialPreset,
   initialResults,
-  asOfDate,
+  asOfDate: initialAsOfDate,
   isLiveData,
 }: ScannerBoardProps) {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
+  const queryClient = useQueryClient()
   const [isPending, startTransition] = useTransition()
+  const lastCompletedAt = useRef<string | null>(null)
 
-  const preset: ScannerPreset = searchParams.get("preset") === "wide" ? "wide" : "standard"
   const search = searchParams.get("q") || ""
   const sortParam = searchParams.get("sort")
   const sort: SortKey = sortOptions.includes(sortParam as SortKey) ? (sortParam as SortKey) : "score"
@@ -60,10 +60,29 @@ export function ScannerBoard({
   const grade = (searchParams.get("grade") || "") as GradeFilter
   const move = (searchParams.get("move") || "") as MoveFilter
 
-  const { data, isLoading } = useQuery({
-    ...scannerResultsQuery(preset),
-    initialData: preset === initialPreset ? initialResults : undefined,
+  const { data, isLoading, isFetching } = useQuery({
+    ...scannerResultsQuery(initialPreset),
+    initialData: initialResults,
   })
+
+  const { data: latest } = useQuery({
+    ...scannerLatestQuery(),
+    enabled: isLiveData,
+  })
+
+  useEffect(() => {
+    if (!latest?.completedAt) return
+    if (lastCompletedAt.current === null) {
+      lastCompletedAt.current = latest.completedAt
+      return
+    }
+    if (lastCompletedAt.current !== latest.completedAt) {
+      lastCompletedAt.current = latest.completedAt
+      void queryClient.invalidateQueries({ queryKey: scannerKeys.results("standard") })
+    }
+  }, [latest?.completedAt, queryClient])
+
+  const asOfDate = latest?.asOfDate || data?.[0]?.asOfDate || initialAsOfDate
 
   const sectors = useMemo(() => {
     const seen = new Set<string>()
@@ -95,6 +114,7 @@ export function ScannerBoard({
   function updateParams(next: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString())
     Object.entries(next).forEach(([key, value]) => (value ? params.set(key, value) : params.delete(key)))
+    params.delete("preset")
     startTransition(() => router.replace(`${pathname}?${params.toString()}`, { scroll: false }))
   }
 
@@ -102,12 +122,20 @@ export function ScannerBoard({
     updateParams({ q: null, sector: null, grade: null, move: null })
   }
 
+  const statusLabel = !isLiveData
+    ? "Preview board · illustrative until live results"
+    : latest?.status === "running" || latest?.status === "queued"
+      ? "Scan running · updating after the close"
+      : isFetching
+        ? "Refreshing board…"
+        : "Live board · updates after every close"
+
   return (
     <>
       <header className="pt-[clamp(48px,7vw,80px)]">
         <div className="mx-auto max-w-[1200px] px-6 max-sm:px-3">
           <Reveal>
-            <p className="landing-kicker">Minervini VCP · Nifty 500 · End of day</p>
+            <p className="landing-kicker">Minervini VCP · Standard · Nifty 500 · End of day</p>
           </Reveal>
           <Reveal>
             <h1 className="mt-[26px] font-[family-name:var(--font-landing-mono)] text-[clamp(34px,4.4vw,56px)] font-light leading-[1.1] text-[var(--landing-fg)]">
@@ -116,7 +144,7 @@ export function ScannerBoard({
           </Reveal>
           <Reveal>
             <p className="landing-lead mt-6">
-              Tonight&apos;s Wide and Standard shortlists after the cash-market close — an independent rule-based
+              Tonight&apos;s Standard shortlist (top 25) after the cash-market close — an independent rule-based
               approximation of Stage 2 / volatility contraction conditions with trend, price, volume, and relative
               strength in one view.
             </p>
@@ -133,9 +161,12 @@ export function ScannerBoard({
                 <span className="border border-[var(--landing-border)] px-2.5 py-1 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">
                   EOD snapshot
                 </span>
+                <span className="border border-[var(--landing-border)] px-2.5 py-1 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">
+                  Standard · top 25
+                </span>
               </div>
               <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-wider text-[var(--landing-muted)] max-sm:w-full">
-                {isLiveData ? "Live board · published after every close" : "Preview board · illustrative until live results"}
+                {statusLabel}
               </span>
             </div>
           </Reveal>
@@ -146,19 +177,9 @@ export function ScannerBoard({
         <div className="mx-auto max-w-[1200px] px-6 max-sm:px-3">
           <Reveal>
             <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="board-tabs" role="group" aria-label="Scanner preset">
-                {(["standard", "wide"] as const).map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    className={cn("board-tab", preset === value && "active")}
-                    aria-pressed={preset === value}
-                    onClick={() => updateParams({ preset: value === "standard" ? null : value })}
-                  >
-                    {value === "standard" ? "Standard" : "Wide"}
-                  </button>
-                ))}
-              </div>
+              <p className="font-[family-name:var(--font-landing-mono)] text-sm uppercase tracking-widest text-[var(--landing-muted)]">
+                Standard shortlist
+              </p>
               <div className="flex flex-wrap items-center gap-3 max-sm:w-full max-sm:justify-between">
                 <label className="board-search">
                   <SearchIcon />
@@ -186,6 +207,7 @@ export function ScannerBoard({
                 </label>
                 <span className="whitespace-nowrap font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]" aria-live="polite">
                   {padRank(results.length)} {results.length === 1 ? "setup" : "setups"}
+                  {isPending ? " ·" : ""}
                 </span>
               </div>
             </div>
@@ -199,10 +221,10 @@ export function ScannerBoard({
                   onChange={(e) => updateParams({ sector: e.target.value || null })}
                   aria-label="Filter by sector"
                 >
-                  <option value="">Sector: All</option>
-                  {sectors.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
+                  <option value="">All sectors</option>
+                  {sectors.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
                     </option>
                   ))}
                 </select>
@@ -213,21 +235,21 @@ export function ScannerBoard({
                   onChange={(e) => updateParams({ grade: e.target.value || null })}
                   aria-label="Filter by grade"
                 >
-                  <option value="">Grade: All</option>
-                  <option value="A">Grade: A</option>
-                  <option value="B">Grade: B</option>
-                  <option value="C">Grade: C</option>
+                  <option value="">All grades</option>
+                  <option value="A">Grade A</option>
+                  <option value="B">Grade B</option>
+                  <option value="C">Grade C</option>
                 </select>
               </label>
               <label className="board-select">
                 <select
                   value={move}
                   onChange={(e) => updateParams({ move: e.target.value || null })}
-                  aria-label="Filter by direction"
+                  aria-label="Filter by day move"
                 >
-                  <option value="">Direction: All</option>
-                  <option value="up">Gainers</option>
-                  <option value="dn">Decliners</option>
+                  <option value="">All moves</option>
+                  <option value="up">Up day</option>
+                  <option value="dn">Down day</option>
                 </select>
               </label>
               {hasFilters ? (
@@ -243,16 +265,20 @@ export function ScannerBoard({
           </Reveal>
 
           <Reveal>
-            <div className={cn("mt-5", isPending && "opacity-70")}>
-              {isLoading ? (
+            <div className="mt-5">
+              {isLoading && !data?.length ? (
                 <BoardSkeleton />
-              ) : results.length ? (
+              ) : results.length > 0 ? (
                 <>
                   <BoardTable results={results} />
                   <BoardCards results={results} />
                 </>
               ) : (
-                <EmptyBoard preset={preset} />
+                <EmptyBoard
+                  hasFilters={hasFilters}
+                  isLiveData={isLiveData}
+                  status={latest?.status}
+                />
               )}
             </div>
           </Reveal>
@@ -299,7 +325,12 @@ function BoardTable({ results }: { results: ScannerResultPreview[] }) {
           </div>
           <span className="truncate text-sm">{row.sector}</span>
           <span className="flex items-center">
-            <TrendSparkline close={row.close} dayChangePct={row.dayChangePct} sparkSeed={row.sparkSeed} />
+            <TrendSparkline
+              close={row.close}
+              dayChangePct={row.dayChangePct}
+              sparkSeed={row.sparkSeed}
+              sparkSeries={row.sparkSeries}
+            />
           </span>
           <span className="text-right font-[family-name:var(--font-landing-mono)] text-sm text-[var(--landing-fg)]">
             {formatInr(row.close)}
@@ -342,7 +373,12 @@ function BoardCards({ results }: { results: ScannerResultPreview[] }) {
           </div>
           <div className="mt-3.5 flex items-center justify-between gap-4">
             <span className="max-w-[130px] flex-1">
-              <TrendSparkline close={row.close} dayChangePct={row.dayChangePct} sparkSeed={row.sparkSeed} />
+              <TrendSparkline
+                close={row.close}
+                dayChangePct={row.dayChangePct}
+                sparkSeed={row.sparkSeed}
+                sparkSeries={row.sparkSeries}
+              />
             </span>
             <div className="text-right">
               <p className="font-[family-name:var(--font-landing-mono)] text-lg font-light text-[var(--landing-fg)]">
@@ -379,13 +415,28 @@ function BoardCards({ results }: { results: ScannerResultPreview[] }) {
   )
 }
 
-function EmptyBoard({ preset }: { preset: ScannerPreset }) {
+function EmptyBoard({
+  hasFilters,
+  isLiveData,
+  status,
+}: {
+  hasFilters: boolean
+  isLiveData: boolean
+  status?: string
+}) {
+  const pending =
+    isLiveData &&
+    !hasFilters &&
+    (status === "missing" || status === "queued" || status === "running" || status === "error")
   const message = (
     <div className="border border-[var(--landing-border)] px-6 py-14 text-center">
-      <p className="landing-kicker mb-3.5">No match</p>
+      <p className="landing-kicker mb-3.5">{pending ? "Waiting on EOD" : "No match"}</p>
       <p className="mx-auto max-w-[40ch] text-sm leading-relaxed text-[var(--landing-fg-2)]">
-        No setup in the {preset} scan matches the current search or filters. Try another symbol, sector, grade, or
-        clear the filters.
+        {pending
+          ? status === "error"
+            ? "Could not reach the scanner API. Check that FastAPI is running and API_URL is set, then refresh."
+            : "Tonight’s Standard shortlist is not published yet. After the cash-market close (or Run EOD SCAN in the trading app), this board fills automatically."
+          : "No setup in the Standard scan matches the current search or filters. Try another symbol, sector, grade, or clear the filters."}
       </p>
     </div>
   )

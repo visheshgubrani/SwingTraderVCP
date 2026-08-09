@@ -14,7 +14,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { stockPath } from "@/lib/scanner/board-data"
@@ -23,7 +22,6 @@ import type { ScannerPreset, ScannerResultPreview } from "@/lib/scanner/types"
 
 const presetCopy: Record<ScannerPreset, { label: string; description: string }> = {
   standard: { label: "Standard", description: "A focused shortlist with stronger contraction and trend alignment." },
-  wide: { label: "Wide", description: "A broader Stage 2 pool for early research and learning." },
 }
 
 const sortOptions = ["score", "rs", "nearHigh", "price"] as const
@@ -50,7 +48,7 @@ export function ScannerWorkspace() {
   const pathname = usePathname()
   const searchParams = useSearchParams()
   const [isPending, startTransition] = useTransition()
-  const preset = searchParams.get("preset") === "wide" ? "wide" : "standard"
+  const preset: ScannerPreset = "standard"
   const search = searchParams.get("q") || ""
   const sortParam = searchParams.get("sort")
   const sort: SortKey = sortOptions.includes(sortParam as SortKey) ? (sortParam as SortKey) : "score"
@@ -98,12 +96,9 @@ export function ScannerWorkspace() {
               <CardTitle className="text-xl">Minervini scanner</CardTitle>
               <p className="mt-1 max-w-xl text-sm text-muted-foreground">{presetCopy[preset].description}</p>
             </div>
-            <Tabs value={preset} onValueChange={(value) => updateParams({ preset: value })}>
-              <TabsList aria-label="Scanner preset">
-                <TabsTrigger value="standard">Standard</TabsTrigger>
-                <TabsTrigger value="wide">Wide</TabsTrigger>
-              </TabsList>
-            </Tabs>
+            <div className="rounded-md border px-3 py-2 text-sm text-muted-foreground">
+              Standard · top 25
+            </div>
           </div>
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div className="relative w-full md:max-w-sm">

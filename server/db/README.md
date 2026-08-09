@@ -25,6 +25,11 @@ architecture and component-boundary source of truth.
 - `migrations/008_p7_ai_trace.sql` - records every actual OpenRouter attempt,
   links successful cached opinions to their source attempt, and constrains the
   independent fundamentals/AI status vocabularies.
+- `migrations/009_nifty500_rs_benchmark.sql` - registers `NSE:NIFTY500-INDEX`
+  for the vcp_score_v3 RS-line benchmark (EOD sync alongside Nifty 50).
+- `migrations/010_saas_scan_templates.sql` - adds `scan_templates` and extends
+  `scan_runs` with `template_id`, `visibility`, `owner_user_id`, `as_of_date`
+  for Swyingify global daily Standard scans.
 
 ## Domain Layout
 
@@ -39,6 +44,7 @@ The schema is organized around five data domains:
    - `market_ticks`
 
 3. **Screening**
+   - `scan_templates` (Swyingify SaaS)
    - `scan_runs`
    - `screening_results`
    - `fundamental_snapshots`

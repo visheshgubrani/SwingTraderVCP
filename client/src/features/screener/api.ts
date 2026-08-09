@@ -95,6 +95,13 @@ export interface ScanResult {
   bb_width_20th_pct: number
   bb_width_percentile: number | null
   volume_dry_up_ratio: number
+  up_down_volume_ratio: number | null
+  pocket_pivot_age: number | null
+  rs_line: number | null
+  rs_line_high_52w: number | null
+  rs_line_pct_off_high: number | null
+  rs_benchmark_symbol: string | null
+  rs_benchmark_source: string | null
   criteria_matches: Record<string, boolean>
   fundamental_selected: boolean
   llm_status:

@@ -24,7 +24,7 @@ export function LandingCtaSection() {
         </Reveal>
         <Reveal>
           <p className="landing-kicker mt-6">
-            Wide and Standard scans are free. No account needed for today&apos;s results.
+            Standard scans are free in beta. No account needed for today&apos;s top 25.
           </p>
         </Reveal>
       </div>

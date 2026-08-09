@@ -12,7 +12,14 @@ class Settings(BaseSettings):
     redis_health_check_interval: float = Field(default=30.0, ge=0, le=300)
     redis_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     sync_queued_stale_seconds: int = Field(default=300, ge=60, le=3600)
-    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:3000", "http://localhost:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+    ]
+    # Shared secret for Next BFF → FastAPI when requesting historical SaaS scans.
+    # Leave empty in local dev to keep history locked until configured.
+    saas_internal_api_key: str = ""
 
     fyers_app_id: str = ""
     fyers_secret_key: str = ""
@@ -22,6 +29,10 @@ class Settings(BaseSettings):
     eod_sync_enabled: bool = True
     eod_sync_hour: int = Field(default=18, ge=0, le=23)
     eod_sync_minute: int = Field(default=30, ge=0, le=59)
+    # Fallback enqueue for SaaS Standard if the EOD chain was skipped.
+    saas_standard_scan_fallback_enabled: bool = True
+    saas_standard_scan_fallback_hour: int = Field(default=19, ge=0, le=23)
+    saas_standard_scan_fallback_minute: int = Field(default=0, ge=0, le=59)
 
     # Token refresh: run daily before market open (default 08:50 IST).
     # Fyers access tokens expire ~midnight IST; refresh early so workers

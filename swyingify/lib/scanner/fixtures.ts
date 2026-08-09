@@ -92,15 +92,6 @@ const standardComponents = fingerprint([
   component("volumeDryUp", "Volume dry-up", "Volume", 11, 13, "supporting", "Volume is easing during the base rather than showing distribution."),
 ])
 
-const wideComponents = fingerprint([
-  component("stage2", "Stage 2 trend", "Trend", 18, 20, "strong", "Price is above a rising long-term trend stack."),
-  component("relativeStrength", "Relative strength", "RS", 15, 20, "supporting", "The stock is showing improving relative strength."),
-  component("nearHigh", "Near 52-week high", "High", 14, 17, "supporting", "Price is within the broad high-proximity guardrail."),
-  component("atrContraction", "ATR contraction", "ATR", 11, 15, "supporting", "Volatility is beginning to tighten."),
-  component("bollingerContraction", "Bollinger contraction", "Bands", 9, 15, "watch", "The base is still developing and needs more contraction."),
-  component("volumeDryUp", "Volume dry-up", "Volume", 9, 13, "supporting", "Recent volume is lighter than its longer average."),
-])
-
 const resultSeeds = [
   { symbol: "KAYNES", companyName: "Kaynes Technology", sector: "Capital Goods", close: 9840, score: 92, grade: "A" as const, rs: 96, high: 3.2, adtv: 184, ratio: 0.42, atr: 0.88, base: 730, drift: 3.5, seed: 0.2, chg: 2.4 },
   { symbol: "SRF", companyName: "SRF", sector: "Chemicals", close: 4620, score: 89, grade: "A" as const, rs: 94, high: 4.7, adtv: 96, ratio: 0.55, atr: 0.96, base: 530, drift: 2.7, seed: 1.4, chg: 1.8 },
@@ -116,71 +107,46 @@ const resultSeeds = [
   { symbol: "IRFC", companyName: "Indian Railway Finance", sector: "Financial Services", close: 172, score: 74, grade: "C" as const, rs: 76, high: 15.8, adtv: 180, ratio: 0.78, atr: 1.22, base: 150, drift: 0.5, seed: 3.3, chg: 0.9 },
 ]
 
-const standardResults: ScannerResultPreview[] = resultSeeds.slice(0, 8).map((seed, index) => ({
-  id: `preview-standard-${seed.symbol.toLowerCase()}`,
-  symbol: seed.symbol,
-  companyName: seed.companyName,
-  sector: seed.sector,
-  preset: "standard",
-  rank: index + 1,
-  asOfDate,
-  close: seed.close,
-  technicalScore: seed.score,
-  grade: seed.grade,
-  rsRating: seed.rs,
-  pctFrom52WeekHigh: seed.high,
-  adtvCrore: seed.adtv,
-  dayChangePct: seed.chg,
-  sparkSeed: seed.seed,
-  atrRatio: seed.atr,
-  volumeDryUpRatio: seed.ratio,
-  fingerprint: standardComponents,
-  candles: makeCandles(seed.base, seed.drift, seed.seed),
-}))
-
-const wideResults: ScannerResultPreview[] = resultSeeds.map((seed, index) => ({
-  id: `preview-wide-${seed.symbol.toLowerCase()}`,
-  symbol: seed.symbol,
-  companyName: seed.companyName,
-  sector: seed.sector,
-  preset: "wide",
-  rank: index + 1,
-  asOfDate,
-  close: seed.close,
-  technicalScore: Math.max(70, seed.score - 3),
-  grade: seed.grade,
-  rsRating: Math.max(75, seed.rs - 2),
-  pctFrom52WeekHigh: seed.high + 1.8,
-  adtvCrore: seed.adtv,
-  dayChangePct: seed.chg,
-  sparkSeed: seed.seed,
-  atrRatio: seed.atr,
-  volumeDryUpRatio: seed.ratio + 0.06,
-  fingerprint: wideComponents,
-  candles: makeCandles(seed.base, seed.drift, seed.seed),
-}))
+const standardResults: ScannerResultPreview[] = resultSeeds.map((seed, index) => {
+  const candles = makeCandles(seed.base, seed.drift, seed.seed)
+  return {
+    id: `preview-standard-${seed.symbol.toLowerCase()}`,
+    symbol: seed.symbol,
+    companyName: seed.companyName,
+    sector: seed.sector,
+    preset: "standard",
+    rank: index + 1,
+    asOfDate,
+    close: seed.close,
+    technicalScore: seed.score,
+    grade: seed.grade,
+    rsRating: seed.rs,
+    pctFrom52WeekHigh: seed.high,
+    adtvCrore: seed.adtv,
+    dayChangePct: seed.chg,
+    sparkSeed: seed.seed,
+    sparkSeries: candles.map((c) => c.close).slice(-20),
+    atrRatio: seed.atr,
+    volumeDryUpRatio: seed.ratio,
+    fingerprint: standardComponents,
+    candles,
+  }
+})
 
 export const previewResults: Record<ScannerPreset, ScannerResultPreview[]> = {
   standard: standardResults,
-  wide: wideResults,
 }
 
-export function getPreviewResults(preset: ScannerPreset): ScannerResultPreview[] {
+export function getPreviewResults(preset: ScannerPreset = "standard"): ScannerResultPreview[] {
   return previewResults[preset]
 }
 
 export function getPreviewResult(symbol: string): ScannerResultPreview | undefined {
   const normalized = symbol.trim().toUpperCase()
-  return [...standardResults, ...wideResults].find((result) => result.symbol === normalized)
+  return standardResults.find((result) => result.symbol === normalized)
 }
 
 /** Lowercase stock slugs that exist in the fixture board (for SSG + 404 behavior). */
 export function getPreviewStockSlugs(): string[] {
-  const seen = new Set<string>()
-  for (const row of [...standardResults, ...wideResults]) {
-    seen.add(row.symbol.toLowerCase())
-  }
-  return [...seen].sort()
+  return standardResults.map((row) => row.symbol.toLowerCase()).sort()
 }
-
-

@@ -1,21 +1,25 @@
 import Link from "next/link"
 
 import { Reveal } from "@/components/landing/reveal"
-import { HERO_PREVIEW } from "@/lib/landing/demo-data"
 import { CANONICAL_SCANNER_PATH } from "@/lib/seo/config"
 
 function padRank(n: number) {
   return (n < 10 ? "0" : "") + n
 }
 
-export function LandingHero() {
+type LandingHeroProps = {
+  heroPreview: Array<{ sym: string; stage: string; score: number }>
+  isLiveData: boolean
+}
+
+export function LandingHero({ heroPreview, isLiveData }: LandingHeroProps) {
   return (
     <header className="landing-hero">
       <div className="landing-container">
         <div className="landing-hero-layout">
           <div>
             <Reveal>
-              <p className="landing-kicker">Minervini VCP · Nifty 500 · End of day</p>
+              <p className="landing-kicker">Minervini VCP · Standard · Nifty 500 · End of day</p>
             </Reveal>
             <Reveal>
               <h1 className="landing-display mt-[18px]">Swing trading stock scanner for Indian stocks</h1>
@@ -24,8 +28,8 @@ export function LandingHero() {
               <p className="landing-lead mt-[22px]">
                 Find the few stocks worth your attention. Stop opening 500 charts looking for a clean base.
                 Swyingify checks the Nifty 500 at every market close for an independent approximation of Mark
-                Minervini&apos;s volatility contraction pattern, then shows the shortlist and the reasoning behind
-                it.
+                Minervini&apos;s volatility contraction pattern, then shows the Standard shortlist (top 25) and the
+                reasoning behind it.
               </p>
             </Reveal>
             <Reveal>
@@ -39,18 +43,20 @@ export function LandingHero() {
               </div>
             </Reveal>
             <Reveal>
-              <p className="landing-hero-meta">Educational only · No orders · Not SEBI-registered</p>
+              <p className="landing-hero-meta">Educational only · No orders · Not SEBI-registered · Beta</p>
             </Reveal>
           </div>
 
           <Reveal>
-            <aside className="landing-hero-aside" aria-label="Illustrative shortlist preview">
+            <aside className="landing-hero-aside" aria-label="Tonight shortlist preview">
               <div className="landing-hero-aside-head">
                 <span className="landing-hero-aside-title">Tonight&apos;s output</span>
-                <span className="landing-hero-aside-note">Preview · Real symbols</span>
+                <span className="landing-hero-aside-note">
+                  {isLiveData ? "Live · Standard top 25" : "Preview · Real symbols"}
+                </span>
               </div>
               <ol className="landing-mini-list">
-                {HERO_PREVIEW.map((row, i) => (
+                {heroPreview.map((row, i) => (
                   <li key={row.sym}>
                     <span className="landing-mini-rank">{padRank(i + 1)}</span>
                     <span>

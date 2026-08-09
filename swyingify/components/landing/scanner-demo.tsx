@@ -6,7 +6,6 @@ import { VcpDemoChart } from "@/components/landing/vcp-demo-chart"
 import { Reveal } from "@/components/landing/reveal"
 import {
   LANDING_CHECKS,
-  LANDING_SCANS,
   STATUS_LABELS,
   type ScanDemoItem,
 } from "@/lib/landing/demo-data"
@@ -16,19 +15,34 @@ function padRank(n: number) {
   return (n < 10 ? "0" : "") + n
 }
 
-function formatScanDate() {
+function formatScanDate(asOfDate?: string) {
+  if (asOfDate) {
+    const d = new Date(`${asOfDate}T00:00:00.000Z`)
+    if (!Number.isNaN(d.getTime())) {
+      const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+      return `${days[d.getUTCDay()]} ${d.getUTCDate()} ${months[d.getUTCMonth()]}`
+    }
+  }
   const d = new Date()
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
   return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`
 }
 
-export function ScannerDemo() {
+type ScannerDemoProps = {
+  scans: ScanDemoItem[]
+  asOfDate: string
+  isLiveData: boolean
+}
+
+export function ScannerDemo({ scans, asOfDate, isLiveData }: ScannerDemoProps) {
   const [idx, setIdx] = useState(0)
   const [manual, setManual] = useState(false)
   const [fpKey, setFpKey] = useState(0)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const item = LANDING_SCANS[idx]
+  const safeScans = scans.length > 0 ? scans : []
+  const item = safeScans[Math.min(idx, Math.max(safeScans.length - 1, 0))]
 
   const clearTimer = useCallback(() => {
     if (timerRef.current) {
@@ -46,11 +60,11 @@ export function ScannerDemo() {
       timerRef.current = setInterval(() => {
         if (document.hidden) return
         setManual(false)
-        setIdx((i) => (i + 1) % LANDING_SCANS.length)
+        setIdx((i) => (i + 1) % Math.max(safeScans.length, 1))
         setFpKey((k) => k + 1)
       }, ms)
     },
-    [clearTimer],
+    [clearTimer, safeScans.length],
   )
 
   const select = useCallback(
@@ -84,16 +98,22 @@ export function ScannerDemo() {
         onMouseEnter={clearTimer}
         onMouseLeave={() => resetTimer(3400)}
       >
-        <DemoHead manual={manual} item={item} />
+        {item ? <DemoHead manual={manual} item={item} asOfDate={asOfDate} isLiveData={isLiveData} /> : null}
         <div className="grid border-b border-[var(--landing-border)] lg:grid-cols-[1.55fr_1fr]">
           <div className="border-b border-[var(--landing-border)] p-5 lg:border-b-0 lg:border-r">
-            <VcpDemoChart item={item} />
-            <ChartMeta stage={item.stage} />
+            {item ? (
+              <>
+                <VcpDemoChart item={item} />
+                <ChartMeta stage={item.stage} />
+              </>
+            ) : (
+              <p className="text-sm text-[var(--landing-muted)]">Waiting for tonight&apos;s Standard shortlist.</p>
+            )}
           </div>
-          <FingerprintPanel key={fpKey} item={item} />
+          {item ? <FingerprintPanel key={fpKey} item={item} /> : null}
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
-          {LANDING_SCANS.map((scan, i) => (
+          {safeScans.map((scan, i) => (
             <button
               key={scan.sym}
               type="button"
@@ -117,15 +137,27 @@ export function ScannerDemo() {
           ))}
         </div>
         <div className="flex flex-wrap justify-between gap-4 border-t border-[var(--landing-border)] px-[18px] py-3 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-wider text-[var(--landing-muted)]">
-          Illustrative preview on real Nifty 500 symbols · Live shortlist publishes after every close
+          {isLiveData
+            ? "Live Standard shortlist · Updates after every cash-market close"
+            : "Illustrative preview on real Nifty 500 symbols · Live shortlist publishes after every close"}
         </div>
       </div>
     </Reveal>
   )
 }
 
-function DemoHead({ manual, item }: { manual: boolean; item: ScanDemoItem }) {
-  const [scanDate] = useState(formatScanDate)
+function DemoHead({
+  manual,
+  item,
+  asOfDate,
+  isLiveData,
+}: {
+  manual: boolean
+  item: ScanDemoItem
+  asOfDate: string
+  isLiveData: boolean
+}) {
+  const scanDate = formatScanDate(asOfDate)
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--landing-border)] px-[18px] py-3.5">
@@ -138,7 +170,13 @@ function DemoHead({ manual, item }: { manual: boolean; item: ScanDemoItem }) {
       </div>
       <div className="flex items-center gap-2 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">
         <span className="landing-dot" aria-hidden />
-        <span>{manual ? `Paused — ${item.sym}` : "Tonight's shortlist"}</span>
+        <span>
+          {manual
+            ? `Paused — ${item.sym}`
+            : isLiveData
+              ? "Tonight's shortlist"
+              : "Preview shortlist"}
+        </span>
       </div>
     </div>
   )

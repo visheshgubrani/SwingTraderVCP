@@ -12,6 +12,8 @@ from app.config import settings
 from app.database import async_session
 from app.services.fundamental_pass import p7_run_config
 from app.services.indicators import (
+    attach_rs_line_metrics,
+    build_equal_weight_index_closes,
     compute_technical_indicators,
     compute_relative_strength_ratings,
     compute_weighted_performance_score,
@@ -44,6 +46,59 @@ def candle_trading_date(candle_start: datetime.datetime) -> datetime.date:
     if candle_start.tzinfo is None:
         candle_start = candle_start.replace(tzinfo=datetime.timezone.utc)
     return candle_start.astimezone(INDIA_TZ).date()
+
+
+async def load_rs_benchmark_closes(
+    *,
+    start_dt: datetime.datetime,
+    fyers_symbol: str,
+    prepared_frames: list[pd.DataFrame],
+) -> tuple[pd.Series, str, str]:
+    """
+    Load Nifty 500 index closes for RS-line; fall back to equal-weight synthetic.
+
+    Returns (close_series, source, symbol_label).
+    """
+    async with async_session() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT c.candle_start, c.close_price
+                FROM market_candles c
+                JOIN instruments i ON i.id = c.instrument_id
+                WHERE i.fyers_symbol = :fyers_symbol
+                  AND c.timeframe = '1d'
+                  AND c.candle_start >= :start_dt
+                ORDER BY c.candle_start ASC
+                """
+            ),
+            {"fyers_symbol": fyers_symbol, "start_dt": start_dt},
+        )
+        rows = result.all()
+
+    if len(rows) >= 60:
+        closes = pd.Series(
+            {
+                candle_trading_date(row.candle_start): float(row.close_price)
+                for row in rows
+            },
+            dtype=float,
+        )
+        closes.index = pd.to_datetime(closes.index)
+        return closes, "fyers_index", fyers_symbol
+
+    logger.warning(
+        "RS benchmark %s has insufficient candles (%s); using equal-weight synthetic.",
+        fyers_symbol,
+        len(rows),
+    )
+    synthetic = build_equal_weight_index_closes(prepared_frames)
+    if synthetic.empty:
+        raise ValueError(
+            f"Unable to build RS benchmark: no {fyers_symbol} candles and "
+            "synthetic equal-weight index is empty."
+        )
+    return synthetic, "synthetic_equal_weight", "SYNTHETIC:NIFTY500-EW"
 
 
 async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
@@ -184,10 +239,32 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             except Exception as prep_err:
                 logger.exception("Error preparing indicators for %s: %s", inst.symbol, prep_err)
 
+        index_closes: pd.Series | None = None
+        rs_benchmark_source = "not_required"
+        rs_benchmark_symbol = config.rs_benchmark_symbol
+        if config.pipeline_version == "vcp_score_v3":
+            index_closes, rs_benchmark_source, rs_benchmark_symbol = (
+                await load_rs_benchmark_closes(
+                    start_dt=start_dt,
+                    fyers_symbol=config.rs_benchmark_symbol,
+                    prepared_frames=[s["df_ind"] for s in prepared_stocks],
+                )
+            )
+            for prepared in prepared_stocks:
+                prepared["df_ind"] = attach_rs_line_metrics(
+                    prepared["df_ind"],
+                    index_closes,
+                    lookback_days=config.rs_line_lookback_days,
+                )
+
         # Step 4b: Compute relative strength ratings across the entire prepared universe
         logger.info(
-            "Prepared %s stocks. Calculating Relative Strength (RS) ratings...",
+            "Prepared %s stocks. Calculating Relative Strength (RS) ratings "
+            "(pipeline=%s rs_benchmark=%s source=%s)...",
             len(prepared_stocks),
+            config.pipeline_version,
+            rs_benchmark_symbol,
+            rs_benchmark_source,
         )
         rs_ratings = compute_relative_strength_ratings(prepared_stocks)
 
@@ -255,6 +332,38 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         "avg_volume_10": float(df_ind.iloc[-1]["avg_volume_10"]),
                         "avg_volume_50": float(df_ind.iloc[-1]["avg_volume_50"]),
                         "volume_dry_up_ratio": raw_inputs["volume_dry_up_ratio"],
+                        "up_down_volume_ratio": (
+                            float(raw_inputs["up_down_volume_ratio"])
+                            if raw_inputs.get("up_down_volume_ratio") is not None
+                            and not pd.isna(raw_inputs.get("up_down_volume_ratio"))
+                            else (
+                                float(df_ind.iloc[-1]["up_down_volume_ratio"])
+                                if "up_down_volume_ratio" in df_ind.columns
+                                and not pd.isna(df_ind.iloc[-1]["up_down_volume_ratio"])
+                                else None
+                            )
+                        ),
+                        "pocket_pivot_age": raw_inputs.get("pocket_pivot_age"),
+                        "rs_line": (
+                            float(df_ind.iloc[-1]["rs_line"])
+                            if "rs_line" in df_ind.columns
+                            and not pd.isna(df_ind.iloc[-1]["rs_line"])
+                            else None
+                        ),
+                        "rs_line_high_52w": (
+                            float(df_ind.iloc[-1]["rs_line_high_52w"])
+                            if "rs_line_high_52w" in df_ind.columns
+                            and not pd.isna(df_ind.iloc[-1]["rs_line_high_52w"])
+                            else None
+                        ),
+                        "rs_line_pct_off_high": (
+                            float(raw_inputs["rs_line_pct_off_high"])
+                            if raw_inputs.get("rs_line_pct_off_high") is not None
+                            and not pd.isna(raw_inputs.get("rs_line_pct_off_high"))
+                            else None
+                        ),
+                        "rs_benchmark_symbol": rs_benchmark_symbol,
+                        "rs_benchmark_source": rs_benchmark_source,
                         "score": {
                             "version": config.pipeline_version,
                             "total": scoring["score"],

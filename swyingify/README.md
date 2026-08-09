@@ -18,9 +18,15 @@ migration at `../server/db/migrations/007_swyingify_auth.sql` to be applied.
 Google sign-in additionally requires `GOOGLE_CLIENT_ID` and
 `GOOGLE_CLIENT_SECRET` (and a matching callback URL in Google Cloud).
 
-Required production environment values are documented in `.env.example`:
-`DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, and Google OAuth
-credentials. Keep all secrets server-side.
+Required production environment values (see `.env.example`):
+
+- `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`,
+  `NEXT_PUBLIC_BETTER_AUTH_URL`
+- Optional Google OAuth: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- FastAPI SaaS reads: `API_URL` (and matching `SAAS_INTERNAL_API_KEY` for
+  authenticated past-scan dates)
+
+Keep all secrets server-side.
 
 SEO / crawl controls (also in `.env.example`):
 
@@ -32,14 +38,13 @@ SEO / crawl controls (also in `.env.example`):
 Canonical live scanner path: `/scanners/minervini-vcp` (legacy `/scanner` and
 `/scanners/minervini` permanently redirect there).
 
-## Preview scope
+## Preview / live scope
 
-Fixtures are deterministic fictional NSE-style companies and are labeled
-“Preview data” throughout the UI. Standard and Wide are public presets; the
-scanner query state is stored in `preset`, `q`, and allowlisted `sort` URL
-parameters. Filtered scanner URLs and fixture stock pages stay `noindex`. The
-next milestone replaces the fixture data source with the global daily scanner
-API without changing the UI contracts.
+When `API_URL` points at the FastAPI server (and migration `010_saas_scan_templates.sql`
+is applied), the Minervini Standard board loads the latest global top-25 results.
+Without the API, fixtures remain labeled as preview. Scanner query state uses `q`
+and allowlisted `sort` / filter URL parameters. Past scans require Better Auth.
+Filtered scanner URLs and stock detail pages stay `noindex`.
 
 ## Checks
 

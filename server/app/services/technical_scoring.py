@@ -33,6 +33,31 @@ def linear_score(
     return points * clamp_unit((value - zero_at) / (full_at - zero_at))
 
 
+def signed_linear_score(
+    value: float,
+    *,
+    full_at: float,
+    zero_at: float,
+    points: float,
+    negative_floor: float,
+    lower_is_better: bool = False,
+) -> float:
+    """
+    Linear ramp that continues below the zero endpoint with the same slope,
+    clamped at ``negative_floor``.
+    """
+    if lower_is_better:
+        raise ValueError("signed_linear_score currently supports higher-is-better only")
+    span = full_at - zero_at
+    if span == 0:
+        return 0.0
+    unit = (value - zero_at) / span
+    raw = points * unit
+    if raw >= 0:
+        return min(points, raw)
+    return max(negative_floor, raw)
+
+
 def relationship_points(
     lhs: float,
     rhs: float,
@@ -60,6 +85,21 @@ def technical_score_grade(
     return "D"
 
 
+def pocket_pivot_points(age: float | None, config: TechnicalScreeningConfig) -> float:
+    """Recency-weighted pocket pivot: full through full_age, zero at zero_age."""
+    if age is None or not math.isfinite(float(age)):
+        return 0.0
+    age_value = float(age)
+    if age_value <= config.pocket_pivot_full_age:
+        return config.pocket_pivot_weight
+    if age_value >= config.pocket_pivot_zero_age:
+        return 0.0
+    span = float(config.pocket_pivot_zero_age - config.pocket_pivot_full_age)
+    return config.pocket_pivot_weight * (
+        1.0 - (age_value - config.pocket_pivot_full_age) / span
+    )
+
+
 def evaluate_technical_setup(
     df: pd.DataFrame,
     *,
@@ -67,13 +107,13 @@ def evaluate_technical_setup(
     history_days: int,
     config: TechnicalScreeningConfig | None = None,
 ) -> dict[str, Any]:
-    """Evaluate v2 eligibility and calculate a deterministic 0-100 score."""
+    """Evaluate eligibility and calculate a deterministic 0-100 score."""
     config = config or TechnicalScreeningConfig()
     if df.empty:
         return _invalid_result("No indicator rows available")
 
     latest = df.iloc[-1]
-    required = (
+    required = [
         "close",
         "sma_50",
         "sma_150",
@@ -87,8 +127,28 @@ def evaluate_technical_setup(
         "bb_width",
         "bb_width_percentile",
         "volume_dry_up_ratio",
+    ]
+    if config.pipeline_version == "vcp_score_v3":
+        required.extend(
+            [
+                "up_down_volume_ratio",
+                "rs_line_pct_off_high",
+            ]
+        )
+
+    values: dict[str, float] = {}
+    for name in required:
+        if name not in latest.index:
+            return _invalid_result(f"Missing indicator column: {name}")
+        values[name] = float(latest[name])
+
+    pocket_age_raw = latest["pocket_pivot_age"] if "pocket_pivot_age" in latest.index else float("nan")
+    pocket_age = (
+        float(pocket_age_raw)
+        if pocket_age_raw is not None and not pd.isna(pocket_age_raw)
+        else None
     )
-    values = {name: float(latest[name]) for name in required}
+
     inputs_valid = all(math.isfinite(value) for value in values.values())
     inputs_valid = inputs_valid and all(
         values[name] > 0
@@ -213,18 +273,6 @@ def evaluate_technical_setup(
         zero_at=config.high_proximity_zero_pct,
         points=config.high_proximity_weight,
     )
-    atr_points = linear_score(
-        atr_proximity_factor,
-        full_at=config.atr_proximity_full,
-        zero_at=config.atr_proximity_zero,
-        points=config.atr_contraction_weight,
-    )
-    bb_points = linear_score(
-        values["bb_width_percentile"],
-        full_at=config.bb_percentile_full,
-        zero_at=config.bb_percentile_zero,
-        points=config.bb_contraction_weight,
-    )
     volume_points = linear_score(
         values["volume_dry_up_ratio"],
         full_at=config.volume_ratio_full,
@@ -232,44 +280,126 @@ def evaluate_technical_setup(
         points=config.volume_dry_up_weight,
     )
 
-    components = {
-        "stage2": {
-            "points": stage2_points,
-            "max_points": config.stage2_weight,
-            "raw_value": {
-                "core_checks_passed": core_checks_passed,
-                "core_checks_total": len(CORE_CHECK_KEYS),
-                "above_52w_low_pct": above_52w_low_pct,
-                "core_check_points": core_points,
+    atr_unit = clamp_unit(
+        (config.atr_proximity_zero - atr_proximity_factor)
+        / (config.atr_proximity_zero - config.atr_proximity_full)
+    )
+    bb_unit = clamp_unit(
+        (config.bb_percentile_zero - values["bb_width_percentile"])
+        / (config.bb_percentile_zero - config.bb_percentile_full)
+    )
+
+    if config.pipeline_version == "vcp_score_v3":
+        contraction_points = ((atr_unit + bb_unit) / 2.0) * config.contraction_weight
+        rs_line_points = linear_score(
+            values["rs_line_pct_off_high"],
+            full_at=config.rs_line_off_full_pct,
+            zero_at=config.rs_line_off_zero_pct,
+            points=config.rs_line_high_weight,
+        )
+        up_down_points = signed_linear_score(
+            values["up_down_volume_ratio"],
+            full_at=config.up_down_volume_full,
+            zero_at=config.up_down_volume_zero,
+            points=config.up_down_volume_weight,
+            negative_floor=config.up_down_volume_negative_floor,
+        )
+        pocket_points = pocket_pivot_points(pocket_age, config)
+        components = {
+            "stage2": {
+                "points": stage2_points,
+                "max_points": config.stage2_weight,
+                "raw_value": {
+                    "core_checks_passed": core_checks_passed,
+                    "core_checks_total": len(CORE_CHECK_KEYS),
+                    "above_52w_low_pct": above_52w_low_pct,
+                    "core_check_points": core_points,
+                },
             },
-        },
-        "relative_strength": {
-            "points": rs_points,
-            "max_points": config.rs_weight,
-            "raw_value": float(rs_rating),
-        },
-        "high_proximity": {
-            "points": high_points,
-            "max_points": config.high_proximity_weight,
-            "raw_value": distance_52w_high_pct,
-        },
-        "atr_contraction": {
-            "points": atr_points,
-            "max_points": config.atr_contraction_weight,
-            "raw_value": atr_proximity_factor,
-        },
-        "bollinger_contraction": {
-            "points": bb_points,
-            "max_points": config.bb_contraction_weight,
-            "raw_value": values["bb_width_percentile"],
-        },
-        "volume_dry_up": {
-            "points": volume_points,
-            "max_points": config.volume_dry_up_weight,
-            "raw_value": values["volume_dry_up_ratio"],
-        },
-    }
-    score = round(sum(component["points"] for component in components.values()), 2)
+            "relative_strength": {
+                "points": rs_points,
+                "max_points": config.rs_weight,
+                "raw_value": float(rs_rating),
+            },
+            "rs_line_high": {
+                "points": rs_line_points,
+                "max_points": config.rs_line_high_weight,
+                "raw_value": values["rs_line_pct_off_high"],
+            },
+            "high_proximity": {
+                "points": high_points,
+                "max_points": config.high_proximity_weight,
+                "raw_value": distance_52w_high_pct,
+            },
+            "volatility_contraction": {
+                "points": contraction_points,
+                "max_points": config.contraction_weight,
+                "raw_value": {
+                    "atr_unit": atr_unit,
+                    "bb_unit": bb_unit,
+                    "atr_proximity_factor": atr_proximity_factor,
+                    "bb_width_percentile": values["bb_width_percentile"],
+                },
+            },
+            "volume_dry_up": {
+                "points": volume_points,
+                "max_points": config.volume_dry_up_weight,
+                "raw_value": values["volume_dry_up_ratio"],
+            },
+            "up_down_volume": {
+                "points": up_down_points,
+                "max_points": config.up_down_volume_weight,
+                "raw_value": values["up_down_volume_ratio"],
+            },
+            "pocket_pivot": {
+                "points": pocket_points,
+                "max_points": config.pocket_pivot_weight,
+                "raw_value": pocket_age,
+            },
+        }
+    else:
+        atr_points = atr_unit * config.atr_contraction_weight
+        bb_points = bb_unit * config.bb_contraction_weight
+        components = {
+            "stage2": {
+                "points": stage2_points,
+                "max_points": config.stage2_weight,
+                "raw_value": {
+                    "core_checks_passed": core_checks_passed,
+                    "core_checks_total": len(CORE_CHECK_KEYS),
+                    "above_52w_low_pct": above_52w_low_pct,
+                    "core_check_points": core_points,
+                },
+            },
+            "relative_strength": {
+                "points": rs_points,
+                "max_points": config.rs_weight,
+                "raw_value": float(rs_rating),
+            },
+            "high_proximity": {
+                "points": high_points,
+                "max_points": config.high_proximity_weight,
+                "raw_value": distance_52w_high_pct,
+            },
+            "atr_contraction": {
+                "points": atr_points,
+                "max_points": config.atr_contraction_weight,
+                "raw_value": atr_proximity_factor,
+            },
+            "bollinger_contraction": {
+                "points": bb_points,
+                "max_points": config.bb_contraction_weight,
+                "raw_value": values["bb_width_percentile"],
+            },
+            "volume_dry_up": {
+                "points": volume_points,
+                "max_points": config.volume_dry_up_weight,
+                "raw_value": values["volume_dry_up_ratio"],
+            },
+        }
+
+    raw_total = sum(component["points"] for component in components.values())
+    score = round(max(0.0, min(100.0, raw_total)), 2)
 
     return {
         "eligible": eligible,
@@ -286,6 +416,7 @@ def evaluate_technical_setup(
             "distance_52w_high_pct": distance_52w_high_pct,
             "above_52w_low_pct": above_52w_low_pct,
             "atr_proximity_factor": atr_proximity_factor,
+            "pocket_pivot_age": pocket_age,
         },
     }
 

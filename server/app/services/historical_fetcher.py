@@ -274,7 +274,12 @@ async def run_historical_sync(
                     WHERE i.active = true
                       AND (
                             m.instrument_id IS NOT NULL
-                            OR i.fyers_symbol = 'NSE:NIFTY50-INDEX'
+                            -- One extra index symbol (~0.35s sleep/chunk) is
+                            -- negligible next to the ~500 equity EOD sync.
+                            OR i.fyers_symbol IN (
+                                'NSE:NIFTY50-INDEX',
+                                'NSE:NIFTY500-INDEX'
+                            )
                           )
                     GROUP BY i.id, i.symbol, i.fyers_symbol
                     ORDER BY i.symbol ASC
@@ -414,6 +419,25 @@ async def run_historical_sync(
             f"{progress.successful_symbols}/{progress.total_symbols} symbols.",
         )
         await save_sync_status(redis, progress)
+
+        if final_state in ("succeeded", "partial"):
+            try:
+                await redis.enqueue_job(
+                    "run_saas_global_standard_scan",
+                    target_date.isoformat(),
+                    "eod_chain",
+                    _job_id=f"saas-standard:{target_date.isoformat()}",
+                )
+                logger.info(
+                    "Enqueued SaaS Standard scan for as_of_date=%s after EOD sync",
+                    target_date.isoformat(),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to enqueue SaaS Standard scan after EOD sync for %s",
+                    target_date.isoformat(),
+                )
+
         return {
             "status": final_state,
             "candles_upserted": progress.candles_upserted,

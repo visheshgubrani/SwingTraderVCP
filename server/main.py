@@ -12,6 +12,7 @@ from app.database import db_dep
 from app.routers.auth import router as auth_router
 from app.routers.historical import router as historical_router
 from app.routers.journal import router as journal_router
+from app.routers.saas_scans import router as saas_scans_router
 from app.routers.screening import router as screening_router
 from app.routers.system_controls import router as system_controls_router
 from app.routers.trading import router as trading_router
@@ -67,6 +68,7 @@ app.include_router(screening_router, prefix="/api/v1")
 app.include_router(trading_router, prefix="/api/v1")
 app.include_router(journal_router, prefix="/api/v1")
 app.include_router(system_controls_router, prefix="/api/v1")
+app.include_router(saas_scans_router)
 app.include_router(ws_router)
 
 

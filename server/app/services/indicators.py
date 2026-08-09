@@ -116,8 +116,196 @@ def compute_technical_indicators(
     df['volume_dry_up_ratio'] = (
         df['avg_volume_10'] / df['avg_volume_50'].replace(0, np.nan)
     )
-    
+
+    previous_close_for_dir = df['close'].shift(1)
+    is_up_day = df['close'] > previous_close_for_dir
+    is_down_day = df['close'] < previous_close_for_dir
+    up_volume = df['volume'].where(is_up_day, 0.0)
+    down_volume = df['volume'].where(is_down_day, 0.0)
+    up_sum = up_volume.rolling(
+        window=config.up_down_volume_lookback_days,
+        min_periods=config.up_down_volume_lookback_days,
+    ).sum()
+    down_sum = down_volume.rolling(
+        window=config.up_down_volume_lookback_days,
+        min_periods=config.up_down_volume_lookback_days,
+    ).sum()
+    df['up_down_volume_ratio'] = up_sum / down_sum.replace(0, np.nan)
+
+    df['pocket_pivot'] = _compute_pocket_pivot_flags(
+        df,
+        is_up_day=is_up_day,
+        is_down_day=is_down_day,
+        lookback=config.pocket_pivot_lookback_days,
+        max_extension_pct=config.pocket_pivot_max_extension_pct,
+    )
+    df['pocket_pivot_age'] = _pocket_pivot_ages(df['pocket_pivot'])
+
     return df
+
+
+def _normalize_trading_dates(series: pd.Series) -> pd.Series:
+    """Normalize timestamps/dates to plain calendar dates for joining."""
+    converted = pd.to_datetime(series, utc=True, errors="coerce")
+    if converted.dt.tz is not None:
+        converted = converted.dt.tz_convert("Asia/Kolkata")
+    return converted.dt.normalize().dt.tz_localize(None).dt.date
+
+
+def attach_rs_line_metrics(
+    df: pd.DataFrame,
+    index_close_by_date: pd.Series,
+    *,
+    lookback_days: int = 252,
+) -> pd.DataFrame:
+    """
+    Attach RS-line metrics using an inner join on trading date.
+
+    Stock and index calendars are aligned on overlapping dates only. Non-overlap
+    rows keep NaN RS fields so local indicators remain intact.
+    """
+    if df.empty:
+        out = df.copy()
+        out["rs_line"] = np.nan
+        out["rs_line_high_52w"] = np.nan
+        out["rs_line_pct_off_high"] = np.nan
+        return out
+
+    if "date" not in df.columns:
+        raise ValueError("attach_rs_line_metrics requires a 'date' column")
+
+    out = df.copy()
+    stock_dates = _normalize_trading_dates(out["date"])
+    index_series = index_close_by_date.copy()
+    if not isinstance(index_series.index, pd.DatetimeIndex):
+        index_series.index = pd.to_datetime(index_series.index)
+    if getattr(index_series.index, "tz", None) is not None:
+        index_series.index = index_series.index.tz_convert("Asia/Kolkata").tz_localize(None)
+    index_series.index = pd.Index(
+        [d.date() if hasattr(d, "date") else d for d in index_series.index.normalize()]
+    )
+    index_series = index_series[~index_series.index.duplicated(keep="last")]
+
+    aligned = pd.DataFrame(
+        {
+            "row_idx": np.arange(len(out)),
+            "trade_date": stock_dates,
+            "close": out["close"].astype(float),
+        }
+    )
+    index_frame = index_series.rename("index_close").rename_axis("trade_date").reset_index()
+    merged = aligned.merge(index_frame, on="trade_date", how="inner")
+    merged = merged.sort_values("row_idx")
+    merged["rs_line"] = merged["close"] / merged["index_close"].replace(0, np.nan)
+    # Rolling high over overlapping history only (since-listing if shorter).
+    merged["rs_line_high_52w"] = merged["rs_line"].rolling(
+        window=lookback_days,
+        min_periods=1,
+    ).max()
+    merged["rs_line_pct_off_high"] = (
+        (merged["rs_line_high_52w"] - merged["rs_line"])
+        / merged["rs_line_high_52w"].replace(0, np.nan)
+        * 100.0
+    )
+
+    out["rs_line"] = np.nan
+    out["rs_line_high_52w"] = np.nan
+    out["rs_line_pct_off_high"] = np.nan
+    out.loc[merged["row_idx"].to_numpy(), "rs_line"] = merged["rs_line"].to_numpy()
+    out.loc[merged["row_idx"].to_numpy(), "rs_line_high_52w"] = (
+        merged["rs_line_high_52w"].to_numpy()
+    )
+    out.loc[merged["row_idx"].to_numpy(), "rs_line_pct_off_high"] = (
+        merged["rs_line_pct_off_high"].to_numpy()
+    )
+    return out
+
+
+def build_equal_weight_index_closes(
+    stock_frames: list[pd.DataFrame],
+) -> pd.Series:
+    """
+    Build an equal-weight synthetic index from stock closes.
+
+    Each stock contributes close / first_close on overlapping dates; the daily
+    level is the mean of available constituents that day.
+    """
+    normalized_frames: list[pd.DataFrame] = []
+    for frame in stock_frames:
+        if frame.empty or "date" not in frame.columns or "close" not in frame.columns:
+            continue
+        piece = frame[["date", "close"]].copy()
+        piece["trade_date"] = _normalize_trading_dates(piece["date"])
+        piece = piece.dropna(subset=["trade_date", "close"])
+        if piece.empty:
+            continue
+        first_close = float(piece.iloc[0]["close"])
+        if first_close == 0 or not np.isfinite(first_close):
+            continue
+        piece["rel_close"] = piece["close"].astype(float) / first_close
+        normalized_frames.append(piece[["trade_date", "rel_close"]])
+
+    if not normalized_frames:
+        return pd.Series(dtype=float)
+
+    stacked = pd.concat(normalized_frames, ignore_index=True)
+    level = stacked.groupby("trade_date", sort=True)["rel_close"].mean()
+    level.index = pd.to_datetime(level.index)
+    return level
+
+
+def _compute_pocket_pivot_flags(
+    df: pd.DataFrame,
+    *,
+    is_up_day: pd.Series,
+    is_down_day: pd.Series,
+    lookback: int,
+    max_extension_pct: float,
+) -> pd.Series:
+    """True when an up-day qualifies as a pocket pivot (incl. empty down-window)."""
+    closes = df["close"].to_numpy(dtype=float)
+    volumes = df["volume"].to_numpy(dtype=float)
+    sma_50 = df["sma_50"].to_numpy(dtype=float)
+    up_flags = is_up_day.fillna(False).to_numpy(dtype=bool)
+    down_flags = is_down_day.fillna(False).to_numpy(dtype=bool)
+    flags = np.zeros(len(df), dtype=bool)
+
+    for index in range(len(df)):
+        if not up_flags[index]:
+            continue
+        if not np.isfinite(sma_50[index]) or sma_50[index] <= 0:
+            continue
+        extension_pct = ((closes[index] / sma_50[index]) - 1.0) * 100.0
+        if extension_pct > max_extension_pct:
+            continue
+
+        start = max(0, index - lookback)
+        window_down = down_flags[start:index]
+        window_vol = volumes[start:index]
+        if index == 0 or start == index:
+            # No prior window — treat empty down-day set as satisfied.
+            volume_ok = True
+        else:
+            down_vols = window_vol[window_down]
+            if down_vols.size == 0:
+                volume_ok = True
+            else:
+                volume_ok = volumes[index] > float(np.max(down_vols))
+        flags[index] = bool(volume_ok)
+
+    return pd.Series(flags, index=df.index, dtype=bool)
+
+
+def _pocket_pivot_ages(pocket_flags: pd.Series) -> pd.Series:
+    ages = np.full(len(pocket_flags), np.nan, dtype=float)
+    last_hit: int | None = None
+    for index, flagged in enumerate(pocket_flags.fillna(False).to_numpy(dtype=bool)):
+        if flagged:
+            last_hit = index
+            ages[index] = 0.0
+        elif last_hit is not None:
+            ages[index] = float(index - last_hit)
+    return pd.Series(ages, index=pocket_flags.index, dtype=float)
 
 def compute_weighted_performance_score(df: pd.DataFrame) -> float:
     """

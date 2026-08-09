@@ -56,8 +56,8 @@ export const minerviniTrendTemplateGuide: LearnGuide = {
       id: "approximation",
       heading: "How Swyingify approximates the template",
       paragraphs: [
-        "Our Wide and Standard Minervini boards combine trend-stack checks with contraction, volume, and relative-strength gates. Exact numeric thresholds are versioned in the scan template — they are independent engineering choices, not a licensed Minervini product.",
-        "Wide casts a broader Stage 2-style net. Standard tightens quality. Strict (paid, later) is intended for even tighter VCP/volume conditions. None of these presets place orders.",
+        "Our Minervini Standard board combines trend-stack checks with contraction, volume, and relative-strength gates. Exact numeric thresholds are versioned in the scan template — they are independent engineering choices, not a licensed Minervini product.",
+        "Beta ships Standard (top 25) only. Wide and Strict presets may return later. None of these presets place orders.",
       ],
     },
   ],

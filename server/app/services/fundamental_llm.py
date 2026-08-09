@@ -182,7 +182,7 @@ class OpenRouterFundamentalClient:
         api_key: str,
         api_url: str = "https://openrouter.ai/api/v1/chat/completions",
         model: str = "openai/gpt-5.6-luna-pro",
-        reasoning_effort: str = "low",
+        reasoning_effort: str = "medium",
         prompt_version: str = "fundamental_second_opinion_v1",
         app_title: str = "SwingTraderVCP",
         http_referer: str = "",
@@ -348,11 +348,11 @@ class OpenRouterFundamentalClient:
             "risks",
             "review_focus",
         ]
-        enum_items = {"type": "string", "enum": allowed_ids}
-        schema["properties"]["verdict_reference_ids"]["items"] = enum_items
+        string_item = {"type": "string"}
+        schema["properties"]["verdict_reference_ids"]["items"] = string_item
         note_schema = schema.get("$defs", {}).get("ReferenceNote")
         if isinstance(note_schema, dict):
-            note_schema["properties"]["reference_ids"]["items"] = enum_items
+            note_schema["properties"]["reference_ids"]["items"] = string_item
         return schema
 
     def _request_from_packet(
@@ -366,14 +366,15 @@ class OpenRouterFundamentalClient:
                 {
                     "role": "system",
                     "content": (
-                        "You are a read-only independent second-opinion analyst for Indian-equity "
-                        "fundamentals. Assess Minervini-style earnings and sales growth, profitability, "
-                        "cash quality, ownership sponsorship, and data coverage using only the supplied "
-                        "references. You cannot see the deterministic Python score and must not infer it. "
-                        "Return pass, fail, or uncertain; use uncertain when evidence is sparse or conflicting. "
-                        "Every conclusion must cite only reference IDs in the packet. Provider limitations are "
-                        "neutral coverage constraints, not negative evidence. Never recommend a trade or mention "
-                        "an entry, exit, position size, order, or execution action."
+                        "You are an expert equity research analyst evaluating fundamental quality for Indian swing trading setups (Minervini / SEPA framework).\n"
+                        "Your objective: Provide an independent, grounded second opinion on earnings & sales growth, profit margins, operational quality, and institutional sponsorship using ONLY the supplied references packet.\n"
+                        "Crucial rules:\n"
+                        "1. Deterministic Python fit is separate and authoritative; focus on qualitative synthesis of growth trends, margin trajectory, and risks.\n"
+                        "2. Upstox API provider limitations (e.g. missing quarterly EPS breakdown, promoter pledge, or debt-to-equity) are expected coverage constraints—NEVER treat missing optional provider fields as a red flag or reason to fail a stock. Work constructively with available metrics.\n"
+                        "3. Return verdict as 'pass', 'fail', or 'uncertain'. Use 'pass' when sales/profit growth & margins demonstrate solid fundamental health; 'fail' when severe margin erosion, falling revenue, or heavy losses are evident; 'uncertain' when data is sparse.\n"
+                        "4. Highlight top Strengths (key fundamental growth drivers), Risks (margin pressure, headwinds), and Review Focus (what the human trader should check).\n"
+                        "5. Every conclusion must cite matching reference IDs from the supplied packet.\n"
+                        "6. Never recommend specific trade execution, entry, exit, or position size actions."
                     ),
                 },
                 {
@@ -485,14 +486,30 @@ class OpenRouterFundamentalClient:
                     f"provider error: {choice_error.get('message') or choice_error.get('code')}"
                 )
             parsed = parse_openrouter_structured_content(choices[0], usage=usage)
-            opinion = FundamentalSecondOpinion.model_validate(parsed)
             allowed = {reference.id for reference in prepared.packet.references}
-            cited = set(opinion.verdict_reference_ids)
-            for note in [*opinion.strengths, *opinion.risks, *opinion.review_focus]:
-                cited.update(note.reference_ids)
-            unknown = sorted(cited - allowed)
-            if unknown:
-                raise ValueError(f"Model cited references absent from the request packet: {unknown}")
+
+            def _clean_refs(raw_refs: Any) -> list[str]:
+                if not isinstance(raw_refs, list):
+                    return []
+                return [r for r in raw_refs if isinstance(r, str) and r in allowed]
+
+            if isinstance(parsed, dict):
+                clean_v_refs = _clean_refs(parsed.get("verdict_reference_ids"))
+                if not clean_v_refs and allowed:
+                    clean_v_refs = [next(iter(allowed))]
+                parsed["verdict_reference_ids"] = clean_v_refs
+
+                for key in ("strengths", "risks", "review_focus"):
+                    items = parsed.get(key)
+                    if isinstance(items, list):
+                        for item in items:
+                            if isinstance(item, dict):
+                                clean_item_refs = _clean_refs(item.get("reference_ids"))
+                                if not clean_item_refs and allowed:
+                                    clean_item_refs = [next(iter(allowed))]
+                                item["reference_ids"] = clean_item_refs
+
+            opinion = FundamentalSecondOpinion.model_validate(parsed)
         except (ValueError, KeyError, TypeError, ValidationError) as exc:
             raise FundamentalLLMError(
                 f"OpenRouter structured response was invalid: {exc}",

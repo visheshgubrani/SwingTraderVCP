@@ -8,6 +8,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { ChangeCell, formatAdtv, formatInr, padRank, ScoreCell } from "@/components/scanner-board/board-formatters"
 import { TrendSparkline } from "@/components/scanner-board/trend-sparkline"
 import { Reveal } from "@/components/landing/reveal"
+import { stockPath } from "@/lib/scanner/board-data"
 import { scannerResultsQuery } from "@/lib/scanner/queries"
 import type { ScannerPreset, ScannerResultPreview } from "@/lib/scanner/types"
 import { cn } from "@/lib/utils"
@@ -25,14 +26,27 @@ const sortLabels: Record<SortKey, string> = {
 type MoveFilter = "" | "up" | "dn"
 type GradeFilter = "" | "A" | "B" | "C"
 
-function formatBoardDate() {
-  const d = new Date()
+function formatBoardDate(isoDate: string) {
+  const d = new Date(`${isoDate}T00:00:00.000Z`)
+  if (Number.isNaN(d.getTime())) return isoDate
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-  const day = (d.getDate() < 10 ? "0" : "") + d.getDate()
-  return `${day} ${months[d.getMonth()]} ${d.getFullYear()}`
+  const day = d.getUTCDate() < 10 ? `0${d.getUTCDate()}` : String(d.getUTCDate())
+  return `${day} ${months[d.getUTCMonth()]} ${d.getUTCFullYear()}`
 }
 
-export function ScannerBoard() {
+type ScannerBoardProps = {
+  initialPreset: ScannerPreset
+  initialResults: ScannerResultPreview[]
+  asOfDate: string
+  isLiveData: boolean
+}
+
+export function ScannerBoard({
+  initialPreset,
+  initialResults,
+  asOfDate,
+  isLiveData,
+}: ScannerBoardProps) {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -46,7 +60,10 @@ export function ScannerBoard() {
   const grade = (searchParams.get("grade") || "") as GradeFilter
   const move = (searchParams.get("move") || "") as MoveFilter
 
-  const { data, isLoading } = useQuery(scannerResultsQuery(preset))
+  const { data, isLoading } = useQuery({
+    ...scannerResultsQuery(preset),
+    initialData: preset === initialPreset ? initialResults : undefined,
+  })
 
   const sectors = useMemo(() => {
     const seen = new Set<string>()
@@ -94,27 +111,31 @@ export function ScannerBoard() {
           </Reveal>
           <Reveal>
             <h1 className="mt-[26px] font-[family-name:var(--font-landing-mono)] text-[clamp(34px,4.4vw,56px)] font-light leading-[1.1] text-[var(--landing-fg)]">
-              The daily setup board.
+              Minervini VCP scanner for Nifty 500 stocks
             </h1>
           </Reveal>
           <Reveal>
             <p className="landing-lead mt-6">
-              Tonight&apos;s shortlist, ranked. Every row is a real Nifty 500 name the standard template matched at
-              the close — trend, price, volume and relative strength in one view.
+              Tonight&apos;s Wide and Standard shortlists after the cash-market close — an independent rule-based
+              approximation of Stage 2 / volatility contraction conditions with trend, price, volume, and relative
+              strength in one view.
             </p>
           </Reveal>
           <Reveal>
             <div className="mt-8 flex flex-wrap items-center justify-between gap-5 border border-[var(--landing-border)] bg-[var(--landing-surface)] px-[18px] py-3.5">
               <div className="flex flex-wrap items-center gap-3.5">
-                <span className="font-[family-name:var(--font-landing-mono)] text-sm tracking-wide text-[var(--landing-fg)]">
-                  {formatBoardDate()}
-                </span>
+                <time
+                  dateTime={asOfDate}
+                  className="font-[family-name:var(--font-landing-mono)] text-sm tracking-wide text-[var(--landing-fg)]"
+                >
+                  {formatBoardDate(asOfDate)}
+                </time>
                 <span className="border border-[var(--landing-border)] px-2.5 py-1 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">
                   EOD snapshot
                 </span>
               </div>
               <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-wider text-[var(--landing-muted)] max-sm:w-full">
-                Preview board · published after every close
+                {isLiveData ? "Live board · published after every close" : "Preview board · illustrative until live results"}
               </span>
             </div>
           </Reveal>
@@ -237,7 +258,9 @@ export function ScannerBoard() {
           </Reveal>
 
           <p className="mt-4 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-wider text-[var(--landing-muted)]">
-            Illustrative values on real Nifty 500 symbols · the live board replaces these numbers after every close
+            {isLiveData
+              ? "Educational screening only · not SEBI-registered · not a buy signal"
+              : "Illustrative values on real Nifty 500 symbols · live dated results replace these numbers when the backend is connected"}
           </p>
         </div>
       </section>
@@ -262,7 +285,7 @@ function BoardTable({ results }: { results: ScannerResultPreview[] }) {
       {results.map((row, index) => (
         <Link
           key={row.id}
-          href={`/stocks/${row.symbol}`}
+          href={stockPath(row.symbol)}
           className="board-row data text-[var(--landing-fg-2)] hover:no-underline"
         >
           <span className="font-[family-name:var(--font-landing-mono)] text-xs tracking-wide text-[var(--landing-muted)]">
@@ -305,7 +328,7 @@ function BoardCards({ results }: { results: ScannerResultPreview[] }) {
       {results.map((row) => (
         <Link
           key={`card-${row.id}`}
-          href={`/stocks/${row.symbol}`}
+          href={stockPath(row.symbol)}
           className="mb-3 block border border-[var(--landing-border)] p-[18px] transition-colors last:mb-0 hover:bg-[var(--landing-surface-warm)] hover:no-underline"
         >
           <div className="flex items-start justify-between gap-3">

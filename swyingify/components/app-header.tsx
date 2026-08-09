@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import { useState } from "react"
-import { LogOutIcon, MenuIcon, ScanLineIcon, UserRoundIcon, XIcon } from "lucide-react"
+import { BookOpenIcon, LogOutIcon, MenuIcon, ScanLineIcon, UserRoundIcon, XIcon } from "lucide-react"
 
 import { BrandMark } from "@/components/brand-mark"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -16,6 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { authClient } from "@/lib/auth-client"
+import { CANONICAL_SCANNER_PATH } from "@/lib/seo/config"
 
 export function AppHeader() {
   const pathname = usePathname()
@@ -37,23 +38,24 @@ export function AppHeader() {
           <BrandMark />
           <nav className="hidden items-center gap-1 md:flex" aria-label="Primary navigation">
             <Link
-              href="/scanner"
-              className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors hover:bg-muted ${pathname.startsWith("/scanner") ? "bg-muted text-foreground" : "text-muted-foreground"}`}
+              href="/scanners"
+              className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors hover:bg-muted ${pathname.startsWith("/scanners") ? "bg-muted text-foreground" : "text-muted-foreground"}`}
             >
               <ScanLineIcon data-icon="inline-start" />
               Scanners
             </Link>
             <Link
-              href="/#scan"
-              className="rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              href="/learn"
+              className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors hover:bg-muted ${pathname.startsWith("/learn") ? "bg-muted text-foreground" : "text-muted-foreground"}`}
             >
-              The scan
+              <BookOpenIcon data-icon="inline-start" />
+              Learn
             </Link>
           </nav>
         </div>
         <div className="flex items-center gap-2">
-          <Link href="/scanner" className="hidden text-sm font-medium text-muted-foreground hover:text-foreground sm:inline-flex">
-            Explore the scan
+          <Link href={CANONICAL_SCANNER_PATH} className="hidden text-sm font-medium text-muted-foreground hover:text-foreground sm:inline-flex">
+            Minervini VCP
           </Link>
           {!isPending && user ? (
             <DropdownMenu>
@@ -100,14 +102,14 @@ export function AppHeader() {
       {mobileOpen && (
         <nav id="mobile-navigation" className="border-t border-border/70 bg-background px-4 py-3 md:hidden" aria-label="Mobile navigation">
           <div className="mx-auto flex w-full max-w-7xl flex-col gap-1">
-            <Link href="/scanner" onClick={() => setMobileOpen(false)} className="rounded-lg px-3 py-2.5 text-sm font-medium hover:bg-muted">
+            <Link href="/scanners" onClick={() => setMobileOpen(false)} className="rounded-lg px-3 py-2.5 text-sm font-medium hover:bg-muted">
               <span className="flex items-center gap-2"><ScanLineIcon data-icon="inline-start" />Scanners</span>
             </Link>
-            <Link href="/#scan" onClick={() => setMobileOpen(false)} className="rounded-lg px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
-              The scan
+            <Link href="/learn" onClick={() => setMobileOpen(false)} className="rounded-lg px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
+              <span className="flex items-center gap-2"><BookOpenIcon data-icon="inline-start" />Learn</span>
             </Link>
-            <Link href="/scanner" onClick={() => setMobileOpen(false)} className="mt-1 rounded-lg bg-primary/10 px-3 py-2.5 text-sm font-medium text-primary">
-              Explore the scan
+            <Link href={CANONICAL_SCANNER_PATH} onClick={() => setMobileOpen(false)} className="mt-1 rounded-lg bg-primary/10 px-3 py-2.5 text-sm font-medium text-primary">
+              Minervini VCP
             </Link>
           </div>
         </nav>

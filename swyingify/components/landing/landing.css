@@ -427,17 +427,27 @@
   background: var(--landing-surface);
 }
 
+/* Fingerprint rows stay readable without JS; stagger is progressive enhancement. */
 .landing .landing-fp-row {
-  opacity: 0;
-  transform: translateY(4px);
-}
-
-.landing .landing-fp-row.on {
   opacity: 1;
   transform: none;
-  transition:
-    opacity 280ms var(--landing-ease),
-    transform 280ms var(--landing-ease);
+}
+
+@media (scripting: enabled) {
+  .landing .landing-fp-row.on {
+    animation: landing-fp-in 280ms var(--landing-ease) both;
+  }
+}
+
+@keyframes landing-fp-in {
+  from {
+    opacity: 0.01;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .landing .landing-strip-cell.active .landing-strip-bar-fill {
@@ -446,17 +456,27 @@
   transition: width 200ms var(--landing-ease);
 }
 
+/* Visible by default — reveal motion is progressive enhancement only. */
 .landing .landing-reveal {
-  opacity: 0;
-  transform: translateY(14px);
-}
-
-.landing .landing-reveal.in {
   opacity: 1;
   transform: none;
-  transition:
-    opacity 600ms var(--landing-ease),
-    transform 600ms var(--landing-ease);
+}
+
+@media (scripting: enabled) {
+  .landing .landing-reveal.in {
+    animation: landing-reveal-in 600ms var(--landing-ease) both;
+  }
+}
+
+@keyframes landing-reveal-in {
+  from {
+    opacity: 0.01;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .landing .landing-step:hover,

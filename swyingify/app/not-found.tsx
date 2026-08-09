@@ -10,7 +10,7 @@ export default function NotFound() {
       <p className="font-mono text-xs uppercase tracking-[0.2em] text-muted-foreground">No preview found</p>
       <h1 className="font-display text-4xl font-semibold tracking-tight">That symbol is outside today’s board.</h1>
       <p className="text-sm leading-6 text-muted-foreground">Try one of the fictional preview companies from the Minervini scanner.</p>
-      <Button nativeButton={false} render={<Link href="/scanner" />}>Back to scanner</Button>
+      <Button nativeButton={false} render={<Link href="/scanners/minervini-vcp" />}>Back to scanner</Button>
     </main>
   )
 }

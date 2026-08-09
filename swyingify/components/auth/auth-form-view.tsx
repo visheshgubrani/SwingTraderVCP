@@ -14,7 +14,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 function safeReturnTo(value: string | null): string {
   return value?.startsWith("/") && !value.startsWith("//") && !value.startsWith("/\\") && !value.includes("\u0000")
     ? value
-    : "/scanner"
+    : "/scanners/minervini-vcp"
 }
 
 const copy = {

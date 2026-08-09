@@ -2,6 +2,7 @@ import Link from "next/link"
 
 import { Reveal } from "@/components/landing/reveal"
 import { HERO_PREVIEW } from "@/lib/landing/demo-data"
+import { CANONICAL_SCANNER_PATH } from "@/lib/seo/config"
 
 function padRank(n: number) {
   return (n < 10 ? "0" : "") + n
@@ -17,27 +18,28 @@ export function LandingHero() {
               <p className="landing-kicker">Minervini VCP · Nifty 500 · End of day</p>
             </Reveal>
             <Reveal>
-              <h1 className="landing-display mt-[18px]">Find the few stocks worth your attention.</h1>
+              <h1 className="landing-display mt-[18px]">Swing trading stock scanner for Indian stocks</h1>
             </Reveal>
             <Reveal>
               <p className="landing-lead mt-[22px]">
-                Stop opening 500 charts looking for a clean base. Swyingify checks the Nifty 500 at every
-                market close for Mark Minervini&apos;s volatility contraction pattern, then shows the
-                shortlist and the reasoning behind it.
+                Find the few stocks worth your attention. Stop opening 500 charts looking for a clean base.
+                Swyingify checks the Nifty 500 at every market close for an independent approximation of Mark
+                Minervini&apos;s volatility contraction pattern, then shows the shortlist and the reasoning behind
+                it.
               </p>
             </Reveal>
             <Reveal>
               <div className="landing-hero-actions">
-                <Link href="/scanner" className="landing-btn landing-btn-primary">
+                <Link href={CANONICAL_SCANNER_PATH} className="landing-btn landing-btn-primary">
                   Browse today&apos;s scan
                 </Link>
-                <Link href="#method" className="landing-text-link">
-                  Read the method
+                <Link href="/learn" className="landing-text-link">
+                  Read the guides
                 </Link>
               </div>
             </Reveal>
             <Reveal>
-              <p className="landing-hero-meta">Educational only · No orders · No broker</p>
+              <p className="landing-hero-meta">Educational only · No orders · Not SEBI-registered</p>
             </Reveal>
           </div>
 

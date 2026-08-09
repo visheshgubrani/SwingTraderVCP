@@ -1,12 +1,15 @@
 "use client"
 
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useRef, type ReactNode } from "react"
 
 import { cn } from "@/lib/utils"
 
+/**
+ * Progressive enhancement: children render visible without JavaScript.
+ * When JS is available, IntersectionObserver toggles the `.in` class for motion.
+ */
 export function Reveal({ children, className }: { children: ReactNode; className?: string }) {
   const ref = useRef<HTMLDivElement>(null)
-  const [visible, setVisible] = useState(false)
 
   useEffect(() => {
     const el = ref.current
@@ -14,7 +17,7 @@ export function Reveal({ children, className }: { children: ReactNode; className
 
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches
     if (reduced || !("IntersectionObserver" in window)) {
-      setVisible(true)
+      el.classList.add("in")
       return
     }
 
@@ -22,7 +25,7 @@ export function Reveal({ children, className }: { children: ReactNode; className
       (entries) => {
         entries.forEach((entry) => {
           if (entry.isIntersecting) {
-            setVisible(true)
+            entry.target.classList.add("in")
             io.unobserve(entry.target)
           }
         })
@@ -35,7 +38,7 @@ export function Reveal({ children, className }: { children: ReactNode; className
   }, [])
 
   return (
-    <div ref={ref} className={cn("landing-reveal", visible && "in", className)}>
+    <div ref={ref} className={cn("landing-reveal", className)}>
       {children}
     </div>
   )

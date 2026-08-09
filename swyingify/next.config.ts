@@ -9,9 +9,19 @@ const nextConfig: NextConfig = {
   async redirects() {
     return [
       {
+        source: "/scanner",
+        destination: "/scanners/minervini-vcp",
+        permanent: true,
+      },
+      {
+        source: "/scanner/:path*",
+        destination: "/scanners/minervini-vcp",
+        permanent: true,
+      },
+      {
         source: "/scanners/minervini",
-        destination: "/scanner",
-        permanent: false,
+        destination: "/scanners/minervini-vcp",
+        permanent: true,
       },
     ]
   },

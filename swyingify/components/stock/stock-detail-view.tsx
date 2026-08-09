@@ -67,7 +67,7 @@ export function StockDetailView({
           {showChrome ? (
             <Reveal>
               <Link
-                href="/scanner"
+                href="/scanners/minervini-vcp"
                 className="-ml-2 inline-flex min-h-11 items-center px-2 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)] transition-colors hover:text-[var(--landing-fg)]"
               >
                 ← Daily board
@@ -274,7 +274,7 @@ export function StockDetailView({
                 investment advice.
               </p>
               <Link
-                href="/scanner"
+                href="/scanners/minervini-vcp"
                 className="py-3 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)] transition-colors hover:text-[var(--landing-fg)]"
               >
                 ← Daily board

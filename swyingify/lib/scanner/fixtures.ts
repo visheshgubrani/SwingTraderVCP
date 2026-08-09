@@ -170,7 +170,17 @@ export function getPreviewResults(preset: ScannerPreset): ScannerResultPreview[]
 }
 
 export function getPreviewResult(symbol: string): ScannerResultPreview | undefined {
-  const normalized = symbol.toUpperCase()
+  const normalized = symbol.trim().toUpperCase()
   return [...standardResults, ...wideResults].find((result) => result.symbol === normalized)
 }
+
+/** Lowercase stock slugs that exist in the fixture board (for SSG + 404 behavior). */
+export function getPreviewStockSlugs(): string[] {
+  const seen = new Set<string>()
+  for (const row of [...standardResults, ...wideResults]) {
+    seen.add(row.symbol.toLowerCase())
+  }
+  return [...seen].sort()
+}
+
 

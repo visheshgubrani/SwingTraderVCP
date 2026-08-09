@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { Bricolage_Grotesque, IBM_Plex_Mono, Manrope } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Providers } from "@/components/providers";
+import { JsonLd, organizationJsonLd, websiteJsonLd } from "@/lib/seo/json-ld";
+import { rootMetadataBase } from "@/lib/seo/metadata";
 import "./globals.css";
 
 const bodyFont = Manrope({
@@ -20,21 +22,16 @@ const monoFont = IBM_Plex_Mono({
   subsets: ["latin"],
 });
 
-export const metadata: Metadata = {
-  title: {
-    default: "Swyingify · Find the setup before you chase the stock",
-    template: "%s · Swyingify",
-  },
-  description: "A calmer way to explore rule-based swing-trading scanners for Indian equities.",
-};
+export const metadata: Metadata = rootMetadataBase();
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html
-      lang="en"
+      lang="en-IN"
       className={`${bodyFont.variable} ${displayFont.variable} ${monoFont.variable} h-full antialiased`}
     >
       <body className="swyingify-enter min-h-full flex flex-col">
+        <JsonLd data={[organizationJsonLd(), websiteJsonLd()]} />
         <Providers>
           <TooltipProvider>{children}</TooltipProvider>
         </Providers>

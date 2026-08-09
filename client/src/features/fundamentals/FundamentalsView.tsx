@@ -3,11 +3,16 @@ import {
   AlertTriangleIcon,
   BrainCircuitIcon,
   Building2Icon,
-  DatabaseZapIcon,
-  RotateCwIcon,
-  SearchIcon,
+  CheckCircle2Icon,
+  ChevronDownIcon,
   PauseCircleIcon,
   PlayCircleIcon,
+  RotateCwIcon,
+  SearchIcon,
+  ShieldAlertIcon,
+  SparklesIcon,
+  TargetIcon,
+  TrendingUpIcon,
   XCircleIcon,
 } from "lucide-react"
 
@@ -80,7 +85,7 @@ function formatRun(run: ScanRun) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(run.created_at))
-  return `${date} · ${run.passing_count} ranked setups`
+  return `${date} · ${run.passing_count} setups`
 }
 
 function fitBadge(result: Pick<ScanResult, "fundamental_assessment" | "fundamental_status">) {
@@ -98,11 +103,24 @@ function fitBadge(result: Pick<ScanResult, "fundamental_assessment" | "fundament
   }
   const grade = result.fundamental_assessment?.grade
   if (grade === "insufficient") return <Badge variant="outline">Insufficient data</Badge>
-  if (grade === "A") return <Badge>Fit A</Badge>
-  if (grade === "B") return <Badge variant="secondary">Fit B</Badge>
+  if (grade === "A") return <Badge className="bg-emerald-600 text-white font-semibold">Fit A</Badge>
+  if (grade === "B") return <Badge className="bg-blue-600 text-white font-semibold">Fit B</Badge>
   if (grade === "C") return <Badge variant="outline">Fit C</Badge>
   if (grade === "D") return <Badge variant="destructive">Fit D</Badge>
   return <Badge variant="outline">Awaiting analysis</Badge>
+}
+
+function aiVerdictBadge(verdict: string | null, status: string) {
+  if (verdict === "pass") {
+    return <Badge className="bg-emerald-600 hover:bg-emerald-600 text-white font-bold px-2.5 py-0.5">PASS</Badge>
+  }
+  if (verdict === "fail") {
+    return <Badge className="bg-red-600 hover:bg-red-600 text-white font-bold px-2.5 py-0.5">FAIL</Badge>
+  }
+  if (verdict === "uncertain") {
+    return <Badge className="bg-amber-600 hover:bg-amber-600 text-white font-bold px-2.5 py-0.5">UNCERTAIN</Badge>
+  }
+  return <Badge variant="outline">{status.replaceAll("_", " ")}</Badge>
 }
 
 function matchesFilter(result: ScanResult, filter: FitFilter) {
@@ -146,28 +164,6 @@ function prettyKey(value: string) {
   )
 }
 
-function formatMetric(value: unknown, unit?: string | null): string {
-  if (typeof value === "number") {
-    if (unit === "percent" || unit === "percentage_points") {
-      return `${value.toFixed(2)}%`
-    }
-    return value.toLocaleString("en-IN", { maximumFractionDigits: 2 })
-  }
-  if (typeof value === "string") return value
-  if (value === null || value === undefined) return "—"
-  if (Array.isArray(value)) return `${value.length} records`
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>
-    const numeric =
-      record.value_pct ?? record.change_percentage_points ?? record.value
-    const period = typeof record.period === "string" ? record.period : null
-    if (typeof numeric === "number") {
-      return `${numeric.toFixed(2)}${unit === "ratio" ? "×" : "%"}${period ? ` · ${period}` : ""}`
-    }
-  }
-  return "Available"
-}
-
 function formatHistoryValue(item: FundamentalHistoryPoint) {
   const value = item.value_pct ?? item.value
   return typeof value === "number"
@@ -188,17 +184,17 @@ function HistoryTable({
   if (!rows.length) return null
 
   return (
-    <section className="flex flex-col gap-3">
-      <h3 className="text-sm font-semibold">{title}</h3>
-      <div className="overflow-x-auto rounded-lg border">
+    <section className="flex flex-col gap-2">
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{title}</h3>
+      <div className="overflow-x-auto rounded-lg border bg-card">
         <table className="w-full border-collapse text-left text-xs">
           <thead className="bg-muted/40 text-muted-foreground">
             <tr>
               <th className="px-3 py-2">Metric</th>
-              <th className="px-3 py-2">History</th>
+              <th className="px-3 py-2">Historical Points</th>
             </tr>
           </thead>
-          <tbody className="divide-y">
+          <tbody className="divide-y divide-border/50">
             {rows.map(([name, points]) => (
               <tr key={name}>
                 <th className="px-3 py-2 font-medium">{prettyKey(name)}</th>
@@ -255,36 +251,36 @@ function FundamentalPipelineTrace({
 
   if (!opened) {
     return (
-      <section className="rounded-lg border border-dashed p-4">
-        <h3 className="text-sm font-semibold">Pipeline audit trace</h3>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          Load the stored Upstox payload, normalization, Python contract, and sanitized model attempts only when needed.
-        </p>
-        <Button className="mt-3" onClick={() => setOpened(true)} size="sm" variant="outline">
-          Open audit trace
-        </Button>
-      </section>
+      <details className="group rounded-lg border border-dashed p-3">
+        <summary className="cursor-pointer text-xs font-semibold text-muted-foreground hover:text-foreground flex items-center justify-between" onClick={(e) => { e.preventDefault(); setOpened(true) }}>
+          <span>Developer Audit Trace (Upstox, Python Contract & AI Payloads)</span>
+          <ChevronDownIcon className="size-4 transition-transform group-open:rotate-180" />
+        </summary>
+      </details>
     )
   }
 
   return (
-    <section className="flex flex-col gap-3 rounded-lg border p-4">
-      <div>
-        <h3 className="text-sm font-semibold">Pipeline audit trace</h3>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Upstox → Normalized → Python fit → AI request → AI response
-        </p>
+    <section className="flex flex-col gap-3 rounded-lg border p-4 bg-muted/20">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold">Developer Audit Trace</h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Upstox → Normalized → Python fit → AI request → AI response
+          </p>
+        </div>
+        <Button size="sm" variant="ghost" onClick={() => setOpened(false)}>Hide trace</Button>
       </div>
       {traceQuery.isLoading ? (
-        <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-          <Spinner className="size-4" /> Loading stored trace…
+        <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+          <Spinner className="size-3.5" /> Loading audit trace payload…
         </div>
       ) : traceQuery.isError ? (
         <Alert variant="destructive">
           <XCircleIcon aria-hidden="true" />
           <AlertTitle>Could not load trace</AlertTitle>
           <AlertDescription>
-            {traceQuery.error instanceof Error ? traceQuery.error.message : "The trace endpoint is unavailable."}
+            {traceQuery.error instanceof Error ? traceQuery.error.message : "Trace unavailable."}
           </AlertDescription>
         </Alert>
       ) : (
@@ -299,7 +295,7 @@ function FundamentalPipelineTrace({
               >
                 <span>{item.label}</span>
                 <Badge
-                  className="ml-1"
+                  className="ml-1 text-[10px]"
                   variant={
                     ["invalid", "invalid_response", "provider_error", "transport_unknown", "unavailable"].includes(item.status)
                       ? "destructive"
@@ -313,7 +309,7 @@ function FundamentalPipelineTrace({
               </ToggleGroupItem>
             ))}
           </ToggleGroup>
-          <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/30 p-3 text-[11px] whitespace-pre-wrap">
+          <pre className="max-h-80 overflow-auto rounded-lg border bg-background p-3 text-[11px] font-mono whitespace-pre-wrap">
             {JSON.stringify(selectedPayload, null, 2)}
           </pre>
         </>
@@ -323,101 +319,158 @@ function FundamentalPipelineTrace({
 }
 
 function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
-  const facts = detail.snapshot?.normalized_facts
-  const evidence = facts?.evidence ?? {}
-  const ratios = Object.entries(facts?.ratios ?? {})
-  const holdings = Object.entries(facts?.histories?.shareholding ?? {})
-  const corporateActions = evidence["corporate_actions.recent"]?.value
+  const verdict = detail.ai_opinion.verdict
   const assessment = detail.fundamental.assessment
-  const criteria = Array.isArray(detail.fundamental.scorecard.criteria)
-    ? detail.fundamental.scorecard.criteria as Array<{
-        name: string
-        status: "positive" | "negative" | "mixed" | "unknown" | "not_applicable"
-        explanation: string
-        evidence_keys: string[]
-      }>
-    : []
+  const facts = detail.snapshot?.normalized_facts
+  const holdings = Object.entries(facts?.histories?.shareholding ?? {})
+
+  const verdictMeta = {
+    pass: {
+      bg: "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300",
+      badgeClass: "bg-emerald-600 hover:bg-emerald-600 text-white font-black text-sm tracking-wider px-3 py-1",
+      icon: CheckCircle2Icon,
+      label: "AI VERDICT: PASS",
+      desc: "Fundamental evidence aligns with SEPA/Minervini growth criteria.",
+    },
+    fail: {
+      bg: "bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-300",
+      badgeClass: "bg-red-600 hover:bg-red-600 text-white font-black text-sm tracking-wider px-3 py-1",
+      icon: XCircleIcon,
+      label: "AI VERDICT: FAIL",
+      desc: "Severe fundamental weakness, revenue/profit contraction, or margin erosion detected.",
+    },
+    uncertain: {
+      bg: "bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300",
+      badgeClass: "bg-amber-600 hover:bg-amber-600 text-white font-black text-sm tracking-wider px-3 py-1",
+      icon: AlertTriangleIcon,
+      label: "AI VERDICT: UNCERTAIN",
+      desc: "Financial data is sparse or quarterly/annual signals are conflicting.",
+    },
+  }[verdict ?? "uncertain"]
+
+  const VerdictIcon = verdictMeta.icon
 
   return (
-    <div className="flex flex-col gap-6 px-4 pb-8">
-      {detail.fundamental.status === "failed" && (
-        <Alert variant="destructive">
-          <DatabaseZapIcon aria-hidden="true" />
-          <AlertTitle>Fundamental data unavailable</AlertTitle>
-          <AlertDescription>
-            Upstox data or deterministic normalization could not be completed. Open the audit trace for the stored error.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {detail.ai_opinion.status === "failed" && (
-        <Alert>
-          <BrainCircuitIcon aria-hidden="true" />
-          <AlertTitle>AI second opinion unavailable</AlertTitle>
-          <AlertDescription>
-            The Python fit remains authoritative. Open the audit trace for model-attempt details.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <section className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          {fitBadge({
-            fundamental_status: detail.fundamental.status,
-            fundamental_assessment: assessment,
-          })}
-          <Badge variant="outline">
-            AI: {detail.ai_opinion.verdict ?? detail.ai_opinion.status.replaceAll("_", " ")}
-          </Badge>
+    <div className="flex flex-col gap-6 px-5 py-6">
+      {/* 1. Clear-Cut AI Verdict Banner */}
+      <section className={cn("flex flex-col gap-3 rounded-xl border p-5 shadow-sm transition-all", verdictMeta.bg)}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <VerdictIcon className="size-7 shrink-0" />
+            <div>
+              <div className="flex items-center gap-2">
+                <Badge className={verdictMeta.badgeClass}>{verdictMeta.label}</Badge>
+                {assessment && (
+                  <Badge className={cn(assessment.grade === "A" ? "bg-emerald-700 text-white" : assessment.grade === "B" ? "bg-blue-700 text-white" : "bg-muted text-muted-foreground")}>
+                    Python Grade {assessment.grade} ({assessment.score?.toFixed(0)}/100)
+                  </Badge>
+                )}
+              </div>
+              <p className="mt-1 text-xs font-medium opacity-90">{verdictMeta.desc}</p>
+            </div>
+          </div>
           {detail.snapshot && (
-            <>
-              <Badge variant="outline">{detail.snapshot.provider}</Badge>
-              <Badge variant="outline">
-                {detail.snapshot.statement_type}
-              </Badge>
-            </>
+            <div className="text-right text-xs text-muted-foreground">
+              <div>Provider: <span className="font-semibold text-foreground uppercase">{detail.snapshot.provider}</span></div>
+              <div>Statement: <span className="font-semibold text-foreground capitalize">{detail.snapshot.statement_type}</span></div>
+            </div>
           )}
         </div>
-        <p className="leading-6 text-muted-foreground">
-          {detail.ai_opinion.summary ??
-            "Minervini-inspired fundamental fit is available. The independent AI second opinion is not available."}
-        </p>
+
+        <div className="mt-2 rounded-lg bg-background/80 p-4 border shadow-2xs backdrop-blur-xs">
+          <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+            <SparklesIcon className="size-4 text-amber-500" />
+            <span>AI Executive Summary</span>
+          </div>
+          <p className="mt-2 text-sm leading-relaxed text-foreground">
+            {detail.ai_opinion.summary ??
+              "Deterministic Python fit score is available. Independent AI qualitative summary is currently pending or skipped."}
+          </p>
+        </div>
       </section>
 
+      {/* 2. Trade Decision Checklist (Strengths, Risks, Review Focus) */}
+      {(detail.ai_opinion.strengths.length > 0 || detail.ai_opinion.risks.length > 0 || detail.ai_opinion.review_focus.length > 0) && (
+        <section className="grid gap-4 md:grid-cols-3">
+          {detail.ai_opinion.strengths.length > 0 && (
+            <div className="flex flex-col gap-2.5 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
+                <TrendingUpIcon className="size-4" />
+                <span>Key Strengths ({detail.ai_opinion.strengths.length})</span>
+              </div>
+              <div className="flex flex-col gap-2">
+                {detail.ai_opinion.strengths.map((note, index) => (
+                  <div className="rounded-lg border border-emerald-500/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`str-${index}`}>
+                    <p className="font-medium">{note.text}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {detail.ai_opinion.risks.length > 0 && (
+            <div className="flex flex-col gap-2.5 rounded-xl border border-red-500/20 bg-red-500/5 p-4">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-red-700 dark:text-red-400">
+                <ShieldAlertIcon className="size-4" />
+                <span>Risks & Headwinds ({detail.ai_opinion.risks.length})</span>
+              </div>
+              <div className="flex flex-col gap-2">
+                {detail.ai_opinion.risks.map((note, index) => (
+                  <div className="rounded-lg border border-red-500/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`risk-${index}`}>
+                    <p className="font-medium">{note.text}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {detail.ai_opinion.review_focus.length > 0 && (
+            <div className="flex flex-col gap-2.5 rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-blue-700 dark:text-blue-400">
+                <TargetIcon className="size-4" />
+                <span>Review Focus ({detail.ai_opinion.review_focus.length})</span>
+              </div>
+              <div className="flex flex-col gap-2">
+                {detail.ai_opinion.review_focus.map((note, index) => (
+                  <div className="rounded-lg border border-blue-500/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`focus-${index}`}>
+                    <p className="font-medium">{note.text}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* 3. Deterministic Python Score Breakdown */}
       {assessment && (
-        <section className="flex flex-col gap-4 rounded-lg border bg-muted/20 p-4">
-          <div className="flex flex-wrap items-end justify-between gap-4">
+        <section className="flex flex-col gap-4 rounded-xl border bg-card p-5 shadow-sm">
+          <div className="flex flex-wrap items-end justify-between gap-4 border-b pb-4">
             <div>
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Fundamental fit</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Deterministic Python Fit</p>
               <div className="mt-1 flex items-baseline gap-3">
-                <strong className="text-3xl tabular-nums">{scoreLabel(assessment)}</strong>
-                <Badge variant={assessment.grade === "D" ? "destructive" : assessment.grade === "insufficient" ? "outline" : assessment.grade === "A" ? "default" : "secondary"}>
+                <strong className="text-3xl font-black tabular-nums">{scoreLabel(assessment)}</strong>
+                <Badge className={cn(assessment.grade === "A" ? "bg-emerald-600 text-white" : assessment.grade === "B" ? "bg-blue-600 text-white" : "bg-muted text-muted-foreground")}>
                   Grade {assessment.grade}
                 </Badge>
               </div>
             </div>
             <div className="text-right text-xs text-muted-foreground">
-              <div>{assessment.coverage_pct.toFixed(0)}% data coverage</div>
-              <div>{assessment.available_points.toFixed(0)} / {assessment.max_points.toFixed(0)} points available</div>
+              <div>Data coverage: <span className="font-mono font-semibold text-foreground">{assessment.coverage_pct.toFixed(0)}%</span></div>
+              <div>Available points: <span className="font-mono font-semibold text-foreground">{assessment.available_points.toFixed(0)} / {assessment.max_points.toFixed(0)}</span></div>
             </div>
           </div>
-          {assessment.grade === "insufficient" && (
-            <Alert>
-              <DatabaseZapIcon aria-hidden="true" />
-              <AlertTitle>Insufficient financial history</AlertTitle>
-              <AlertDescription>{assessment.insufficient_reason ?? "More supported history is required before assigning a score."}</AlertDescription>
-            </Alert>
-          )}
+
           <div className="grid gap-3 sm:grid-cols-2">
             {assessment.components.map((component) => {
               const ratio = component.max_points > 0 ? Math.round((component.earned_points / component.max_points) * 100) : 0
               return (
-                <div className="rounded-md border bg-background p-3" key={component.name}>
+                <div className="rounded-lg border bg-background p-3 shadow-2xs" key={component.name}>
                   <div className="flex items-center justify-between gap-2 text-xs">
-                    <strong>{prettyKey(component.name)}</strong>
-                    <span className="font-mono text-muted-foreground">{component.earned_points.toFixed(1)} / {component.available_points.toFixed(1)} available</span>
+                    <strong className="font-semibold">{prettyKey(component.name)}</strong>
+                    <span className="font-mono text-muted-foreground">{component.earned_points.toFixed(1)} / {component.available_points.toFixed(1)}</span>
                   </div>
-                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted" aria-label={`${prettyKey(component.name)} score ${ratio}%`}>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
                     <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.min(100, Math.max(0, ratio))}%` }} />
                   </div>
                 </div>
@@ -427,246 +480,57 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
         </section>
       )}
 
-      {(detail.ai_opinion.strengths.length > 0 || detail.ai_opinion.risks.length > 0 || detail.ai_opinion.review_focus.length > 0) && (
-        <section className="grid gap-4 md:grid-cols-3">
-          {([
-            ["Strengths", detail.ai_opinion.strengths, "default"],
-            ["Risks", detail.ai_opinion.risks, "destructive"],
-            ["Review focus", detail.ai_opinion.review_focus, "outline"],
-          ] as const).map(([title, notes, variant]) => notes.length > 0 && (
-            <div className="flex flex-col gap-2 rounded-lg border p-3" key={title}>
-              <h3 className="text-sm font-semibold">{title}</h3>
-              {notes.map((note, index) => (
-                <div className="flex flex-col gap-1" key={`${title}-${index}`}>
-                  <Badge className="w-fit max-w-full whitespace-normal text-left" variant={variant}>{note.text}</Badge>
-                  {note.reference_ids.length > 0 && <span className="text-[11px] text-muted-foreground">References: {note.reference_ids.join(", ")}</span>}
-                </div>
-              ))}
-            </div>
-          ))}
-        </section>
-      )}
-
-      {assessment && assessment.provider_limitations.length > 0 && (
-        <Alert>
-          <DatabaseZapIcon aria-hidden="true" />
-          <AlertTitle>Coverage limits are neutral</AlertTitle>
-          <AlertDescription>
-            The fit score excludes unsupported fields such as quarterly EPS YoY. These gaps reduce coverage; they are not negative signals.
-          </AlertDescription>
-        </Alert>
-      )}
-
+      {/* 4. Company Overview & Key Metrics */}
       {facts?.company && (
-        <section className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <Building2Icon aria-hidden="true" />
-            <h3 className="text-sm font-semibold">Company profile</h3>
+        <section className="flex flex-col gap-3 rounded-xl border p-4 bg-card shadow-2xs">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <Building2Icon className="size-4" />
+            <span>Company Profile</span>
           </div>
-          <div className="grid grid-cols-2 gap-3 rounded-lg border p-3 text-xs">
-            <div>
-              <span className="text-muted-foreground">Sector</span>
-              <strong className="mt-1 block">
-                {facts.company.sector ?? "—"}
-              </strong>
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div className="rounded-lg bg-muted/30 p-2.5 border">
+              <span className="text-muted-foreground block text-[11px]">Sector</span>
+              <strong className="mt-0.5 block text-sm font-semibold">{facts.company.sector ?? "—"}</strong>
             </div>
-            <div>
-              <span className="text-muted-foreground">Industry</span>
-              <strong className="mt-1 block">
-                {facts.company.industry ?? "—"}
-              </strong>
+            <div className="rounded-lg bg-muted/30 p-2.5 border">
+              <span className="text-muted-foreground block text-[11px]">Industry</span>
+              <strong className="mt-0.5 block text-sm font-semibold">{facts.company.industry ?? "—"}</strong>
             </div>
-            <p className="col-span-2 leading-5 text-muted-foreground">
+            <p className="col-span-2 text-xs leading-relaxed text-muted-foreground">
               {facts.company.description ?? "No company description supplied."}
             </p>
           </div>
         </section>
       )}
 
-      {criteria.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <BrainCircuitIcon aria-hidden="true" />
-            <h3 className="text-sm font-semibold">Scoring evidence</h3>
-          </div>
-          <div className="flex flex-col gap-2">
-            {criteria.map((criterion) => (
-              <article className="rounded-lg border p-3" key={criterion.name}>
-                <div className="flex items-center justify-between gap-3">
-                  <strong>{prettyKey(criterion.name)}</strong>
-                  <Badge
-                    variant={
-                      criterion.status === "negative"
-                        ? "destructive"
-                        : criterion.status === "positive"
-                          ? "default"
-                          : "secondary"
-                    }
-                  >
-                    {criterion.status}
-                  </Badge>
-                </div>
-                <p className="mt-2 leading-5 text-muted-foreground">
-                  {criterion.explanation}
-                </p>
-                {criterion.evidence_keys.length > 0 && (
-                  <dl className="mt-3 flex flex-col gap-2">
-                    {criterion.evidence_keys.map((key) => (
-                      <div
-                        className="flex items-start justify-between gap-4 rounded bg-muted/40 px-2 py-1.5"
-                        key={key}
-                      >
-                        <dt className="text-xs text-muted-foreground">
-                          {evidence[key]?.label ?? key}
-                        </dt>
-                        <dd className="shrink-0 font-mono text-xs font-semibold">
-                          {formatMetric(
-                            evidence[key]?.value,
-                            evidence[key]?.unit,
-                          )}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                )}
-              </article>
-            ))}
-          </div>
-        </section>
-      )}
+      {/* 5. Clean Metric Tables */}
+      <HistoryTable histories={facts?.histories?.quarterly} title="Quarterly Sales & Profit Trend" />
+      <HistoryTable histories={facts?.histories?.annual} title="Annual Financial Performance" />
 
-      <HistoryTable
-        histories={facts?.histories?.quarterly}
-        title="Quarterly financial history"
-      />
-      <HistoryTable
-        histories={facts?.histories?.annual}
-        title="Annual financial history"
-      />
-
-      {ratios.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold">Ratios and sector comparison</h3>
+      {holdings.length > 0 && (
+        <section className="flex flex-col gap-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Shareholding Ownership Trend</h3>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {ratios.map(([name, values]) => (
-              <div className="rounded-lg border p-3" key={name}>
-                <strong className="text-xs">{prettyKey(name)}</strong>
-                <div className="mt-2 flex justify-between font-mono text-xs">
-                  <span>Company {formatMetric(values.company)}</span>
-                  <span className="text-muted-foreground">
-                    Sector {formatMetric(values.sector)}
-                  </span>
-                </div>
+            {holdings.map(([category, points]) => (
+              <div className="rounded-lg border bg-card p-3" key={category}>
+                <strong className="text-xs font-semibold">{prettyKey(category)}</strong>
+                <p className="mt-1.5 font-mono text-xs text-muted-foreground">
+                  {points
+                    .map(
+                      (point) =>
+                        `${point.period}: ${formatHistoryValue(point)}%`,
+                    )
+                    .join(" · ")}
+                </p>
               </div>
             ))}
           </div>
         </section>
       )}
 
-      {holdings.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold">Shareholding history</h3>
-          {holdings.map(([category, points]) => (
-            <div className="rounded-lg border p-3" key={category}>
-              <strong className="text-xs">{prettyKey(category)}</strong>
-              <p className="mt-2 font-mono text-xs text-muted-foreground">
-                {points
-                  .map(
-                    (point) =>
-                      `${point.period}: ${formatHistoryValue(point)}%`,
-                  )
-                  .join(" · ")}
-              </p>
-            </div>
-          ))}
-        </section>
-      )}
-
-      {Array.isArray(corporateActions) && corporateActions.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold">Recent corporate actions</h3>
-          <pre className="overflow-x-auto rounded-lg border bg-muted/30 p-3 text-xs whitespace-pre-wrap">
-            {JSON.stringify(corporateActions, null, 2)}
-          </pre>
-        </section>
-      )}
-
-      {facts?.provider_sections && (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold">Complete Upstox response sections</h3>
-          <pre className="overflow-x-auto rounded-lg border bg-muted/30 p-3 text-xs whitespace-pre-wrap">
-            {JSON.stringify(facts.provider_sections, null, 2)}
-          </pre>
-        </section>
-      )}
-
-      {((assessment?.red_flags.length ?? 0) > 0 ||
-        detail.fundamental.missing_data.length > 0) && (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold">Review warnings</h3>
-          <div className="flex flex-wrap gap-2">
-            {(assessment?.red_flags ?? []).map((flag) => (
-              <Badge key={flag} variant="destructive">
-                {prettyKey(flag)}
-              </Badge>
-            ))}
-            {detail.fundamental.missing_data.map((field) => (
-              <Badge key={field} variant="outline">
-                Missing: {prettyKey(field)}
-              </Badge>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {detail.fundamental.provider_limitations.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold">Provider limitations</h3>
-          <div className="flex flex-wrap gap-2">
-            {detail.fundamental.provider_limitations.map((field) => (
-              <Badge key={field} variant="outline">
-                Upstox does not provide: {prettyKey(field)}
-              </Badge>
-            ))}
-          </div>
-        </section>
-      )}
-
+      {/* 6. Collapsible Developer Audit Trace (No clutter in trade view) */}
+      <Separator className="my-2" />
       <FundamentalPipelineTrace detail={detail} />
-
-      <Separator />
-      <section className="grid grid-cols-2 gap-3 text-xs text-muted-foreground">
-        <span>Snapshot ID: {detail.snapshot?.id ?? "Not available"}</span>
-        <span>
-          Periods: Q {detail.snapshot?.latest_quarterly_period ?? "—"} · A {detail.snapshot?.latest_annual_period ?? "—"}
-        </span>
-        <span>
-          Snapshot: {detail.snapshot?.fetched_at
-            ? new Intl.DateTimeFormat("en-IN", {
-                dateStyle: "medium",
-                timeStyle: "short",
-              }).format(new Date(detail.snapshot.fetched_at))
-            : "Not available"}
-        </span>
-        {detail.ai_opinion.model && (
-          <>
-            <span>
-              Model: {String(detail.ai_opinion.model.provider ?? "unknown")} · {String(detail.ai_opinion.model.name ?? "unknown")}
-            </span>
-            <span>
-              Prompt: {String(detail.ai_opinion.model.prompt_version ?? "—")} · Request {String(detail.ai_opinion.model.request_id ?? "—")}
-            </span>
-          </>
-        )}
-        <span>
-          AI checked: {detail.ai_opinion.checked_at
-            ? new Intl.DateTimeFormat("en-IN", {
-                dateStyle: "medium",
-                timeStyle: "short",
-              }).format(new Date(detail.ai_opinion.checked_at))
-            : "Not available"}
-        </span>
-      </section>
     </div>
   )
 }
@@ -724,22 +588,32 @@ export function FundamentalsView() {
     })
   }, [filter, resultsQuery.data, search, sortMode])
 
+  const progressData = progressQuery.data
+  const totalTokensUsed = progressData ? progressData.input_tokens + progressData.reasoning_tokens + progressData.output_tokens : 0
+  const tokenBudget = progressData?.token_budget ?? 1500000
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <header className="flex flex-col gap-4 border-b bg-card px-5 py-4 xl:flex-row xl:items-end xl:justify-between">
+      {/* 1. Header Bar */}
+      <header className="flex flex-col gap-4 border-b bg-card px-6 py-4 xl:flex-row xl:items-center xl:justify-between shadow-2xs">
         <div>
-          <div className="flex items-center gap-2">
-            <BrainCircuitIcon aria-hidden="true" />
-            <h1 className="text-lg font-semibold">Fundamental analysis</h1>
+          <div className="flex items-center gap-2.5">
+            <div className="rounded-lg bg-primary/10 p-2 text-primary">
+              <BrainCircuitIcon className="size-5" />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold tracking-tight">Fundamental Screener & AI Analyst</h1>
+              <p className="text-xs text-muted-foreground">
+                Python evaluates hard growth metrics; OpenRouter GPT-5.6 provides grounded trade decision second opinions.
+              </p>
+            </div>
           </div>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Python grades the available evidence; AI provides a separate, grounded second opinion.
-          </p>
         </div>
-        <div className="flex flex-wrap items-end gap-3">
-          <Field className="w-64">
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Field className="w-60">
             <FieldLabel className="sr-only" htmlFor="fundamental-search">
-              Search fundamentals
+              Search symbol
             </FieldLabel>
             <div className="relative">
               <SearchIcon
@@ -747,7 +621,7 @@ export function FundamentalsView() {
                 className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
               />
               <Input
-                className="pl-8"
+                className="pl-8 text-xs"
                 id="fundamental-search"
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search symbol or company"
@@ -755,55 +629,42 @@ export function FundamentalsView() {
               />
             </div>
           </Field>
+
           <Field>
-            <FieldLabel className="sr-only" htmlFor="fundamental-filter">
-              Filter verdicts
-            </FieldLabel>
-            <NativeSelect
-              id="fundamental-filter"
-              onChange={(event) =>
-                setFilter(event.target.value as FitFilter)
-              }
-              value={filter}
-            >
-              <NativeSelectOption value="all">All fit grades</NativeSelectOption>
-              <NativeSelectOption value="A">Grade A</NativeSelectOption>
-              <NativeSelectOption value="B">Grade B</NativeSelectOption>
-              <NativeSelectOption value="C">Grade C</NativeSelectOption>
-              <NativeSelectOption value="D">Grade D</NativeSelectOption>
-              <NativeSelectOption value="insufficient">Insufficient data</NativeSelectOption>
-              <NativeSelectOption value="processing">
-                Processing
-              </NativeSelectOption>
-              <NativeSelectOption value="unavailable">
-                Failed / unavailable
-              </NativeSelectOption>
+            <FieldLabel className="sr-only" htmlFor="fundamental-filter">Filter fit</FieldLabel>
+            <NativeSelect className="text-xs" id="fundamental-filter" onChange={(e) => setFilter(e.target.value as FitFilter)} value={filter}>
+              <NativeSelectOption value="all">All Fit Grades</NativeSelectOption>
+              <NativeSelectOption value="A">Grade A Fit</NativeSelectOption>
+              <NativeSelectOption value="B">Grade B Fit</NativeSelectOption>
+              <NativeSelectOption value="C">Grade C Fit</NativeSelectOption>
+              <NativeSelectOption value="D">Grade D Fit</NativeSelectOption>
+              <NativeSelectOption value="insufficient">Insufficient Data</NativeSelectOption>
+              <NativeSelectOption value="processing">Processing</NativeSelectOption>
+              <NativeSelectOption value="unavailable">Failed / Unavailable</NativeSelectOption>
             </NativeSelect>
           </Field>
+
           <Field>
-            <FieldLabel className="sr-only" htmlFor="fundamental-sort">Sort fundamentals</FieldLabel>
-            <NativeSelect id="fundamental-sort" onChange={(event) => setSortMode(event.target.value as SortMode)} value={sortMode}>
-              <NativeSelectOption value="fundamental">Sort: fundamental fit</NativeSelectOption>
-              <NativeSelectOption value="technical">Sort: technical rank</NativeSelectOption>
+            <FieldLabel className="sr-only" htmlFor="fundamental-sort">Sort order</FieldLabel>
+            <NativeSelect className="text-xs" id="fundamental-sort" onChange={(e) => setSortMode(e.target.value as SortMode)} value={sortMode}>
+              <NativeSelectOption value="fundamental">Sort: Fundamental Fit</NativeSelectOption>
+              <NativeSelectOption value="technical">Sort: Technical Rank</NativeSelectOption>
             </NativeSelect>
           </Field>
+
           <Field>
-            <FieldLabel className="sr-only" htmlFor="fundamental-run">
-              Scanner run
-            </FieldLabel>
+            <FieldLabel className="sr-only" htmlFor="fundamental-run">Scanner run</FieldLabel>
             <NativeSelect
-              className="min-w-72"
+              className="min-w-64 text-xs"
               disabled={!runsQuery.data?.length}
               id="fundamental-run"
-              onChange={(event) => {
-                setSelectedRunId(event.target.value)
+              onChange={(e) => {
+                setSelectedRunId(e.target.value)
                 setSelectedResultId(null)
               }}
               value={selectedRunId ?? ""}
             >
-              {!runsQuery.data?.length && (
-                <NativeSelectOption value="">No scanner runs</NativeSelectOption>
-              )}
+              {!runsQuery.data?.length && <NativeSelectOption value="">No scanner runs</NativeSelectOption>}
               {(runsQuery.data ?? []).map((run) => (
                 <NativeSelectOption key={run.id} value={run.id}>
                   {formatRun(run)}
@@ -811,6 +672,12 @@ export function FundamentalsView() {
               ))}
             </NativeSelect>
           </Field>
+        </div>
+      </header>
+
+      {/* 2. Unified Processing & Execution Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b bg-muted/30 px-6 py-3">
+        <div className="flex items-center gap-4">
           <Button
             disabled={
               !selectedRunId ||
@@ -821,11 +688,10 @@ export function FundamentalsView() {
               controlsQuery.data?.processing.paused
             }
             onClick={() => {
-              if (selectedRunId) {
-                triggerPassMutation.mutate({ runId: selectedRunId })
-              }
+              if (selectedRunId) triggerPassMutation.mutate({ runId: selectedRunId })
             }}
-            variant="outline"
+            size="sm"
+            variant="default"
           >
             {triggerPassMutation.isPending || isProcessing ? (
               <Spinner className="mr-1.5 size-4" />
@@ -836,79 +702,68 @@ export function FundamentalsView() {
               ? "Enqueuing..."
               : isProcessing
                 ? "Processing..."
-                : "Run missing analysis"}
+                : "Run Analysis"}
           </Button>
-          <Button
-            disabled={
-              !selectedRunId ||
-              triggerPassMutation.isPending ||
-              isProcessing ||
-              controlsQuery.data?.processing.paused
-            }
-            onClick={() => setRefreshConfirmOpen(true)}
-            size="icon"
-            title="Refresh Upstox source data"
-            variant="ghost"
-          >
-            <RotateCwIcon aria-hidden="true" />
-          </Button>
-        </div>
-      </header>
 
-      <div className="flex flex-col gap-3 border-b bg-card px-5 py-3 lg:flex-row">
-        <Alert className="flex-1">
-          <DatabaseZapIcon aria-hidden="true" />
-          <AlertTitle>
-            Fundamental processing {controlsQuery.data?.processing.paused ? "paused" : "enabled"}
-          </AlertTitle>
-          <AlertDescription>
-            Stops new Upstox and AI work for this pipeline. This does not affect trading automation.
-          </AlertDescription>
-          <div className="mt-3">
+          <div className="flex items-center gap-2">
             <Button
               disabled={controlsQuery.isLoading || setControlMutation.isPending}
               onClick={() => setPendingControl("processing")}
               size="sm"
-              type="button"
-              variant={controlsQuery.data?.processing.paused ? "outline" : "destructive"}
+              variant={controlsQuery.data?.processing.paused ? "outline" : "secondary"}
             >
-              {controlsQuery.data?.processing.paused ? <PlayCircleIcon data-icon="inline-start" /> : <PauseCircleIcon data-icon="inline-start" />}
-              {controlsQuery.data?.processing.paused ? "Resume processing" : "Pause processing"}
+              {controlsQuery.data?.processing.paused ? <PlayCircleIcon className="mr-1 size-3.5 text-emerald-600" /> : <PauseCircleIcon className="mr-1 size-3.5 text-amber-600" />}
+              {controlsQuery.data?.processing.paused ? "Resume Pipeline" : "Pause Pipeline"}
             </Button>
-          </div>
-        </Alert>
-        <Alert className="flex-1">
-          <BrainCircuitIcon aria-hidden="true" />
-          <AlertTitle>AI annotations {controlsQuery.data?.ai.paused ? "paused" : "enabled"}</AlertTitle>
-          <AlertDescription>
-            Stops only OpenRouter calls. Upstox facts and deterministic rules continue.
-          </AlertDescription>
-          <div className="mt-3">
+
             <Button
               disabled={controlsQuery.isLoading || setControlMutation.isPending}
               onClick={() => setPendingControl("ai")}
               size="sm"
-              type="button"
-              variant={controlsQuery.data?.ai.paused ? "outline" : "secondary"}
+              variant={controlsQuery.data?.ai.paused ? "outline" : "ghost"}
             >
-              {controlsQuery.data?.ai.paused ? <PlayCircleIcon data-icon="inline-start" /> : <PauseCircleIcon data-icon="inline-start" />}
+              {controlsQuery.data?.ai.paused ? <PlayCircleIcon className="mr-1 size-3.5 text-emerald-600" /> : <PauseCircleIcon className="mr-1 size-3.5 text-muted-foreground" />}
               {controlsQuery.data?.ai.paused ? "Resume AI" : "Pause AI"}
             </Button>
+
+            <Button
+              disabled={
+                !selectedRunId ||
+                triggerPassMutation.isPending ||
+                isProcessing ||
+                controlsQuery.data?.processing.paused
+              }
+              onClick={() => setRefreshConfirmOpen(true)}
+              size="sm"
+              title="Refresh Upstox source data"
+              variant="outline"
+            >
+              <RotateCwIcon aria-hidden="true" className="mr-1 size-3.5" />
+              Refresh Source
+            </Button>
           </div>
-        </Alert>
-        {progressQuery.data && (
-          <Alert className="flex-1">
-            <DatabaseZapIcon aria-hidden="true" />
-            <AlertTitle>
-              {progressQuery.data.status} {progressQuery.data.current_symbol ? `· #${progressQuery.data.current_rank} ${progressQuery.data.current_symbol}` : ""}
-            </AlertTitle>
-            <AlertDescription>
-              {progressQuery.data.counts.succeeded ?? 0} complete · {progressQuery.data.counts.rules_only ?? 0} rules-only · {progressQuery.data.input_tokens + progressQuery.data.reasoning_tokens + progressQuery.data.output_tokens}/{progressQuery.data.token_budget} tokens
-            </AlertDescription>
-          </Alert>
+        </div>
+
+        {/* Live Token & Execution Status Pill */}
+        {progressData && (
+          <div className="flex items-center gap-3 rounded-lg border bg-card px-3.5 py-1.5 text-xs shadow-2xs">
+            <div className="flex items-center gap-2">
+              <span className="size-2 rounded-full bg-emerald-500 animate-pulse" />
+              <strong className="font-semibold">{progressData.status}</strong>
+              {progressData.current_symbol && (
+                <span className="font-mono text-muted-foreground">· #{progressData.current_rank} {progressData.current_symbol}</span>
+              )}
+            </div>
+            <Separator className="h-4" orientation="vertical" />
+            <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground">
+              <span><strong className="text-foreground">{progressData.counts.succeeded ?? 0}</strong> complete</span>
+              <span>Tokens: <strong className="text-foreground">{totalTokensUsed.toLocaleString()}</strong> / {(tokenBudget / 1000).toFixed(0)}k</span>
+            </div>
+          </div>
         )}
       </div>
 
+      {/* 3. Results Table */}
       <div className="min-h-0 flex-1 overflow-auto">
         {resultsQuery.isLoading ? (
           <div className="flex h-full items-center justify-center gap-2 text-muted-foreground">
@@ -932,34 +787,34 @@ export function FundamentalsView() {
               <AlertTriangleIcon aria-hidden="true" />
               <AlertTitle>No matching fundamental results</AlertTitle>
               <AlertDescription>
-                Change the run, search, or fit filter to inspect another
-                ranked setup.
+                Change the run, search, or fit filter to inspect another setup.
               </AlertDescription>
             </Alert>
           </div>
         ) : (
           <table className="w-full border-collapse text-left text-sm">
-            <thead className="sticky top-0 border-b bg-card text-xs text-muted-foreground">
+            <thead className="sticky top-0 border-b bg-card text-xs text-muted-foreground shadow-2xs">
               <tr>
-                <th className="px-5 py-3">Company</th>
-                <th className="px-4 py-3">Fundamental fit</th>
-                <th className="px-4 py-3">Coverage</th>
-                <th className="px-4 py-3">Strongest factor</th>
-                <th className="px-4 py-3">AI status</th>
-                <th className="px-4 py-3">Red flags</th>
-                <th className="px-4 py-3">Latest periods</th>
-                <th className="px-5 py-3 text-right">Rank</th>
+                <th className="px-6 py-3">Stock & Company</th>
+                <th className="px-4 py-3">Python Fit Score</th>
+                <th className="px-4 py-3">AI Verdict</th>
+                <th className="px-4 py-3">Data Coverage</th>
+                <th className="px-4 py-3">Strongest Factor</th>
+                <th className="px-4 py-3">Review Flags</th>
+                <th className="px-6 py-3 text-right">Tech Rank</th>
               </tr>
             </thead>
             <tbody className="divide-y">
               {filtered.map((result) => {
                 const concerns = keyRedFlags(result)
                 const assessment = result.fundamental_assessment
+                const aiVerdict = result.llm_verdict ?? (result.ai_status === "succeeded" ? "pass" : null)
+
                 return (
                   <tr
                     className={cn(
                       "cursor-pointer transition-colors hover:bg-muted/50",
-                      selectedResultId === result.id && "bg-muted",
+                      selectedResultId === result.id && "bg-muted/80 font-medium",
                     )}
                     key={result.id}
                     onClick={() => setSelectedResultId(result.id)}
@@ -971,29 +826,30 @@ export function FundamentalsView() {
                     }}
                     tabIndex={0}
                   >
-                    <td className="px-5 py-3">
-                      <strong className="block">{result.symbol}</strong>
-                      <span className="block max-w-80 truncate text-xs text-muted-foreground">
+                    <td className="px-6 py-3.5">
+                      <div className="flex items-center gap-2">
+                        <strong className="text-base font-bold tracking-tight text-foreground">{result.symbol}</strong>
+                      </div>
+                      <span className="block max-w-72 truncate text-xs text-muted-foreground">
                         {result.name ?? result.fyers_symbol}
                       </span>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3.5">
                       <div className="flex items-center gap-2">
                         {fitBadge(result)}
-                        <span className="font-mono text-xs text-muted-foreground">{scoreLabel(assessment)}</span>
+                        <span className="font-mono text-xs font-bold text-foreground">{scoreLabel(assessment)}</span>
                       </div>
                     </td>
-                    <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                    <td className="px-4 py-3.5">
+                      {aiVerdictBadge(aiVerdict, result.ai_status)}
+                    </td>
+                    <td className="px-4 py-3.5 font-mono text-xs text-muted-foreground">
                       {assessment ? `${assessment.coverage_pct.toFixed(0)}%` : "—"}
                     </td>
-                    <td className="px-4 py-3 text-xs">{strongestFactor(assessment)}</td>
-                    <td className="px-4 py-3">
-                      <Badge variant="outline">{result.ai_status.replaceAll("_", " ")}</Badge>
-                      {result.llm_flags.ai_skip_reason && <span className="mt-1 block text-[11px] text-muted-foreground">{result.llm_flags.ai_skip_reason.replaceAll("_", " ")}</span>}
-                    </td>
-                    <td className="max-w-xl px-4 py-3">
+                    <td className="px-4 py-3.5 text-xs font-medium">{strongestFactor(assessment)}</td>
+                    <td className="max-w-xs px-4 py-3.5">
                       {concerns.length ? (
-                        <div className="flex flex-wrap gap-1.5">
+                        <div className="flex flex-wrap gap-1">
                           {concerns.map((flag) => (
                             <Badge key={flag} variant="destructive">
                               {prettyKey(flag)}
@@ -1001,16 +857,10 @@ export function FundamentalsView() {
                           ))}
                         </div>
                       ) : (
-                        <span className="text-xs text-muted-foreground">
-                          {assessment?.grade === "insufficient" ? "More history needed" : result.llm_flags.summary ?? "No red flags"}
-                        </span>
+                        <span className="text-xs text-muted-foreground">Clean · No flags</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
-                      Q {result.fundamentals_provenance?.latest_quarterly_period ?? "—"}
-                      <br />A {result.fundamentals_provenance?.latest_annual_period ?? "—"}
-                    </td>
-                    <td className="px-5 py-3 text-right font-mono">
+                    <td className="px-6 py-3.5 text-right font-mono font-bold text-muted-foreground">
                       #{result.rank}
                     </td>
                   </tr>
@@ -1021,31 +871,36 @@ export function FundamentalsView() {
         )}
       </div>
 
+      {/* 4. Stock Decision Inspector Sheet */}
       <Sheet
         onOpenChange={(open) => {
           if (!open) setSelectedResultId(null)
         }}
         open={Boolean(selectedResultId)}
       >
-        <SheetContent className="w-full gap-0 overflow-y-auto sm:max-w-3xl">
-          <SheetHeader className="sticky top-0 border-b bg-popover pr-12">
-            <SheetTitle>
-              {detailQuery.data?.instrument.symbol ?? "Fundamental analysis"}
-            </SheetTitle>
-            <SheetDescription>
-              {detailQuery.data?.instrument.name ??
-                "Loading normalized facts and AI evidence…"}
-            </SheetDescription>
+        <SheetContent className="w-full gap-0 overflow-y-auto sm:max-w-3xl border-l p-0">
+          <SheetHeader className="sticky top-0 z-10 border-b bg-card px-6 py-4 pr-12 shadow-2xs">
+            <div className="flex items-center justify-between">
+              <div>
+                <SheetTitle className="text-xl font-black tracking-tight">
+                  {detailQuery.data?.instrument.symbol ?? "Stock Fundamental Assessment"}
+                </SheetTitle>
+                <SheetDescription className="text-xs text-muted-foreground">
+                  {detailQuery.data?.instrument.name ?? "Loading stock facts & AI trade verdict…"}
+                </SheetDescription>
+              </div>
+            </div>
           </SheetHeader>
+
           {detailQuery.isLoading ? (
-            <div className="flex flex-1 items-center justify-center gap-2 text-muted-foreground">
-              <Spinner /> Loading analysis…
+            <div className="flex flex-1 items-center justify-center gap-2 py-20 text-muted-foreground">
+              <Spinner /> Loading stock assessment…
             </div>
           ) : detailQuery.isError ? (
-            <div className="p-4">
+            <div className="p-6">
               <Alert variant="destructive">
                 <XCircleIcon aria-hidden="true" />
-                <AlertTitle>Could not load analysis</AlertTitle>
+                <AlertTitle>Could not load assessment</AlertTitle>
                 <AlertDescription>
                   {detailQuery.error instanceof Error
                     ? detailQuery.error.message
@@ -1059,12 +914,13 @@ export function FundamentalsView() {
         </SheetContent>
       </Sheet>
 
+      {/* Refresh Confirmation Modal */}
       <AlertDialog open={refreshConfirmOpen} onOpenChange={setRefreshConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Refresh Upstox source data?</AlertDialogTitle>
+            <AlertDialogTitle>Refresh Upstox Source Data?</AlertDialogTitle>
             <AlertDialogDescription>
-              This refetches the selected technical survivors, invalidates old source snapshots, and may use OpenRouter credits for eligible results. Deterministic fit remains read-only.
+              This refetches technical survivors from Upstox, invalidates old snapshots, and computes fresh AI analysis.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1080,12 +936,13 @@ export function FundamentalsView() {
               }}
             >
               {triggerPassMutation.isPending ? <Spinner data-icon="inline-start" /> : null}
-              Refresh source data
+              Refresh Source
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Control Pause/Resume Confirmation Modal */}
       <AlertDialog open={pendingControl !== null} onOpenChange={(open) => !open && setPendingControl(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1096,8 +953,8 @@ export function FundamentalsView() {
             </AlertDialogTitle>
             <AlertDialogDescription>
               {pendingControl === "processing"
-                ? "The active P7 run will stop at the next safe boundary. An upstream request already accepted may still finish."
-                : "No new OpenRouter calls will be made after the control is observed; deterministic Upstox scoring remains available."}
+                ? "The active P7 pipeline will pause at the next stock boundary."
+                : "No new OpenRouter calls will be issued; deterministic Upstox scoring will continue."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1108,7 +965,7 @@ export function FundamentalsView() {
                 if (!pendingControl) return
                 const paused = pendingControl === "processing" ? !controlsQuery.data?.processing.paused : !controlsQuery.data?.ai.paused
                 setControlMutation.mutate(
-                  { control: pendingControl, paused, reason: `Human ${paused ? "paused" : "resumed"} ${pendingControl === "processing" ? "fundamental processing" : "AI annotations"} from the fundamentals workspace.` },
+                  { control: pendingControl, paused, reason: `Human ${paused ? "paused" : "resumed"} ${pendingControl === "processing" ? "fundamental processing" : "AI annotations"} from workspace.` },
                   { onSuccess: () => setPendingControl(null) },
                 )
               }}

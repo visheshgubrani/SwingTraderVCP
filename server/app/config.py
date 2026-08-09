@@ -52,8 +52,8 @@ class Settings(BaseSettings):
     openrouter_api_url: str = "https://openrouter.ai/api/v1/chat/completions"
     # These stay runtime-configurable through server/.env. The defaults are
     # conservative but deployment may choose another supported OpenRouter model.
-    openrouter_model: str = "deepseek/deepseek-v4-flash"
-    openrouter_reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "xhigh"
+    openrouter_model: str = "openai/gpt-5.6-luna-pro"
+    openrouter_reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "medium"
     openrouter_prompt_version: str = "fundamental_second_opinion_v1"
     openrouter_http_referer: str = ""
     openrouter_app_title: str = "SwingTraderVCP"
@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     fundamentals_http_timeout_seconds: float = Field(default=20.0, gt=0, le=60)
     fundamentals_http_max_attempts: int = Field(default=3, ge=1, le=5)
     openrouter_max_tokens: int = Field(default=3200, ge=256, le=4096)
-    fundamental_run_token_budget: int = Field(default=150_000, ge=1_000, le=500_000)
+    fundamental_run_token_budget: int = Field(default=1_500_000, ge=1_000, le=10_000_000)
     fundamental_prompt_max_chars: int = Field(default=12_000, ge=1_000, le=12_000)
     openrouter_http_timeout_seconds: float = Field(default=60.0, gt=0, le=120)
     # GPT-5.6 reasoning endpoints do not support sampling temperature. Keep

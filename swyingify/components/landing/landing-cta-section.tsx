@@ -17,7 +17,7 @@ export function LandingCtaSection() {
         </Reveal>
         <Reveal>
           <div className="mt-10 flex flex-wrap justify-center gap-[18px]">
-            <Link href="/scanner" className="landing-btn landing-btn-primary">
+            <Link href="/scanners/minervini-vcp" className="landing-btn landing-btn-primary">
               Browse today&apos;s scan
             </Link>
           </div>

@@ -1,6 +1,7 @@
 import Link from "next/link"
 
 import { LandingBrand } from "@/components/landing/landing-brand"
+import { CANONICAL_SCANNER_PATH } from "@/lib/seo/config"
 
 export function AuthFooter() {
   return (
@@ -12,8 +13,10 @@ export function AuthFooter() {
             <p className="landing-footer-tag">A calmer research desk for Indian equities.</p>
           </div>
           <div className="landing-footer-links">
-            <Link href="/#scan">The scan</Link>
-            <Link href="/scanner">Scanner</Link>
+            <Link href="/scanners">Scanners</Link>
+            <Link href="/learn">Learn</Link>
+            <Link href="/disclaimer">Disclaimer</Link>
+            <Link href={CANONICAL_SCANNER_PATH}>Minervini VCP</Link>
             <Link href="/sign-up">Sign up</Link>
             <Link href="/sign-in">Sign in</Link>
           </div>

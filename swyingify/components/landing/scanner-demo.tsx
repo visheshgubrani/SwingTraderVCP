@@ -169,18 +169,23 @@ function ChartMeta({ stage }: { stage: string }) {
 }
 
 function FingerprintPanel({ item }: { item: ScanDemoItem }) {
-  const [rowsOn, setRowsOn] = useState(0)
+  const listRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    const root = listRef.current
+    if (!root) return
+
+    const rows = [...root.querySelectorAll<HTMLElement>("[data-fp-row]")]
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    setRowsOn(0)
+
+    rows.forEach((row) => row.classList.remove("on"))
+
     if (reduced) {
-      setRowsOn(LANDING_CHECKS.length)
+      rows.forEach((row) => row.classList.add("on"))
       return
     }
-    const timers = LANDING_CHECKS.map((_, i) =>
-      window.setTimeout(() => setRowsOn((n) => Math.max(n, i + 1)), 140 * i),
-    )
+
+    const timers = rows.map((row, i) => window.setTimeout(() => row.classList.add("on"), 140 * i))
     return () => timers.forEach(clearTimeout)
   }, [item.sym])
 
@@ -199,8 +204,8 @@ function FingerprintPanel({ item }: { item: ScanDemoItem }) {
         <span>{item.name}</span>
         <span>{item.sector}</span>
       </div>
-      <div className="mt-5 flex-1 border-t border-[var(--landing-border)]">
-        {LANDING_CHECKS.map((ch, i) => {
+      <div ref={listRef} className="mt-5 flex-1 border-t border-[var(--landing-border)]">
+        {LANDING_CHECKS.map((ch) => {
           const st = STATUS_LABELS[item.c[ch.k]] ?? STATUS_LABELS[3]
           const statusClass =
             st[1] === "s-strong"
@@ -211,10 +216,8 @@ function FingerprintPanel({ item }: { item: ScanDemoItem }) {
           return (
             <div
               key={ch.k}
-              className={cn(
-                "landing-fp-row flex items-center justify-between gap-3.5 border-b border-[var(--landing-border-soft)] py-2.5",
-                i < rowsOn && "on",
-              )}
+              data-fp-row
+              className="landing-fp-row flex items-center justify-between gap-3.5 border-b border-[var(--landing-border-soft)] py-2.5"
             >
               <span className="text-sm text-[var(--landing-fg-2)]">{ch.l}</span>
               <span

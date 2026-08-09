@@ -17,7 +17,7 @@ export function AuthNav({ mode }: { mode: "sign-in" | "sign-up" }) {
               Create account
             </Link>
           )}
-          <Link href="/scanner" className="landing-btn landing-btn-ghost landing-nav-cta">
+          <Link href="/scanners/minervini-vcp" className="landing-btn landing-btn-ghost landing-nav-cta">
             Open scanner
           </Link>
         </div>

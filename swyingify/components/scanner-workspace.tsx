@@ -17,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { stockPath } from "@/lib/scanner/board-data"
 import { scannerResultsQuery } from "@/lib/scanner/queries"
 import type { ScannerPreset, ScannerResultPreview } from "@/lib/scanner/types"
 
@@ -167,7 +168,7 @@ function DesktopResultRow({ result }: { result: ScannerResultPreview }) {
   return (
     <TableRow>
       <TableCell className="pl-6">
-        <Link href={`/stocks/${result.symbol}`} className="group flex min-w-44 items-center gap-3 rounded-lg py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <Link href={stockPath(result.symbol)} className="group flex min-w-44 items-center gap-3 rounded-lg py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <span className="grid size-9 place-items-center rounded-xl bg-primary/10 font-mono text-[0.62rem] font-semibold text-primary">{result.symbol.slice(0, 2)}</span>
           <span className="flex flex-col gap-0.5">
             <span className="font-mono text-sm font-semibold group-hover:text-primary">{result.symbol}</span>
@@ -187,7 +188,7 @@ function DesktopResultRow({ result }: { result: ScannerResultPreview }) {
 
 function MobileResultCard({ result }: { result: ScannerResultPreview }) {
   return (
-    <Link href={`/stocks/${result.symbol}`} className="rounded-2xl border border-border/70 bg-background p-4 transition-colors hover:border-primary/30 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+    <Link href={stockPath(result.symbol)} className="rounded-2xl border border-border/70 bg-background p-4 transition-colors hover:border-primary/30 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-3">
           <span className="grid size-9 place-items-center rounded-xl bg-primary/10 font-mono text-[0.62rem] font-semibold text-primary">{result.symbol.slice(0, 2)}</span>

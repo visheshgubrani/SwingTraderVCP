@@ -491,12 +491,12 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("limitation.quarterly_eps_yoy", allowed)
         schema = request["response_format"]["json_schema"]["schema"]
         self.assertEqual(
-            set(schema["properties"]["verdict_reference_ids"]["items"]["enum"]),
-            allowed,
+            schema["properties"]["verdict_reference_ids"]["items"]["type"],
+            "string",
         )
         self.assertEqual(
-            set(schema["$defs"]["ReferenceNote"]["properties"]["reference_ids"]["items"]["enum"]),
-            allowed,
+            schema["$defs"]["ReferenceNote"]["properties"]["reference_ids"]["items"]["type"],
+            "string",
         )
 
     def test_rejects_irreducible_packet_over_configured_limit(self) -> None:
@@ -585,6 +585,33 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
         result = await client.analyze(self.facts())
         self.assertEqual(result.opinion.verdict, "uncertain")
 
+    async def test_unknown_reference_ids_are_sanitized_softly(self) -> None:
+        async def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    self.opinion("unknown_nonexistent_metric_id")
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = OpenRouterFundamentalClient(
+            api_key="key",
+            api_url="https://openrouter.test/chat/completions",
+            transport=httpx.MockTransport(handler),
+        )
+        result = await client.analyze(self.facts())
+        self.assertEqual(result.opinion.verdict, "pass")
+        self.assertNotIn("unknown_nonexistent_metric_id", result.opinion.verdict_reference_ids)
+        self.assertGreater(len(result.opinion.verdict_reference_ids), 0)
+
     async def test_invalid_paid_output_is_not_retried_and_keeps_usage(self) -> None:
         calls = 0
 
@@ -600,7 +627,7 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
                         {
                             "message": {
                                 "content": json.dumps(
-                                    self.opinion("ownership.institutional_change")
+                                    {"verdict": "invalid_verdict_value", "summary": "Bad verdict value"}
                                 )
                             }
                         }
@@ -676,7 +703,7 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             seen_payload["reasoning"],
-            {"effort": "low", "exclude": True},
+            {"effort": "medium", "exclude": True},
         )
         self.assertEqual(seen_payload["temperature"], 0)
         self.assertNotIn("enabled", seen_payload["reasoning"])

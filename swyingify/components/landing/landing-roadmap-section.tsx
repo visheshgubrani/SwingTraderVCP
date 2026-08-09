@@ -1,3 +1,5 @@
+import Link from "next/link"
+
 import { Reveal } from "@/components/landing/reveal"
 import { ROADMAP_ROWS } from "@/lib/landing/demo-data"
 import { cn } from "@/lib/utils"
@@ -15,8 +17,8 @@ export function LandingRoadmapSection() {
           </Reveal>
           <Reveal>
             <p className="landing-lead mt-6">
-              Each strategy ships only when its rules are documented, versioned, and tested. One trader at a
-              time.
+              Each strategy ships only when its rules are documented, versioned, and tested. Until then, legends
+              link to educational guides — never empty scanner pages.
             </p>
           </Reveal>
         </div>
@@ -27,9 +29,12 @@ export function LandingRoadmapSection() {
                 key={row.name}
                 className="landing-roster-row grid items-baseline gap-2 border-b border-[var(--landing-border)] px-2 py-6 transition-colors max-sm:grid-cols-1 sm:grid-cols-[220px_1fr_auto] sm:gap-7"
               >
-                <span className="font-[family-name:var(--font-landing-mono)] text-[22px] font-light text-[var(--landing-fg)] max-sm:order-2">
+                <Link
+                  href={row.href}
+                  className="font-[family-name:var(--font-landing-mono)] text-[22px] font-light text-[var(--landing-fg)] hover:underline max-sm:order-2"
+                >
                   {row.name}
-                </span>
+                </Link>
                 <p className="max-w-[52ch] text-base leading-relaxed text-[var(--landing-muted)] max-sm:order-3 sm:order-none">
                   {row.desc}
                 </p>

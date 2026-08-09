@@ -22,18 +22,30 @@ Required production environment values are documented in `.env.example`:
 `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, and Google OAuth
 credentials. Keep all secrets server-side.
 
+SEO / crawl controls (also in `.env.example`):
+
+- `SITE_URL` — canonical origin for metadata, sitemap, and robots
+- `SEO_INDEXING_ENABLED` — keep `false` until real scan data and the final
+  domain are ready; when false, robots disallow all and the sitemap is empty
+- `GOOGLE_SITE_VERIFICATION` — optional Search Console token
+
+Canonical live scanner path: `/scanners/minervini-vcp` (legacy `/scanner` and
+`/scanners/minervini` permanently redirect there).
+
 ## Preview scope
 
 Fixtures are deterministic fictional NSE-style companies and are labeled
 “Preview data” throughout the UI. Standard and Wide are public presets; the
 scanner query state is stored in `preset`, `q`, and allowlisted `sort` URL
-parameters. The next milestone replaces the fixture data source with the
-global daily scanner API without changing the UI contracts.
+parameters. Filtered scanner URLs and fixture stock pages stay `noindex`. The
+next milestone replaces the fixture data source with the global daily scanner
+API without changing the UI contracts.
 
 ## Checks
 
 ```bash
 pnpm lint
 pnpm exec tsc --noEmit
+pnpm seo:check
 pnpm exec next build --webpack
 ```

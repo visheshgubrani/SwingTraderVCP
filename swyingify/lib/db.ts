@@ -37,8 +37,25 @@ const globalForDatabase = globalThis as typeof globalThis & {
   swyingifyPool?: Pool
 }
 
-export const db = globalForDatabase.swyingifyPool ?? new Pool(poolConfig())
+let pool: Pool | undefined
 
-if (process.env.NODE_ENV !== "production") {
-  globalForDatabase.swyingifyPool = db
+function getPool(): Pool {
+  if (!pool) {
+    pool = globalForDatabase.swyingifyPool ?? new Pool(poolConfig())
+    if (process.env.NODE_ENV !== "production") {
+      globalForDatabase.swyingifyPool = pool
+    }
+  }
+  return pool
 }
+
+/**
+ * Lazy pool: `next build` imports auth/entitlements without DB env.
+ * Validation and connection happen on first real use at runtime.
+ */
+export const db: Pool = new Proxy({} as Pool, {
+  get(_target, prop, receiver) {
+    const value = Reflect.get(getPool(), prop, receiver)
+    return typeof value === "function" ? value.bind(getPool()) : value
+  },
+})

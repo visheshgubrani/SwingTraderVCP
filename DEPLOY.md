@@ -14,6 +14,8 @@ Host ports avoid other stacks on this VPS (open-webui `8080`, academy `3000`/`50
    - `.env.prod` (from [`.env.prod.example`](.env.prod.example))
 3. Create an Upstash Redis database → set `REDIS_URL=rediss://default:…@….upstash.io:6379`.
 4. Set a strong `POSTGRES_PASSWORD` and Fyers credentials in `.env.prod`.
+   Do **not** set `DATABASE_URL` in `.env.prod` — Compose sets `POSTGRES_HOST=postgres`
+   and the apps build the URL (so passwords with `@` stay safe).
 5. In the Fyers developer console, whitelist redirect URI:
    `http://80.225.207.109:8090/callback` (or your domain later).
 6. GitHub repo secrets for Actions:

@@ -1,13 +1,41 @@
-from typing import Literal
+from typing import Literal, Self
+from urllib.parse import quote
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+
+def build_asyncpg_database_url(
+    *,
+    user: str,
+    password: str,
+    host: str,
+    port: int,
+    database: str,
+) -> str:
+    """Build a SQLAlchemy asyncpg URL with a safely encoded password.
+
+    SQLAlchemy's URL parser treats the first ``@`` as the end of userinfo, so a
+    password containing ``@`` (e.g. ``MyP@ss``) would be misread as the host and
+    fail DNS inside Compose.
+    """
+    return (
+        f"postgresql+asyncpg://{quote(user, safe='')}:{quote(password, safe='')}"
+        f"@{host}:{port}/{database}"
+    )
 
 
 class Settings(BaseSettings):
     # Fail closed when a deployment forgets to declare its environment.
     app_environment: Literal["development", "test", "production"] = "production"
     database_url: str = "postgresql+asyncpg://algo:algo@localhost:5480/algo_trading"
+    # When set (Compose prod), rebuild database_url from discrete parts so
+    # passwords with @/#/? do not corrupt the hostname.
+    postgres_host: str | None = None
+    postgres_port: int = 5432
+    postgres_user: str = "algo"
+    postgres_password: str | None = None
+    postgres_db: str = "algo_trading"
     redis_url: str = "redis://localhost:6380/0"
     # redis-py 8 defaults socket_timeout=5s; arq does not override it. Tune for long jobs.
     redis_socket_timeout: float = Field(default=30.0, gt=0, le=300)
@@ -94,8 +122,23 @@ class Settings(BaseSettings):
             return v.replace("postgresql://", "postgresql+asyncpg://", 1)
         return v
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    @model_validator(mode="after")
+    def assemble_database_url_from_parts(self) -> Self:
+        if self.postgres_host:
+            if self.postgres_password is None:
+                raise ValueError(
+                    "POSTGRES_PASSWORD is required when POSTGRES_HOST is set"
+                )
+            self.database_url = build_asyncpg_database_url(
+                user=self.postgres_user,
+                password=self.postgres_password,
+                host=self.postgres_host,
+                port=self.postgres_port,
+                database=self.postgres_db,
+            )
+        return self
 
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 settings = Settings()

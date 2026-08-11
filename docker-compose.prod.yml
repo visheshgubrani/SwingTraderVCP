@@ -45,7 +45,10 @@ services:
     env_file:
       - ${ENV_FILE:-.env.prod}
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-algo}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-algo_trading}
+      # Discrete parts — app URL-encodes the password. Do not interpolate
+      # POSTGRES_PASSWORD into DATABASE_URL (SQLAlchemy breaks on '@' in passwords).
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
       APP_ENVIRONMENT: production
     networks:
       - internal
@@ -76,7 +79,8 @@ services:
     env_file:
       - ${ENV_FILE:-.env.prod}
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-algo}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-algo_trading}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
       APP_ENVIRONMENT: production
     networks:
       - internal
@@ -112,7 +116,8 @@ services:
       - ${ENV_FILE:-.env.prod}
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://${POSTGRES_USER:-algo}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-algo_trading}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
       API_URL: http://api:8000
     networks:
       - internal

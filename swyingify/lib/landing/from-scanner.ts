@@ -56,6 +56,7 @@ export function toLandingScanItem(row: ScannerResultPreview): ScanDemoItem {
     cut: Math.round(row.volumeDryUpRatio * 100),
     stage: stageLabel(row),
     c: checks,
+    dailyCandles: row.candles?.length ? row.candles : undefined,
   }
 }
 

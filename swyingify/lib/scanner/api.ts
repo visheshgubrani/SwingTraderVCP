@@ -3,6 +3,9 @@ import type {
   QualificationFingerprint,
   ScannerLatestMeta,
   ScannerResultPreview,
+  ScannerPreset,
+  ScannerVariantInput,
+  ScannerVariantRun,
 } from "./types"
 
 function apiBaseUrl(): string {
@@ -76,7 +79,7 @@ type ApiResultsPayload = {
     symbol: string
     companyName: string
     sector: string
-    preset: "standard"
+    preset: ScannerPreset
     rank: number
     asOfDate: string
     close: number
@@ -97,7 +100,14 @@ type ApiResultsPayload = {
 export async function fetchStandardLatest(options?: {
   cache?: RequestCache
 }): Promise<ScannerLatestMeta> {
-  return saasFetch<ScannerLatestMeta>("/saas/scans/minervini/standard/latest", {
+  return fetchScannerLatest("standard", options)
+}
+
+export async function fetchScannerLatest(
+  preset: Exclude<ScannerPreset, "custom">,
+  options?: { cache?: RequestCache },
+): Promise<ScannerLatestMeta> {
+  return saasFetch<ScannerLatestMeta>(`/saas/scans/minervini/${preset}/latest`, {
     cache: options?.cache ?? "no-store",
   })
 }
@@ -105,15 +115,26 @@ export async function fetchStandardLatest(options?: {
 export async function fetchStandardResults(options?: {
   cache?: RequestCache
   asOfDate?: string
-  internalKey?: string
+  accessToken?: string
 }): Promise<ScannerResultPreview[]> {
+  return fetchScannerResults("standard", options)
+}
+
+export async function fetchScannerResults(
+  preset: Exclude<ScannerPreset, "custom">,
+  options?: {
+    cache?: RequestCache
+    asOfDate?: string
+    accessToken?: string
+  },
+): Promise<ScannerResultPreview[]> {
   const params = new URLSearchParams()
   if (options?.asOfDate) params.set("asOfDate", options.asOfDate)
   const qs = params.toString()
-  const path = `/saas/scans/minervini/standard/results${qs ? `?${qs}` : ""}`
+  const path = `/saas/scans/minervini/${preset}/results${qs ? `?${qs}` : ""}`
   const headers: HeadersInit = {}
-  if (options?.internalKey) {
-    headers["X-Swyingify-Internal-Key"] = options.internalKey
+  if (options?.accessToken) {
+    headers["X-Swyingify-Access"] = options.accessToken
   }
   const payload = await saasFetch<ApiResultsPayload>(path, {
     cache: options?.cache ?? "no-store",
@@ -127,13 +148,53 @@ export async function fetchStandardResults(options?: {
   }))
 }
 
-export async function fetchSymbolCandles(symbol: string): Promise<{
+function normalizeVariantRun(payload: ScannerVariantRun): ScannerVariantRun {
+  return {
+    ...payload,
+    results: (payload.results ?? []).map((row) => ({
+      ...row,
+      sparkSeries: row.sparkSeries ?? [],
+      candles: row.candles ?? [],
+    })),
+  }
+}
+
+export async function createScannerVariant(
+  input: ScannerVariantInput,
+): Promise<ScannerVariantRun> {
+  const payload = await saasFetch<ScannerVariantRun>(
+    "/saas/scans/minervini/variants",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  )
+  return normalizeVariantRun(payload)
+}
+
+export async function fetchScannerVariant(runId: string): Promise<ScannerVariantRun> {
+  const payload = await saasFetch<ScannerVariantRun>(
+    `/saas/scans/minervini/variants/${encodeURIComponent(runId)}`,
+    { cache: "no-store" },
+  )
+  return normalizeVariantRun(payload)
+}
+
+export const STOCK_CHART_CANDLE_LIMIT = 252
+
+export async function fetchSymbolCandles(
+  symbol: string,
+  options?: { limit?: number },
+): Promise<{
   symbol: string
   companyName: string
   asOfDate: string | null
   candles: DailyCandle[]
 }> {
-  return saasFetch(`/saas/candles/${encodeURIComponent(symbol)}`, {
+  const limit = options?.limit ?? STOCK_CHART_CANDLE_LIMIT
+  const qs = new URLSearchParams({ limit: String(limit) })
+  return saasFetch(`/saas/candles/${encodeURIComponent(symbol)}?${qs}`, {
     cache: "no-store",
   })
 }

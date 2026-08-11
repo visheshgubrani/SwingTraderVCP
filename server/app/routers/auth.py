@@ -121,7 +121,7 @@ async def handle_callback_get(
     code: int = 200,
     db: AsyncSession = Depends(get_db),
 ):
-    frontend_redirect_url = "http://localhost:3000"
+    frontend_redirect_url = settings.frontend_public_url.rstrip("/")
 
     try:
         await _exchange_code_and_save(db, auth_code)

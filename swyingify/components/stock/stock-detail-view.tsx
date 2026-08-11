@@ -2,24 +2,19 @@
 
 import dynamic from "next/dynamic"
 import Link from "next/link"
-import { useMemo, useState } from "react"
+import { useMemo } from "react"
 
 import { ChangeCell } from "@/components/scanner-board/board-formatters"
 import { Reveal } from "@/components/landing/reveal"
-import {
-  CHART_RANGE_LABELS,
-  CHART_RANGE_SLICES,
-  generateStockCandles,
-  type ChartRange,
-} from "@/lib/scanner/generate-stock-candles"
+import { generateStockCandles } from "@/lib/scanner/generate-stock-candles"
 import {
   buildStockChecks,
   deriveStockLevels,
   formatInrOneDecimal,
   formatInrWhole,
-  formatStockDate,
+  formatStockDateFromIso,
 } from "@/lib/scanner/stock-derive"
-import type { ScannerResultPreview } from "@/lib/scanner/types"
+import type { DailyCandle, ScannerResultPreview } from "@/lib/scanner/types"
 import { cn } from "@/lib/utils"
 
 const StockChartDark = dynamic(
@@ -27,38 +22,47 @@ const StockChartDark = dynamic(
   { ssr: false, loading: () => <div className="h-[300px] min-[901px]:h-[460px] w-full animate-pulse bg-white/5" /> },
 )
 
+function resolveChartCandles(
+  result: ScannerResultPreview,
+  isLiveData: boolean,
+  levels: ReturnType<typeof deriveStockLevels>,
+): DailyCandle[] {
+  if (isLiveData) {
+    return result.candles ?? []
+  }
+  if ((result.candles?.length ?? 0) > 0) {
+    return result.candles
+  }
+  return generateStockCandles({
+    close: result.close,
+    dayChangePct: result.dayChangePct,
+    sparkSeed: result.sparkSeed ?? 0,
+    adtvCrore: result.adtvCrore,
+    pivot: levels.pivot,
+    baseLow: levels.baseLow,
+    prevClose: levels.prevClose,
+  })
+}
+
 export function StockDetailView({
   result,
+  isLiveData = false,
   showChrome = true,
 }: {
   result: ScannerResultPreview
+  isLiveData?: boolean
   showChrome?: boolean
 }) {
-  const [range, setRange] = useState<ChartRange>("3m")
-  const levels = useMemo(() => deriveStockLevels(result), [result])
-  const checks = useMemo(() => buildStockChecks(result, levels), [result, levels])
+  const levels = useMemo(() => deriveStockLevels(result, result.candles ?? []), [result])
+  const checks = useMemo(() => buildStockChecks(result), [result])
   const passCount = checks.filter((c) => c.pass).length
 
-  const allCandles = useMemo(
-    () =>
-      generateStockCandles({
-        close: result.close,
-        dayChangePct: result.dayChangePct,
-        sparkSeed: result.sparkSeed ?? 0,
-        adtvCrore: result.adtvCrore,
-        pivot: levels.pivot,
-        baseLow: levels.baseLow,
-        prevClose: levels.prevClose,
-      }),
-    [result, levels],
+  const chartCandles = useMemo(
+    () => resolveChartCandles(result, isLiveData, levels),
+    [result, isLiveData, levels],
   )
 
-  const sliceCandles = useMemo(
-    () => allCandles.slice(-CHART_RANGE_SLICES[range]),
-    [allCandles, range],
-  )
-
-  const asOfDate = formatStockDate()
+  const asOfDate = formatStockDateFromIso(result.asOfDate)
 
   return (
     <>
@@ -113,33 +117,24 @@ export function StockDetailView({
           <Reveal>
             <div className="flex flex-wrap items-center justify-between gap-5">
               <h2 className="stock-section-title">Price & volume</h2>
-              <div className="board-tabs" role="group" aria-label="Chart range">
-                {(["3m", "6m", "1y"] as const).map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    className={cn("board-tab", range === value && "active")}
-                    aria-pressed={range === value}
-                    onClick={() => setRange(value)}
-                  >
-                    {value.toUpperCase()}
-                  </button>
-                ))}
-              </div>
+              <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">
+                Daily · EOD
+              </span>
             </div>
           </Reveal>
           <Reveal>
             <div className="mt-6 border border-[var(--landing-border)] bg-[var(--landing-surface)] p-3.5">
               <StockChartDark
-                candles={sliceCandles}
+                candles={chartCandles}
                 symbol={result.symbol}
                 lastClose={result.close}
                 dayChangePct={result.dayChangePct}
-                rangeLabel={CHART_RANGE_LABELS[range]}
+                rangeLabel="1-year daily"
+                isLiveData={isLiveData}
               />
             </div>
             <p className="mt-3.5 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-wider text-[var(--landing-muted)]">
-              Daily candles · {CHART_RANGE_LABELS[range]} view
+              Daily candles · end-of-day close{chartCandles.length > 0 ? ` · ${chartCandles.length} sessions` : ""}
             </p>
           </Reveal>
         </div>
@@ -191,8 +186,8 @@ export function StockDetailView({
                 {passCount} of {checks.length} checks pass.
               </h2>
               <p className="landing-lead mt-3.5">
-                The scanner checks five things against the daily close. A setup needs the trend, the proximity, and
-                the tightening to line up before it earns a rank.
+                The scanner scores each setup against the daily close. Trend, proximity, and tightening need to line up
+                before a name earns its rank.
               </p>
               <div className="mt-7">
                 {checks.map((check) => (
@@ -250,14 +245,16 @@ export function StockDetailView({
                 last
               />
               <p className="mt-[18px] max-w-[46ch] text-xs leading-relaxed text-[var(--landing-muted)]">
-                Illustrative levels on the daily close — recomputed by the live scan after every close.
+                {isLiveData
+                  ? "Pivot and base levels are approximate guides on the daily close. 52-week high and low use the loaded daily history."
+                  : "Illustrative levels on the daily close — recomputed by the live scan after every close."}
               </p>
             </aside>
           </Reveal>
         </div>
       </section>
 
-      {showChrome ? (
+      {showChrome && !isLiveData ? (
         <>
           <section className="pt-14 min-[901px]:pt-24">
             <div className="mx-auto max-w-[1200px] px-6 max-sm:px-3">
@@ -266,22 +263,25 @@ export function StockDetailView({
               </p>
             </div>
           </section>
-          <footer className="mt-14 border-t border-[var(--landing-border)] min-[901px]:mt-24">
-            <div className="mx-auto flex max-w-[1200px] flex-wrap items-center justify-between gap-5 px-6 py-8 max-sm:px-3">
-              <span className="landing-brand text-[13px]">Swyingify</span>
-              <p className="min-w-[240px] flex-1 text-xs leading-relaxed text-[var(--landing-muted)]">
-                Educational purposes only. Swyingify scans markets — it does not place orders, hold positions, or give
-                investment advice.
-              </p>
-              <Link
-                href="/scanners/minervini-vcp"
-                className="py-3 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)] transition-colors hover:text-[var(--landing-fg)]"
-              >
-                ← Daily board
-              </Link>
-            </div>
-          </footer>
         </>
+      ) : null}
+
+      {showChrome ? (
+        <footer className="mt-14 border-t border-[var(--landing-border)] min-[901px]:mt-24">
+          <div className="mx-auto flex max-w-[1200px] flex-wrap items-center justify-between gap-5 px-6 py-8 max-sm:px-3">
+            <span className="landing-brand text-[13px]">Swyingify</span>
+            <p className="min-w-[240px] flex-1 text-xs leading-relaxed text-[var(--landing-muted)]">
+              Educational purposes only. Swyingify scans markets — it does not place orders, hold positions, or give
+              investment advice.
+            </p>
+            <Link
+              href="/scanners/minervini-vcp"
+              className="py-3 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)] transition-colors hover:text-[var(--landing-fg)]"
+            >
+              ← Daily board
+            </Link>
+          </div>
+        </footer>
       ) : null}
     </>
   )

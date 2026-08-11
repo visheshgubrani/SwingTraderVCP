@@ -115,6 +115,10 @@ export const SCANNER_FILTER_QUERY_KEYS = [
   "grade",
   "move",
   "direction",
+  "minRs",
+  "maxHigh",
+  "minAdtv",
+  "minScore",
 ] as const
 
 export function scannerQueryIsFiltered(

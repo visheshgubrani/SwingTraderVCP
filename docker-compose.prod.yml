@@ -1,0 +1,126 @@
+# Production stack for the ARM VPS.
+# Local laptop deps (Postgres/Redis on 5480/6380) stay in docker-compose.dev.yml.
+#
+# Usage on the VPS:
+#   cp .env.prod.example .env.prod   # fill secrets
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod pull
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# Redis is Upstash (REDIS_URL=rediss://...). Do not run a Redis container here.
+# Enable Swyingify later with: --profile saas
+
+name: swingtradervcp
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-algo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-algo_trading}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-algo} -d ${POSTGRES_DB:-algo_trading}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Bound to loopback only — host 5482 avoids other stacks on this VPS.
+    ports:
+      - "127.0.0.1:5482:5432"
+
+  api:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/server:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.prod}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-algo}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-algo_trading}
+      APP_ENVIRONMENT: production
+    networks:
+      - internal
+    ports:
+      - "${API_HOST_PORT:-8002}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+  worker:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/server:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["python", "run_worker.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.prod}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-algo}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-algo_trading}
+      APP_ENVIRONMENT: production
+    networks:
+      - internal
+    # Image HEALTHCHECK probes /health (API-only). Disable for the worker.
+    healthcheck:
+      test: ["CMD", "python", "-c", "raise SystemExit(0)"]
+      interval: 60s
+      timeout: 5s
+      retries: 1
+      start_period: 10s
+
+  client:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/client:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - internal
+    ports:
+      - "${CLIENT_HOST_PORT:-8090}:80"
+
+  swyingify:
+    profiles: ["saas"]
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/swyingify:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.prod}
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-algo}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-algo_trading}
+      API_URL: http://api:8000
+    networks:
+      - internal
+    ports:
+      - "${SWYINGIFY_HOST_PORT:-3002}:3000"
+
+networks:
+  internal:
+
+volumes:
+  postgres_data:

@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { useEffect, useMemo, useRef, useTransition } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 
@@ -25,6 +25,84 @@ const sortLabels: Record<SortKey, string> = {
 type MoveFilter = "" | "up" | "dn"
 type GradeFilter = "" | "A" | "B" | "C"
 
+type BoardFilters = {
+  q: string
+  sort: SortKey
+  sector: string
+  grade: GradeFilter
+  move: MoveFilter
+  minRs: string
+  maxHigh: string
+  minAdtv: string
+  minScore: string
+}
+
+const EMPTY_FILTERS: BoardFilters = {
+  q: "",
+  sort: "score",
+  sector: "",
+  grade: "",
+  move: "",
+  minRs: "",
+  maxHigh: "",
+  minAdtv: "",
+  minScore: "",
+}
+
+function filtersFromParams(params: URLSearchParams): BoardFilters {
+  const sortParam = params.get("sort")
+  return {
+    q: params.get("q") || "",
+    sort: sortOptions.includes(sortParam as SortKey) ? (sortParam as SortKey) : "score",
+    sector: params.get("sector") || "",
+    grade: (params.get("grade") || "") as GradeFilter,
+    move: (params.get("move") || "") as MoveFilter,
+    minRs: params.get("minRs") || "",
+    maxHigh: params.get("maxHigh") || "",
+    minAdtv: params.get("minAdtv") || "",
+    minScore: params.get("minScore") || "",
+  }
+}
+
+function filtersToQuery(filters: BoardFilters): string {
+  const params = new URLSearchParams()
+  if (filters.q) params.set("q", filters.q)
+  if (filters.sort !== "score") params.set("sort", filters.sort)
+  if (filters.sector) params.set("sector", filters.sector)
+  if (filters.grade) params.set("grade", filters.grade)
+  if (filters.move) params.set("move", filters.move)
+  if (filters.minRs) params.set("minRs", filters.minRs)
+  if (filters.maxHigh) params.set("maxHigh", filters.maxHigh)
+  if (filters.minAdtv) params.set("minAdtv", filters.minAdtv)
+  if (filters.minScore) params.set("minScore", filters.minScore)
+  return params.toString()
+}
+
+function hasActiveFilters(filters: BoardFilters): boolean {
+  return Boolean(
+    filters.q ||
+      filters.sector ||
+      filters.grade ||
+      filters.move ||
+      filters.minRs ||
+      filters.maxHigh ||
+      filters.minAdtv ||
+      filters.minScore,
+  )
+}
+
+function hasPanelFilters(filters: BoardFilters): boolean {
+  return Boolean(
+    filters.sector ||
+      filters.grade ||
+      filters.move ||
+      filters.minRs ||
+      filters.maxHigh ||
+      filters.minAdtv ||
+      filters.minScore,
+  )
+}
+
 function formatBoardDate(isoDate: string) {
   const d = new Date(`${isoDate}T00:00:00.000Z`)
   if (Number.isNaN(d.getTime())) return isoDate
@@ -34,10 +112,11 @@ function formatBoardDate(isoDate: string) {
 }
 
 type ScannerBoardProps = {
-  initialPreset: ScannerPreset
+  initialPreset: Exclude<ScannerPreset, "custom">
   initialResults: ScannerResultPreview[]
   asOfDate: string
   isLiveData: boolean
+  historical?: boolean
 }
 
 export function ScannerBoard({
@@ -45,29 +124,32 @@ export function ScannerBoard({
   initialResults,
   asOfDate: initialAsOfDate,
   isLiveData,
+  historical = false,
 }: ScannerBoardProps) {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
   const queryClient = useQueryClient()
-  const [isPending, startTransition] = useTransition()
   const lastCompletedAt = useRef<string | null>(null)
-
-  const search = searchParams.get("q") || ""
-  const sortParam = searchParams.get("sort")
-  const sort: SortKey = sortOptions.includes(sortParam as SortKey) ? (sortParam as SortKey) : "score"
-  const sector = searchParams.get("sector") || ""
-  const grade = (searchParams.get("grade") || "") as GradeFilter
-  const move = (searchParams.get("move") || "") as MoveFilter
+  const lastWrittenQuery = useRef(filtersToQuery(filtersFromParams(searchParams)))
+  const previousQueryText = useRef(searchParams.get("q") || "")
+  const [filters, setFilters] = useState<BoardFilters>(() => filtersFromParams(searchParams))
+  const [filtersOpen, setFiltersOpen] = useState(() => hasPanelFilters(filtersFromParams(searchParams)))
+  const searchParamsKey = searchParams.toString()
+  const presetLabel = initialPreset === "strict" ? "Strict" : "Standard"
+  const presetDescription = initialPreset === "strict"
+    ? "Tonight’s tighter shortlist after the cash-market close — all five Stage 2 checks plus stronger relative-strength, contraction, liquidity, and volume dry-up gates."
+    : "Tonight’s Standard shortlist (top 25) after the cash-market close — an independent rule-based approximation of Stage 2 / volatility contraction conditions with trend, price, volume, and relative strength in one view."
 
   const { data, isLoading, isFetching } = useQuery({
     ...scannerResultsQuery(initialPreset),
     initialData: initialResults,
+    enabled: !historical,
   })
 
   const { data: latest } = useQuery({
-    ...scannerLatestQuery(),
-    enabled: isLiveData,
+    ...scannerLatestQuery(initialPreset),
+    enabled: isLiveData && !historical,
   })
 
   useEffect(() => {
@@ -78,9 +160,33 @@ export function ScannerBoard({
     }
     if (lastCompletedAt.current !== latest.completedAt) {
       lastCompletedAt.current = latest.completedAt
-      void queryClient.invalidateQueries({ queryKey: scannerKeys.results("standard") })
+      void queryClient.invalidateQueries({ queryKey: scannerKeys.results(initialPreset) })
     }
-  }, [latest?.completedAt, queryClient])
+  }, [initialPreset, latest?.completedAt, queryClient])
+
+  // Keep local filters in sync with back/forward and shared links.
+  useEffect(() => {
+    const fromUrl = filtersFromParams(new URLSearchParams(searchParamsKey))
+    const fromUrlQuery = filtersToQuery(fromUrl)
+    if (fromUrlQuery === lastWrittenQuery.current) return
+    lastWrittenQuery.current = fromUrlQuery
+    previousQueryText.current = fromUrl.q
+    setFilters(fromUrl)
+    if (hasPanelFilters(fromUrl)) setFiltersOpen(true)
+  }, [searchParamsKey])
+
+  // Mirror local filters into the URL without blocking the control UI.
+  useEffect(() => {
+    const nextQuery = filtersToQuery(filters)
+    if (nextQuery === lastWrittenQuery.current) return
+    const qChanged = previousQueryText.current !== filters.q
+    previousQueryText.current = filters.q
+    const timer = window.setTimeout(() => {
+      lastWrittenQuery.current = nextQuery
+      router.replace(nextQuery ? `${pathname}?${nextQuery}` : pathname, { scroll: false })
+    }, qChanged ? 200 : 0)
+    return () => window.clearTimeout(timer)
+  }, [filters, pathname, router])
 
   const asOfDate = latest?.asOfDate || data?.[0]?.asOfDate || initialAsOfDate
 
@@ -90,39 +196,56 @@ export function ScannerBoard({
     return [...seen].sort()
   }, [data])
 
+  const minRs = Number(filters.minRs || 0)
+  const maxHigh = Number(filters.maxHigh || 0)
+  const minAdtv = Number(filters.minAdtv || 0)
+  const minScore = Number(filters.minScore || 0)
+
   const results = useMemo(() => {
     const filtered = (data ?? []).filter((row) => {
       const haystack = `${row.symbol} ${row.companyName} ${row.sector}`.toLowerCase()
-      if (search && !haystack.includes(search.toLowerCase())) return false
-      if (sector && row.sector !== sector) return false
-      if (grade && row.grade !== grade) return false
-      if (move === "up" && row.dayChangePct < 0) return false
-      if (move === "dn" && row.dayChangePct >= 0) return false
+      if (filters.q && !haystack.includes(filters.q.toLowerCase())) return false
+      if (filters.sector && row.sector !== filters.sector) return false
+      if (filters.grade && row.grade !== filters.grade) return false
+      if (filters.move === "up" && row.dayChangePct < 0) return false
+      if (filters.move === "dn" && row.dayChangePct >= 0) return false
+      if (minRs && row.rsRating < minRs) return false
+      if (maxHigh && row.pctFrom52WeekHigh > maxHigh) return false
+      if (minAdtv && row.adtvCrore < minAdtv) return false
+      if (minScore && row.technicalScore < minScore) return false
       return true
     })
 
     return [...filtered].sort((a, b) => {
-      if (sort === "rs") return b.rsRating - a.rsRating
-      if (sort === "nearHigh") return a.pctFrom52WeekHigh - b.pctFrom52WeekHigh
-      if (sort === "price") return b.close - a.close
+      if (filters.sort === "rs") return b.rsRating - a.rsRating
+      if (filters.sort === "nearHigh") return a.pctFrom52WeekHigh - b.pctFrom52WeekHigh
+      if (filters.sort === "price") return b.close - a.close
       return b.technicalScore - a.technicalScore
     })
-  }, [data, search, sector, grade, move, sort])
+  }, [data, filters, minRs, maxHigh, minAdtv, minScore])
 
-  const hasFilters = !!(search || sector || grade || move)
+  const activeFilters = hasActiveFilters(filters)
+  const activePanelCount = [
+    filters.sector,
+    filters.grade,
+    filters.move,
+    filters.minRs,
+    filters.maxHigh,
+    filters.minAdtv,
+    filters.minScore,
+  ].filter(Boolean).length
 
-  function updateParams(next: Record<string, string | null>) {
-    const params = new URLSearchParams(searchParams.toString())
-    Object.entries(next).forEach(([key, value]) => (value ? params.set(key, value) : params.delete(key)))
-    params.delete("preset")
-    startTransition(() => router.replace(`${pathname}?${params.toString()}`, { scroll: false }))
+  function patchFilters(patch: Partial<BoardFilters>) {
+    setFilters((current) => ({ ...current, ...patch }))
   }
 
   function clearFilters() {
-    updateParams({ q: null, sector: null, grade: null, move: null })
+    setFilters((current) => ({ ...EMPTY_FILTERS, sort: current.sort }))
   }
 
-  const statusLabel = !isLiveData
+  const statusLabel = historical
+    ? "Archived EOD board"
+    : !isLiveData
     ? "Preview board · illustrative until live results"
     : latest?.status === "running" || latest?.status === "queued"
       ? "Scan running · updating after the close"
@@ -135,18 +258,16 @@ export function ScannerBoard({
       <header className="pt-[clamp(48px,7vw,80px)]">
         <div className="mx-auto max-w-[1200px] px-6 max-sm:px-3">
           <Reveal>
-            <p className="landing-kicker">Minervini VCP · Standard · Nifty 500 · End of day</p>
+            <p className="landing-kicker">Minervini VCP · {presetLabel} · Nifty 500 · End of day</p>
           </Reveal>
           <Reveal>
             <h1 className="mt-[26px] font-[family-name:var(--font-landing-mono)] text-[clamp(34px,4.4vw,56px)] font-light leading-[1.1] text-[var(--landing-fg)]">
-              Minervini VCP scanner for Nifty 500 stocks
+              Minervini VCP {presetLabel.toLowerCase()} scanner
             </h1>
           </Reveal>
           <Reveal>
             <p className="landing-lead mt-6">
-              Tonight&apos;s Standard shortlist (top 25) after the cash-market close — an independent rule-based
-              approximation of Stage 2 / volatility contraction conditions with trend, price, volume, and relative
-              strength in one view.
+              {presetDescription}
             </p>
           </Reveal>
           <Reveal>
@@ -162,7 +283,7 @@ export function ScannerBoard({
                   EOD snapshot
                 </span>
                 <span className="border border-[var(--landing-border)] px-2.5 py-1 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">
-                  Standard · top 25
+                  {presetLabel} · top 25
                 </span>
               </div>
               <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-wider text-[var(--landing-muted)] max-sm:w-full">
@@ -175,113 +296,184 @@ export function ScannerBoard({
 
       <section className="pb-16 pt-12">
         <div className="mx-auto max-w-[1200px] px-6 max-sm:px-3">
-          <Reveal>
-            <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="board-toolbar">
+            <div className="board-toolbar-row">
               <p className="font-[family-name:var(--font-landing-mono)] text-sm uppercase tracking-widest text-[var(--landing-muted)]">
-                Standard shortlist
+                {presetLabel} shortlist
               </p>
-              <div className="flex flex-wrap items-center gap-3 max-sm:w-full max-sm:justify-between">
-                <label className="board-search">
-                  <SearchIcon />
-                  <input
-                    type="search"
-                    value={search}
-                    onChange={(e) => updateParams({ q: e.target.value || null })}
-                    placeholder="Search a stock or sector"
-                    autoComplete="off"
-                    aria-label="Search stocks"
-                  />
-                </label>
-                <label className="board-select">
-                  <select
-                    value={sort}
-                    onChange={(e) => updateParams({ sort: e.target.value === "score" ? null : e.target.value })}
-                    aria-label="Sort results"
-                  >
-                    {sortOptions.map((option) => (
-                      <option key={option} value={option}>
-                        Sort: {sortLabels[option]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <span className="whitespace-nowrap font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]" aria-live="polite">
-                  {padRank(results.length)} {results.length === 1 ? "setup" : "setups"}
-                  {isPending ? " ·" : ""}
-                </span>
-              </div>
+              <span className="whitespace-nowrap font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]" aria-live="polite">
+                {padRank(results.length)} {results.length === 1 ? "setup" : "setups"}
+              </span>
             </div>
-          </Reveal>
 
-          <Reveal>
-            <div className="mt-3.5 flex flex-wrap items-center gap-3">
-              <label className="board-select">
+            <div className="board-toolbar-controls">
+              <label className="board-search">
+                <SearchIcon />
+                <input
+                  type="search"
+                  value={filters.q}
+                  onChange={(e) => patchFilters({ q: e.target.value })}
+                  placeholder="Search a stock or sector"
+                  autoComplete="off"
+                  aria-label="Search stocks"
+                />
+              </label>
+
+              <label className="board-control">
+                <span className="board-control-label">Sort</span>
                 <select
-                  value={sector}
-                  onChange={(e) => updateParams({ sector: e.target.value || null })}
-                  aria-label="Filter by sector"
+                  value={filters.sort}
+                  onChange={(e) => patchFilters({ sort: e.target.value as SortKey })}
+                  aria-label="Sort results"
                 >
-                  <option value="">All sectors</option>
-                  {sectors.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
+                  {sortOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {sortLabels[option]}
                     </option>
                   ))}
                 </select>
               </label>
-              <label className="board-select">
-                <select
-                  value={grade}
-                  onChange={(e) => updateParams({ grade: e.target.value || null })}
-                  aria-label="Filter by grade"
-                >
-                  <option value="">All grades</option>
-                  <option value="A">Grade A</option>
-                  <option value="B">Grade B</option>
-                  <option value="C">Grade C</option>
-                </select>
-              </label>
-              <label className="board-select">
-                <select
-                  value={move}
-                  onChange={(e) => updateParams({ move: e.target.value || null })}
-                  aria-label="Filter by day move"
-                >
-                  <option value="">All moves</option>
-                  <option value="up">Up day</option>
-                  <option value="dn">Down day</option>
-                </select>
-              </label>
-              {hasFilters ? (
-                <button
-                  type="button"
-                  className="min-h-11 bg-transparent px-1 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)] transition-colors hover:text-[var(--landing-fg)]"
-                  onClick={clearFilters}
-                >
-                  Clear filters
+
+              <button
+                type="button"
+                className={`board-filter-toggle${filtersOpen ? " is-open" : ""}${activePanelCount ? " has-active" : ""}`}
+                aria-expanded={filtersOpen}
+                aria-controls="board-filter-panel"
+                onClick={() => setFiltersOpen((open) => !open)}
+              >
+                Filters{activePanelCount ? ` · ${activePanelCount}` : ""}
+              </button>
+
+              {activeFilters ? (
+                <button type="button" className="board-clear" onClick={clearFilters}>
+                  Clear
                 </button>
               ) : null}
             </div>
-          </Reveal>
 
-          <Reveal>
-            <div className="mt-5">
-              {isLoading && !data?.length ? (
-                <BoardSkeleton />
-              ) : results.length > 0 ? (
-                <>
-                  <BoardTable results={results} />
-                  <BoardCards results={results} />
-                </>
-              ) : (
-                <EmptyBoard
-                  hasFilters={hasFilters}
-                  isLiveData={isLiveData}
-                  status={latest?.status}
-                />
-              )}
-            </div>
-          </Reveal>
+            {filtersOpen ? (
+              <div id="board-filter-panel" className="board-filter-panel">
+                <p className="board-filter-kicker">Filter this published shortlist</p>
+                <div className="board-filter-grid">
+                  <label className="board-control">
+                    <span className="board-control-label">Sector</span>
+                    <select
+                      value={filters.sector}
+                      onChange={(e) => patchFilters({ sector: e.target.value })}
+                      aria-label="Filter by sector"
+                    >
+                      <option value="">All sectors</option>
+                      {sectors.map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="board-control">
+                    <span className="board-control-label">RS rating</span>
+                    <select
+                      value={filters.minRs}
+                      onChange={(e) => patchFilters({ minRs: e.target.value })}
+                      aria-label="Minimum RS rating"
+                    >
+                      <option value="">Any RS</option>
+                      <option value="70">70+</option>
+                      <option value="80">80+</option>
+                      <option value="90">90+</option>
+                    </select>
+                  </label>
+
+                  <label className="board-control">
+                    <span className="board-control-label">Near 52w high</span>
+                    <select
+                      value={filters.maxHigh}
+                      onChange={(e) => patchFilters({ maxHigh: e.target.value })}
+                      aria-label="Maximum distance from 52-week high"
+                    >
+                      <option value="">Any proximity</option>
+                      <option value="5">Within 5%</option>
+                      <option value="10">Within 10%</option>
+                      <option value="15">Within 15%</option>
+                    </select>
+                  </label>
+
+                  <label className="board-control">
+                    <span className="board-control-label">ADTV</span>
+                    <select
+                      value={filters.minAdtv}
+                      onChange={(e) => patchFilters({ minAdtv: e.target.value })}
+                      aria-label="Minimum average daily traded value"
+                    >
+                      <option value="">Any ADTV</option>
+                      <option value="25">₹25cr+</option>
+                      <option value="50">₹50cr+</option>
+                      <option value="100">₹100cr+</option>
+                    </select>
+                  </label>
+
+                  <label className="board-control">
+                    <span className="board-control-label">Score</span>
+                    <select
+                      value={filters.minScore}
+                      onChange={(e) => patchFilters({ minScore: e.target.value })}
+                      aria-label="Minimum technical score"
+                    >
+                      <option value="">Any score</option>
+                      <option value="70">70+</option>
+                      <option value="80">80+</option>
+                      <option value="90">90+</option>
+                    </select>
+                  </label>
+
+                  <label className="board-control">
+                    <span className="board-control-label">Grade</span>
+                    <select
+                      value={filters.grade}
+                      onChange={(e) => patchFilters({ grade: e.target.value as GradeFilter })}
+                      aria-label="Filter by grade"
+                    >
+                      <option value="">All grades</option>
+                      <option value="A">A</option>
+                      <option value="B">B</option>
+                      <option value="C">C</option>
+                    </select>
+                  </label>
+
+                  <label className="board-control">
+                    <span className="board-control-label">Day move</span>
+                    <select
+                      value={filters.move}
+                      onChange={(e) => patchFilters({ move: e.target.value as MoveFilter })}
+                      aria-label="Filter by day move"
+                    >
+                      <option value="">All moves</option>
+                      <option value="up">Up day</option>
+                      <option value="dn">Down day</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="mt-5">
+            {isLoading && !data?.length ? (
+              <BoardSkeleton />
+            ) : results.length > 0 ? (
+              <>
+                <BoardTable results={results} preset={initialPreset} isLiveData={isLiveData} />
+                <BoardCards results={results} preset={initialPreset} isLiveData={isLiveData} />
+              </>
+            ) : (
+              <EmptyBoard
+                hasFilters={activeFilters}
+                isLiveData={isLiveData}
+                status={latest?.status}
+              />
+            )}
+          </div>
 
           <p className="mt-4 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-wider text-[var(--landing-muted)]">
             {isLiveData
@@ -294,14 +486,22 @@ export function ScannerBoard({
   )
 }
 
-function BoardTable({ results }: { results: ScannerResultPreview[] }) {
+function BoardTable({
+  results,
+  preset,
+  isLiveData,
+}: {
+  results: ScannerResultPreview[]
+  preset: Exclude<ScannerPreset, "custom">
+  isLiveData: boolean
+}) {
   return (
     <div className="board-wrap">
       <div className="board-row head">
         <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">#</span>
         <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">Stock</span>
         <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">Sector</span>
-        <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">Trend</span>
+        <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">Daily trend</span>
         <span className="text-right font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">Price</span>
         <span className="text-right font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">Change</span>
         <span className="text-right font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-widest text-[var(--landing-muted)]">ADTV</span>
@@ -311,7 +511,7 @@ function BoardTable({ results }: { results: ScannerResultPreview[] }) {
       {results.map((row, index) => (
         <Link
           key={row.id}
-          href={stockPath(row.symbol)}
+          href={stockPath(row.symbol, preset)}
           className="board-row data text-[var(--landing-fg-2)] hover:no-underline"
         >
           <span className="font-[family-name:var(--font-landing-mono)] text-xs tracking-wide text-[var(--landing-muted)]">
@@ -330,6 +530,8 @@ function BoardTable({ results }: { results: ScannerResultPreview[] }) {
               dayChangePct={row.dayChangePct}
               sparkSeed={row.sparkSeed}
               sparkSeries={row.sparkSeries}
+              candles={row.candles}
+              isLiveData={isLiveData}
             />
           </span>
           <span className="text-right font-[family-name:var(--font-landing-mono)] text-sm text-[var(--landing-fg)]">
@@ -353,13 +555,21 @@ function BoardTable({ results }: { results: ScannerResultPreview[] }) {
   )
 }
 
-function BoardCards({ results }: { results: ScannerResultPreview[] }) {
+function BoardCards({
+  results,
+  preset,
+  isLiveData,
+}: {
+  results: ScannerResultPreview[]
+  preset: Exclude<ScannerPreset, "custom">
+  isLiveData: boolean
+}) {
   return (
     <div className="board-cards mt-5">
       {results.map((row) => (
         <Link
           key={`card-${row.id}`}
-          href={stockPath(row.symbol)}
+          href={stockPath(row.symbol, preset)}
           className="mb-3 block border border-[var(--landing-border)] p-[18px] transition-colors last:mb-0 hover:bg-[var(--landing-surface-warm)] hover:no-underline"
         >
           <div className="flex items-start justify-between gap-3">
@@ -378,6 +588,8 @@ function BoardCards({ results }: { results: ScannerResultPreview[] }) {
                 dayChangePct={row.dayChangePct}
                 sparkSeed={row.sparkSeed}
                 sparkSeries={row.sparkSeries}
+                candles={row.candles}
+                isLiveData={isLiveData}
               />
             </span>
             <div className="text-right">
@@ -436,7 +648,7 @@ function EmptyBoard({
           ? status === "error"
             ? "Could not reach the scanner API. Check that FastAPI is running and API_URL is set, then refresh."
             : "Tonight’s Standard shortlist is not published yet. After the cash-market close (or Run EOD SCAN in the trading app), this board fills automatically."
-          : "No setup in the Standard scan matches the current search or filters. Try another symbol, sector, grade, or clear the filters."}
+          : "No setup in this scan matches the current search or filters. Try another symbol, sector, grade, or clear the filters."}
       </p>
     </div>
   )

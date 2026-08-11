@@ -135,6 +135,8 @@ const standardResults: ScannerResultPreview[] = resultSeeds.map((seed, index) =>
 
 export const previewResults: Record<ScannerPreset, ScannerResultPreview[]> = {
   standard: standardResults,
+  strict: [],
+  custom: [],
 }
 
 export function getPreviewResults(preset: ScannerPreset = "standard"): ScannerResultPreview[] {

@@ -1,8 +1,17 @@
 import type { Metadata } from "next"
-import { notFound } from "next/navigation"
+import { headers } from "next/headers"
+import { notFound, redirect } from "next/navigation"
 
 import { StockPageShell } from "@/components/stock/stock-page-shell"
-import { getScannerResult, getScannerStockSlugs, normalizeStockSymbol } from "@/lib/scanner/board-data"
+import { hasFeature, resolveAccess } from "@/lib/entitlements"
+import { createInternalAccessToken } from "@/lib/internal-api-access"
+import {
+  getScannerResult,
+  getScannerStockSlugs,
+  hasBackendConfigured,
+  normalizeStockSymbol,
+} from "@/lib/scanner/board-data"
+import { fetchSymbolCandles } from "@/lib/scanner/api"
 import { buildPageMetadata } from "@/lib/seo/metadata"
 
 export const dynamicParams = true
@@ -23,23 +32,50 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { symbol } = await params
   const canonical = normalizeStockSymbol(symbol)
-  const result = await getScannerResult(canonical)
-  if (!result) notFound()
 
   return buildPageMetadata({
-    title: `${result.symbol} setup details`,
-    description: `Daily chart, scanner checks, and key levels for ${result.companyName} (${result.symbol}). Educational only — not indexed.`,
+    title: `${canonical.toUpperCase()} setup details`,
+    description: `Daily chart, scanner checks, and key levels for ${canonical.toUpperCase()}. Educational only — not indexed.`,
     path: `/stocks/${canonical}`,
     noIndex: true,
     robots: { index: false, follow: true },
   })
 }
 
-export default async function StockPage({ params }: { params: Promise<{ symbol: string }> }) {
+export default async function StockPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ symbol: string }>
+  searchParams: Promise<{ preset?: string }>
+}) {
   const { symbol } = await params
   const canonical = normalizeStockSymbol(symbol)
-  const result = await getScannerResult(canonical)
+  const requestedPreset = (await searchParams).preset
+  const preset = requestedPreset === "strict" ? "strict" : "standard"
+  let accessToken: string | undefined
+
+  if (preset === "strict") {
+    const access = await resolveAccess(await headers())
+    if (!hasFeature(access, "scanner.strict")) {
+      redirect("/scanners/minervini-vcp/strict")
+    }
+    accessToken = createInternalAccessToken(access) ?? undefined
+  }
+
+  const result = await getScannerResult(canonical, preset, { accessToken })
   if (!result) notFound()
 
-  return <StockPageShell result={result} />
+  const isLiveData = hasBackendConfigured()
+  let enriched = result
+  if (isLiveData) {
+    try {
+      const candlePayload = await fetchSymbolCandles(canonical.toUpperCase())
+      enriched = { ...result, candles: candlePayload.candles }
+    } catch {
+      enriched = { ...result, candles: [] }
+    }
+  }
+
+  return <StockPageShell result={enriched} isLiveData={isLiveData} />
 }

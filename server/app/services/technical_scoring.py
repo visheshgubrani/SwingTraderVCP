@@ -200,8 +200,22 @@ def evaluate_technical_setup(
         "within_52w_high_guardrail": (
             distance_52w_high_pct <= config.max_distance_52w_high_pct
         ),
+        "rs_above_minimum": (
+            config.min_rs_rating is None or rs_rating >= config.min_rs_rating
+        ),
+        "atr_contraction_within_limit": (
+            config.max_atr_proximity_factor is None
+            or atr_proximity_factor <= config.max_atr_proximity_factor
+        ),
+        "bollinger_contraction_within_limit": (
+            config.max_bb_width_percentile is None
+            or values["bb_width_percentile"] <= config.max_bb_width_percentile
+        ),
+        "volume_dry_up_within_limit": (
+            config.max_volume_dry_up_ratio is None
+            or values["volume_dry_up_ratio"] <= config.max_volume_dry_up_ratio
+        ),
     }
-    eligible = all(eligibility.values())
 
     relationship_zero_miss = config.stage2_relationship_zero_miss_pct
     core_points = {
@@ -400,6 +414,11 @@ def evaluate_technical_setup(
 
     raw_total = sum(component["points"] for component in components.values())
     score = round(max(0.0, min(100.0, raw_total)), 2)
+    eligibility["technical_score_above_minimum"] = (
+        config.minimum_technical_score is None
+        or score >= config.minimum_technical_score
+    )
+    eligible = all(eligibility.values())
 
     return {
         "eligible": eligible,

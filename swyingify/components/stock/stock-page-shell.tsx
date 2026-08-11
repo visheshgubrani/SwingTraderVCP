@@ -8,7 +8,13 @@ import { StockDetailView } from "@/components/stock/stock-detail-view"
 import "@/components/stock/stock.css"
 import type { ScannerResultPreview } from "@/lib/scanner/types"
 
-export function StockPageShell({ result }: { result: ScannerResultPreview }) {
+export function StockPageShell({
+  result,
+  isLiveData = false,
+}: {
+  result: ScannerResultPreview
+  isLiveData?: boolean
+}) {
   return (
     <div
       className={`landing scanner-board min-h-screen overflow-x-hidden ${GeistSans.variable} ${GeistMono.variable}`}
@@ -21,7 +27,7 @@ export function StockPageShell({ result }: { result: ScannerResultPreview }) {
     >
       <LandingNav showScannerCta={false} active="scanner" />
       <main>
-        <StockDetailView result={result} />
+        <StockDetailView result={result} isLiveData={isLiveData} />
       </main>
     </div>
   )

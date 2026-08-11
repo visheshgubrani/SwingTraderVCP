@@ -30,6 +30,9 @@ architecture and component-boundary source of truth.
 - `migrations/010_saas_scan_templates.sql` - adds `scan_templates` and extends
   `scan_runs` with `template_id`, `visibility`, `owner_user_id`, `as_of_date`
   for Swyingify global daily Standard scans.
+- `migrations/011_saas_entitlements_and_strict.sql` - adds the Better Auth
+  admin role, provider-neutral SaaS subscription state, and the paid Minervini
+  Strict template. Runtime enforcement remains in the Swyingify Next.js BFF.
 
 ## Domain Layout
 

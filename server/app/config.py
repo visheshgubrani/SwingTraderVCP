@@ -5,6 +5,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # Fail closed when a deployment forgets to declare its environment.
+    app_environment: Literal["development", "test", "production"] = "production"
     database_url: str = "postgresql+asyncpg://algo:algo@localhost:5480/algo_trading"
     redis_url: str = "redis://localhost:6380/0"
     # redis-py 8 defaults socket_timeout=5s; arq does not override it. Tune for long jobs.
@@ -24,6 +26,9 @@ class Settings(BaseSettings):
     fyers_app_id: str = ""
     fyers_secret_key: str = ""
     fyers_redirect_uri: str = "http://127.0.0.1:3000/callback"
+    # Where the GET /auth/callback browser bounce should land after Fyers OAuth.
+    # Defaults to the personal Vite app; set to the public client URL on the VPS.
+    frontend_public_url: str = "http://localhost:5173"
 
     scheduler_timezone: str = "Asia/Kolkata"
     eod_sync_enabled: bool = True

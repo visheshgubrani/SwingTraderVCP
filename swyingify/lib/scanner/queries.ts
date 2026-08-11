@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query"
 
-import { fetchStandardLatest, fetchStandardResults } from "./api"
+import { fetchScannerLatest, fetchScannerResults } from "./api"
 import { getPreviewResults } from "./fixtures"
 import type { ScannerLatestMeta, ScannerPreset, ScannerResultPreview } from "./types"
 
@@ -19,26 +19,30 @@ function apiConfigured(): boolean {
   return Boolean(process.env.API_URL?.trim() || process.env.NEXT_PUBLIC_API_URL?.trim())
 }
 
-async function loadStandardResults(): Promise<ScannerResultPreview[]> {
+async function loadResults(
+  preset: Exclude<ScannerPreset, "custom">,
+): Promise<ScannerResultPreview[]> {
   try {
-    const latest = await fetchStandardLatest({ cache: "no-store" })
+    const latest = await fetchScannerLatest(preset, { cache: "no-store" })
     if (latest.status !== "succeeded") return []
-    return await fetchStandardResults({ cache: "no-store" })
+    return await fetchScannerResults(preset, { cache: "no-store" })
   } catch {
-    if (!apiConfigured()) return getPreviewResults("standard")
+    if (!apiConfigured() && preset === "standard") return getPreviewResults("standard")
     return []
   }
 }
 
-async function loadStandardLatest(): Promise<ScannerLatestMeta> {
+async function loadLatest(
+  preset: Exclude<ScannerPreset, "custom">,
+): Promise<ScannerLatestMeta> {
   try {
-    return await fetchStandardLatest({ cache: "no-store" })
+    return await fetchScannerLatest(preset, { cache: "no-store" })
   } catch {
-    if (!apiConfigured()) {
+    if (!apiConfigured() && preset === "standard") {
       const preview = getPreviewResults("standard")
       return {
         family: "minervini",
-        code: "standard",
+        code: preset,
         asOfDate: preview[0]?.asOfDate ?? null,
         status: "preview",
         completedAt: null,
@@ -49,7 +53,7 @@ async function loadStandardLatest(): Promise<ScannerLatestMeta> {
     }
     return {
       family: "minervini",
-      code: "standard",
+      code: preset,
       asOfDate: null,
       status: "error",
       completedAt: null,
@@ -60,20 +64,24 @@ async function loadStandardLatest(): Promise<ScannerLatestMeta> {
   }
 }
 
-export function scannerResultsQuery(preset: ScannerPreset = "standard") {
+export function scannerResultsQuery(
+  preset: Exclude<ScannerPreset, "custom"> = "standard",
+) {
   return queryOptions({
     queryKey: scannerKeys.results(preset),
-    queryFn: loadStandardResults,
+    queryFn: () => loadResults(preset),
     staleTime: 30_000,
     gcTime: 30 * 60 * 1000,
     refetchOnWindowFocus: true,
   })
 }
 
-export function scannerLatestQuery() {
+export function scannerLatestQuery(
+  preset: Exclude<ScannerPreset, "custom"> = "standard",
+) {
   return queryOptions({
-    queryKey: scannerKeys.latest(),
-    queryFn: loadStandardLatest,
+    queryKey: [...scannerKeys.latest(), preset],
+    queryFn: () => loadLatest(preset),
     staleTime: 15_000,
     gcTime: 30 * 60 * 1000,
     refetchInterval: 60_000,

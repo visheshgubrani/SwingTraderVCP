@@ -520,7 +520,7 @@
     }
   ],
   "notes": [
-    "Live default remains vcp_score_v2 until this report is reviewed.",
+    "Live personal-scanner default is vcp_score_v3; v2 remains available for comparison and replay.",
     "Eligible count is intentionally identical: v3 changes scoring, not gates.",
     "Use grade A+B (or a lower shortlist_limit) as the actionable shortlist proxy.",
     "Eyeball v3_top20 for setup quality before flipping the default."

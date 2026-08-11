@@ -1,8 +1,8 @@
 import { betterAuth } from "better-auth"
 import { nextCookies } from "better-auth/next-js"
-import { Pool } from "pg"
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+import { db } from "@/lib/db"
+
 const baseURL = process.env.BETTER_AUTH_URL ?? "http://localhost:3000"
 const secret = process.env.BETTER_AUTH_SECRET ?? "swyingify-local-development-secret-change-me-please"
 
@@ -16,7 +16,17 @@ export const auth = betterAuth({
   appName: "Swyingify",
   baseURL,
   secret,
-  database: pool,
+  database: db,
+  user: {
+    additionalFields: {
+      role: {
+        type: "string",
+        required: true,
+        defaultValue: "user",
+        input: false,
+      },
+    },
+  },
   emailAndPassword: {
     enabled: true,
     minPasswordLength: 8,

@@ -41,6 +41,9 @@ export function LandingNav({ showScannerCta = true, active = "home" }: LandingNa
           <Link href="/methodology" className={cn(active === "trust" && "is-active")}>
             Methodology
           </Link>
+          <Link href="/pricing">
+            Pricing
+          </Link>
         </div>
         <div className="landing-nav-auth">
           {!isPending && user ? (

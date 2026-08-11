@@ -8,7 +8,7 @@ import "@/components/landing/landing.css"
 
 type MarketingShellProps = {
   children: ReactNode
-  active?: "home" | "scanners" | "learn" | "trust"
+  active?: "home" | "scanners" | "learn" | "trust" | "scanner"
   showScannerCta?: boolean
   /** When false, omit the shared footer (pages that render their own). */
   withFooter?: boolean

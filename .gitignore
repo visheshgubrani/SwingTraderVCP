@@ -9,6 +9,10 @@ __pycache__/
 .env
 .env.local
 .env.*.local
+.env.prod
+!.env.prod.example
+!server/.env.example
+!swyingify/.env.example
 
 # Build
 dist/

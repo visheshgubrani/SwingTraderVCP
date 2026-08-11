@@ -1,4 +1,4 @@
-import type { ScannerResultPreview } from "@/lib/scanner/types"
+import type { DailyCandle, ScannerResultPreview } from "@/lib/scanner/types"
 
 export type StockLevels = {
   high52: number
@@ -16,18 +16,56 @@ export type StockCheck = {
   note: string
 }
 
-export function deriveStockLevels(result: ScannerResultPreview): StockLevels {
+const MIN_CANDLES_FOR_RANGE_LEVELS = 20
+
+function levelsFromPctFallback(result: ScannerResultPreview): Pick<StockLevels, "high52" | "low52" | "prevClose"> {
   const pctFromHigh = result.pctFrom52WeekHigh
   const high52 = result.close / (1 - pctFromHigh / 100)
   const low52 = high52 * 0.66
   const prevClose = result.close / (1 + result.dayChangePct / 100)
+  return { high52, low52, prevClose }
+}
+
+export function deriveStockLevels(
+  result: ScannerResultPreview,
+  candles: DailyCandle[] = result.candles ?? [],
+): StockLevels {
   const pivot = result.close * 0.985
   const baseLow = pivot * 0.92
   const baseHigh = pivot * 1.03
-  return { high52, low52, pivot, baseLow, baseHigh, prevClose }
+
+  if (candles.length >= MIN_CANDLES_FOR_RANGE_LEVELS) {
+    let high52 = candles[0]!.high
+    let low52 = candles[0]!.low
+    for (const bar of candles) {
+      if (bar.high > high52) high52 = bar.high
+      if (bar.low < low52) low52 = bar.low
+    }
+    const prevClose =
+      candles.length >= 2 ? candles[candles.length - 2]!.close : result.close / (1 + result.dayChangePct / 100)
+    return { high52, low52, pivot, baseLow, baseHigh, prevClose }
+  }
+
+  const fallback = levelsFromPctFallback(result)
+  return { ...fallback, pivot, baseLow, baseHigh }
 }
 
-export function buildStockChecks(result: ScannerResultPreview, levels: StockLevels): StockCheck[] {
+export function buildStockChecks(result: ScannerResultPreview): StockCheck[] {
+  const components = result.fingerprint?.components ?? []
+  if (components.length === 0) {
+    return legacyBuildStockChecks(result)
+  }
+
+  return components.map((component) => ({
+    key: component.key,
+    label: component.label,
+    pass: component.status !== "watch",
+    note: component.summary,
+  }))
+}
+
+/** Preview fixtures when fingerprint is empty. */
+function legacyBuildStockChecks(result: ScannerResultPreview): StockCheck[] {
   const pctFromHigh = result.pctFrom52WeekHigh
   const bbPct = Math.max(6, Math.round(48 - result.technicalScore * 0.4))
 
@@ -69,6 +107,15 @@ export function formatStockDate(d = new Date()) {
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
   const day = (d.getDate() < 10 ? "0" : "") + d.getDate()
   return `${day} ${months[d.getMonth()]} ${d.getFullYear()}`
+}
+
+export function formatStockDateFromIso(iso: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso.trim())
+  if (!match) return formatStockDate()
+  const year = Number(match[1])
+  const month = Number(match[2]) - 1
+  const day = Number(match[3])
+  return formatStockDate(new Date(year, month, day))
 }
 
 export function formatInrWhole(value: number) {

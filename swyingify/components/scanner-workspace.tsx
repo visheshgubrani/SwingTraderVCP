@@ -22,6 +22,8 @@ import type { ScannerPreset, ScannerResultPreview } from "@/lib/scanner/types"
 
 const presetCopy: Record<ScannerPreset, { label: string; description: string }> = {
   standard: { label: "Standard", description: "A focused shortlist with stronger contraction and trend alignment." },
+  strict: { label: "Strict", description: "A tighter shortlist with every premium gate applied." },
+  custom: { label: "Custom", description: "A guided scan using your selected thresholds." },
 }
 
 const sortOptions = ["score", "rs", "nearHigh", "price"] as const

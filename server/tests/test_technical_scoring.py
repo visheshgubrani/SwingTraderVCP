@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 from pydantic import ValidationError
 
-from app.services.screening_config import TechnicalScreeningConfig
+from app.services.screening_config import (
+    SAAS_MINERVINI_STANDARD_CONFIG,
+    TechnicalScreeningConfig,
+    merge_template_config,
+)
 from app.services.technical_scoring import (
     evaluate_technical_setup,
     linear_score,
@@ -200,6 +204,34 @@ class TechnicalScoringV2Tests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             TechnicalScreeningConfig(rs_weight=21)
 
+    def test_optional_paid_scanner_gates_are_opt_in(self) -> None:
+        baseline = self.evaluate(scoring_frame(), rs_rating=70)
+        self.assertTrue(baseline["eligible"])
+        self.assertTrue(baseline["eligibility"]["rs_above_minimum"])
+
+        strict = self.config.model_copy(
+            update={
+                "min_rs_rating": 80,
+                "max_atr_proximity_factor": 1.0,
+                "max_bb_width_percentile": 0.2,
+                "max_volume_dry_up_ratio": 0.7,
+                "minimum_technical_score": 80,
+            }
+        )
+        rejected = evaluate_technical_setup(
+            scoring_frame(atr_ratio=1.1),
+            rs_rating=70,
+            history_days=252,
+            config=strict,
+        )
+
+        self.assertFalse(rejected["eligible"])
+        self.assertFalse(rejected["eligibility"]["rs_above_minimum"])
+        self.assertFalse(rejected["eligibility"]["atr_contraction_within_limit"])
+        self.assertTrue(rejected["eligibility"]["bollinger_contraction_within_limit"])
+        self.assertTrue(rejected["eligibility"]["volume_dry_up_within_limit"])
+        self.assertTrue(rejected["eligibility"]["technical_score_above_minimum"])
+
 
 class TechnicalScoringV3Tests(unittest.TestCase):
     def setUp(self) -> None:
@@ -213,8 +245,24 @@ class TechnicalScoringV3Tests(unittest.TestCase):
             config=self.config,
         )
 
-    def test_default_remains_v2_until_shadow_flip(self) -> None:
-        self.assertEqual(TechnicalScreeningConfig().pipeline_version, "vcp_score_v2")
+    def test_default_uses_v3(self) -> None:
+        default = TechnicalScreeningConfig()
+
+        self.assertEqual(default.pipeline_version, "vcp_score_v3")
+        self.assertEqual(default.stage2_weight, 20.0)
+        self.assertEqual(default.contraction_weight, 20.0)
+
+    def test_saas_v2_template_remains_reproducible(self) -> None:
+        self.assertEqual(
+            SAAS_MINERVINI_STANDARD_CONFIG.pipeline_version,
+            "vcp_score_v2",
+        )
+
+        merged = merge_template_config({"pipeline_version": "vcp_score_v2"})
+
+        self.assertEqual(merged.pipeline_version, "vcp_score_v2")
+        self.assertEqual(merged.stage2_weight, 25.0)
+        self.assertEqual(merged.contraction_weight, 0.0)
 
     def test_perfect_setup_scores_100(self) -> None:
         result = self.evaluate(scoring_frame())

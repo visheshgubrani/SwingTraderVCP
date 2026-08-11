@@ -13,7 +13,29 @@ const useWebSocket =
         }
       ).default;
 
-const WS_URL = "ws://localhost:8000/ws";
+function resolveWsUrl(): string {
+  const explicit = import.meta.env.VITE_WS_URL as string | undefined;
+  if (explicit) {
+    return explicit;
+  }
+
+  const apiBase =
+    (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
+    "http://localhost:8000/api/v1";
+
+  try {
+    const url = new URL(apiBase);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.pathname = "/ws";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "ws://localhost:8000/ws";
+  }
+}
+
+const WS_URL = resolveWsUrl();
 
 export interface TickData {
   symbol: string;

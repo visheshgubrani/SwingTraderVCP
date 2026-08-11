@@ -6,10 +6,10 @@ import { CANONICAL_SCANNER_PATH } from "@/lib/seo/config"
 const ROWS = [
   {
     name: "Minervini VCP",
-    status: "Live",
+    status: "Live · Free + Pro",
     live: true,
     href: CANONICAL_SCANNER_PATH,
-    desc: "Stage 2 and volatility contraction pattern approximation for the Nifty 500. Standard top 25 updates after the close.",
+    desc: "Standard top 25 stays free. Pro adds a tighter Strict board and guided full-universe custom variants.",
   },
   {
     name: "William O’Neil (CAN SLIM)",

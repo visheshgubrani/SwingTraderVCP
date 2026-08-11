@@ -128,10 +128,15 @@ For the full component boundaries, state machines, and data flows, read
 │   ├── main.py             # FastAPI entrypoint
 │   └── run_worker.py       # arq entrypoint
 ├── architecture.md         # Detailed personal-system architecture
-├── docker-compose.yml      # Local PostgreSQL and Redis
+├── DEPLOY.md               # VPS / GHCR / Upstash production bring-up
+├── docker-compose.yml      # Alias of local Postgres + Redis
+├── docker-compose.dev.yml  # Local Postgres + Redis (start-dev.sh)
+├── docker-compose.prod.yml # VPS: Postgres + api + worker + client (+ saas)
 └── start-dev.sh            # Local multi-process launcher
 ```
 
+Production packaging lives in each app's `Dockerfile`. See [DEPLOY.md](DEPLOY.md)
+for the ARM VPS + GHCR flow.
 ## Quick start
 
 ### Prerequisites

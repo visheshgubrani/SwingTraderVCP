@@ -77,5 +77,5 @@ export function StockChart({ candles }: { candles: DailyCandle[] }) {
     }
   }, [candles])
 
-  return <div ref={containerRef} className="h-[330px] w-full" aria-label="Daily price and volume chart" />
+  return <div ref={containerRef} className="h-[330px] w-full" aria-label="Daily end-of-day price and volume chart" />
 }

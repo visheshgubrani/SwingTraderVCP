@@ -1,3 +1,5 @@
+import type { DailyCandle } from "@/lib/scanner/types"
+
 export type CheckKey = "stage2" | "rs" | "high" | "atr" | "bands" | "vol"
 
 export type ScanDemoItem = {
@@ -11,6 +13,8 @@ export type ScanDemoItem = {
   cut: number
   stage: string
   c: Record<CheckKey, 1 | 2 | 3>
+  /** Recent daily EOD bars from the scan/candle API (live landing only). */
+  dailyCandles?: DailyCandle[]
 }
 
 /** Hero aside shortlist — illustrative preview with real symbols */

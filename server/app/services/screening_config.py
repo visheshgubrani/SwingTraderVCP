@@ -10,8 +10,8 @@ class TechnicalScreeningConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    # Live default stays v2 until shadow-run validation flips it.
-    pipeline_version: PipelineVersion = "vcp_score_v2"
+    # Live default is v3; v2 remains available for replaying persisted runs.
+    pipeline_version: PipelineVersion = "vcp_score_v3"
 
     # Eligibility and indicator windows.
     minimum_history_days: int = Field(default=252, ge=252, le=504)
@@ -33,19 +33,27 @@ class TechnicalScreeningConfig(BaseModel):
     rs_line_lookback_days: int = Field(default=252, ge=63, le=504)
     rs_benchmark_symbol: str = Field(default="NSE:NIFTY500-INDEX")
 
+    # Optional hard eligibility gates. Defaults are disabled so personal scans
+    # and the public SaaS Standard board keep their existing behavior.
+    min_rs_rating: int | None = Field(default=None, ge=1, le=99)
+    max_atr_proximity_factor: float | None = Field(default=None, gt=0, le=5)
+    max_bb_width_percentile: float | None = Field(default=None, gt=0, le=1)
+    max_volume_dry_up_ratio: float | None = Field(default=None, gt=0, le=5)
+    minimum_technical_score: float | None = Field(default=None, ge=0, le=100)
+
     # Score weights. Active set must total 100 for the selected version.
-    stage2_weight: float = Field(default=25.0, ge=0, le=100)
-    stage2_core_check_points: float = Field(default=4.0, ge=0, le=25)
+    stage2_weight: float = Field(default=20.0, ge=0, le=100)
+    stage2_core_check_points: float = Field(default=3.0, ge=0, le=25)
     stage2_52w_low_points: float = Field(default=5.0, ge=0, le=25)
-    rs_weight: float = Field(default=20.0, ge=0, le=100)
-    rs_line_high_weight: float = Field(default=0.0, ge=0, le=100)
-    high_proximity_weight: float = Field(default=15.0, ge=0, le=100)
-    atr_contraction_weight: float = Field(default=15.0, ge=0, le=100)
-    bb_contraction_weight: float = Field(default=15.0, ge=0, le=100)
-    contraction_weight: float = Field(default=0.0, ge=0, le=100)
+    rs_weight: float = Field(default=15.0, ge=0, le=100)
+    rs_line_high_weight: float = Field(default=10.0, ge=0, le=100)
+    high_proximity_weight: float = Field(default=10.0, ge=0, le=100)
+    atr_contraction_weight: float = Field(default=0.0, ge=0, le=100)
+    bb_contraction_weight: float = Field(default=0.0, ge=0, le=100)
+    contraction_weight: float = Field(default=20.0, ge=0, le=100)
     volume_dry_up_weight: float = Field(default=10.0, ge=0, le=100)
-    up_down_volume_weight: float = Field(default=0.0, ge=0, le=100)
-    pocket_pivot_weight: float = Field(default=0.0, ge=0, le=100)
+    up_down_volume_weight: float = Field(default=10.0, ge=0, le=100)
+    pocket_pivot_weight: float = Field(default=5.0, ge=0, le=100)
 
     # Gentle, continuous score curves.
     stage2_relationship_zero_miss_pct: float = Field(default=2.0, gt=0, le=20)
@@ -81,22 +89,22 @@ class TechnicalScreeningConfig(BaseModel):
     @classmethod
     def for_version(cls, version: PipelineVersion) -> Self:
         """Return a fully-specified preset for the given score engine version."""
-        if version == "vcp_score_v2":
+        if version == "vcp_score_v3":
             return cls()
         return cls(
-            pipeline_version="vcp_score_v3",
-            stage2_weight=20.0,
-            stage2_core_check_points=3.0,
+            pipeline_version="vcp_score_v2",
+            stage2_weight=25.0,
+            stage2_core_check_points=4.0,
             stage2_52w_low_points=5.0,
-            rs_weight=15.0,
-            rs_line_high_weight=10.0,
-            high_proximity_weight=10.0,
-            atr_contraction_weight=0.0,
-            bb_contraction_weight=0.0,
-            contraction_weight=20.0,
+            rs_weight=20.0,
+            rs_line_high_weight=0.0,
+            high_proximity_weight=15.0,
+            atr_contraction_weight=15.0,
+            bb_contraction_weight=15.0,
+            contraction_weight=0.0,
             volume_dry_up_weight=10.0,
-            up_down_volume_weight=10.0,
-            pocket_pivot_weight=5.0,
+            up_down_volume_weight=0.0,
+            pocket_pivot_weight=0.0,
         )
 
     @model_validator(mode="after")
@@ -194,16 +202,24 @@ class TechnicalScreeningConfig(BaseModel):
 
 DEFAULT_TECHNICAL_SCREENING_CONFIG = TechnicalScreeningConfig()
 
-# Swyingify public Standard board: top 25, no P7 / LLM pass.
-SAAS_MINERVINI_STANDARD_CONFIG = TechnicalScreeningConfig(
-    shortlist_limit=25,
-    fundamental_limit=0,
+# Swyingify templates remain explicitly versioned independently of the personal
+# scanner default. Public Standard is still v2 until its template version moves.
+SAAS_MINERVINI_STANDARD_CONFIG = TechnicalScreeningConfig.for_version(
+    "vcp_score_v2"
+).model_copy(
+    update={"shortlist_limit": 25, "fundamental_limit": 0},
 )
 
 
 def merge_template_config(raw: dict | None) -> TechnicalScreeningConfig:
     """Merge a template JSON blob onto the SaaS Standard defaults."""
-    base = SAAS_MINERVINI_STANDARD_CONFIG.model_dump()
+    version = (raw or {}).get(
+        "pipeline_version",
+        SAAS_MINERVINI_STANDARD_CONFIG.pipeline_version,
+    )
+    base = TechnicalScreeningConfig.for_version(version).model_copy(
+        update={"shortlist_limit": 25, "fundamental_limit": 0}
+    ).model_dump()
     if raw:
         base.update(raw)
     return TechnicalScreeningConfig.model_validate(base)

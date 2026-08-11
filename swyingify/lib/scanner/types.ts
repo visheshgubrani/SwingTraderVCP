@@ -1,4 +1,4 @@
-export type ScannerPreset = "standard"
+export type ScannerPreset = "standard" | "strict" | "custom"
 
 export type QualificationKey =
   | "stage2"
@@ -78,4 +78,26 @@ export interface ScannerQuery {
   preset?: ScannerPreset
   search?: string
   sort?: "score" | "rs" | "nearHigh" | "price"
+}
+
+export type VariantContraction = "balanced" | "tight" | "very_tight"
+export type VariantVolumeDryUp = "normal" | "strong" | "extreme"
+
+export interface ScannerVariantInput {
+  minRsRating: 60 | 70 | 80 | 90
+  maxDistance52WeekHighPct: 5 | 10 | 15 | 25
+  minAdtvCrore: 10 | 25 | 50 | 100
+  stage2ChecksRequired: 4 | 5
+  contraction: VariantContraction
+  volumeDryUp: VariantVolumeDryUp
+  minimumTechnicalScore: 70 | 80 | 90
+}
+
+export interface ScannerVariantRun {
+  runId: string
+  status: string
+  asOfDate: string
+  quotaRemaining: number
+  results: ScannerResultPreview[]
+  message?: string | null
 }

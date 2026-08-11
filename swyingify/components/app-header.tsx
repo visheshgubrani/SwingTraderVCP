@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import { useState } from "react"
-import { BookOpenIcon, LogOutIcon, MenuIcon, ScanLineIcon, UserRoundIcon, XIcon } from "lucide-react"
+import { BookOpenIcon, CreditCardIcon, LogOutIcon, MenuIcon, ScanLineIcon, UserRoundIcon, XIcon } from "lucide-react"
 
 import { BrandMark } from "@/components/brand-mark"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -74,6 +74,15 @@ export function AppHeader() {
                   <p className="truncate text-xs text-muted-foreground">{user.email}</p>
                 </div>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem render={<Link href="/account" />}>
+                  <UserRoundIcon data-icon="inline-start" />
+                  Account access
+                </DropdownMenuItem>
+                <DropdownMenuItem render={<Link href="/pricing" />}>
+                  <CreditCardIcon data-icon="inline-start" />
+                  Pricing
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={handleSignOut}>
                   <LogOutIcon data-icon="inline-start" />
                   Sign out
@@ -107,6 +116,9 @@ export function AppHeader() {
             </Link>
             <Link href="/learn" onClick={() => setMobileOpen(false)} className="rounded-lg px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
               <span className="flex items-center gap-2"><BookOpenIcon data-icon="inline-start" />Learn</span>
+            </Link>
+            <Link href="/pricing" onClick={() => setMobileOpen(false)} className="rounded-lg px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
+              Pricing
             </Link>
             <Link href={CANONICAL_SCANNER_PATH} onClick={() => setMobileOpen(false)} className="mt-1 rounded-lg bg-primary/10 px-3 py-2.5 text-sm font-medium text-primary">
               Minervini VCP

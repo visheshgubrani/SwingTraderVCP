@@ -1,3 +1,9 @@
+# Local development data plane (Postgres + Redis).
+# Prefer: docker compose -f docker-compose.dev.yml up -d
+# Kept so existing `docker compose up` habits keep working.
+
+name: swingtradervcp
+
 services:
   postgres:
     image: postgres:17-alpine

@@ -13,6 +13,26 @@ class RedisPoolConfigTests(unittest.TestCase):
         redis_settings = redis_settings_from_config()
         self.assertEqual(redis_settings.conn_timeout, int(settings.redis_connect_timeout_seconds))
 
+    def test_redis_settings_preserve_upstash_tls_and_password(self) -> None:
+        original = settings.redis_url
+        try:
+            settings.redis_url = (
+                "rediss://default:upstash-secret@example.upstash.io:6379/0"
+            )
+            redis_settings = redis_settings_from_config()
+        finally:
+            settings.redis_url = original
+
+        self.assertEqual(redis_settings.host, "example.upstash.io")
+        self.assertEqual(redis_settings.port, 6379)
+        self.assertEqual(redis_settings.username, "default")
+        self.assertEqual(redis_settings.password, "upstash-secret")
+        self.assertTrue(redis_settings.ssl)
+        self.assertEqual(
+            redis_settings.conn_timeout,
+            int(settings.redis_connect_timeout_seconds),
+        )
+
     def test_worker_max_jobs_is_one(self) -> None:
         self.assertEqual(WorkerSettings.max_jobs, 1)
 

@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Required for the production Docker image (copies `.next/standalone`).
+  output: "standalone",
   // The sandbox's subprocess stdio drops the TypeScript CLI's --showConfig
   // output. Keep Next's compiler-API checker for deterministic builds here.
   experimental: {

@@ -39,7 +39,7 @@ class SaasDailyCandle(BaseModel):
 
 class SaasScanLatestResponse(BaseModel):
     family: str = "minervini"
-    code: str = "standard"
+    code: Literal["standard", "strict"] = "standard"
     asOfDate: str | None = None
     status: str
     completedAt: datetime.datetime | None = None
@@ -53,7 +53,7 @@ class SaasScannerResult(BaseModel):
     symbol: str
     companyName: str
     sector: str
-    preset: Literal["standard"] = "standard"
+    preset: Literal["standard", "strict", "custom"] = "standard"
     rank: int
     asOfDate: str
     close: float
@@ -72,7 +72,7 @@ class SaasScannerResult(BaseModel):
 
 class SaasScanResultsResponse(BaseModel):
     family: str = "minervini"
-    code: str = "standard"
+    code: Literal["standard", "strict"] = "standard"
     asOfDate: str
     status: str
     completedAt: datetime.datetime | None = None
@@ -85,3 +85,22 @@ class SaasCandlesResponse(BaseModel):
     companyName: str
     asOfDate: str | None = None
     candles: list[SaasDailyCandle]
+
+
+class SaasVariantCreateRequest(BaseModel):
+    minRsRating: Literal[60, 70, 80, 90] = 80
+    maxDistance52WeekHighPct: Literal[5, 10, 15, 25] = 15
+    minAdtvCrore: Literal[10, 25, 50, 100] = 25
+    stage2ChecksRequired: Literal[4, 5] = 5
+    contraction: Literal["balanced", "tight", "very_tight"] = "tight"
+    volumeDryUp: Literal["normal", "strong", "extreme"] = "strong"
+    minimumTechnicalScore: Literal[70, 80, 90] = 80
+
+
+class SaasVariantRunResponse(BaseModel):
+    runId: UUID
+    status: str
+    asOfDate: str
+    quotaRemaining: int
+    results: list[SaasScannerResult] = Field(default_factory=list)
+    message: str | None = None

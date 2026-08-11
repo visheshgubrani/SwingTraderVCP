@@ -8,6 +8,7 @@ CREATE TABLE "user" (
     email text NOT NULL UNIQUE,
     "emailVerified" boolean NOT NULL DEFAULT false,
     image text,
+    role text NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
     "createdAt" timestamptz NOT NULL DEFAULT now(),
     "updatedAt" timestamptz NOT NULL DEFAULT now()
 );
@@ -63,6 +64,39 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+CREATE TABLE saas_subscriptions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id text NOT NULL REFERENCES "user" (id) ON DELETE CASCADE,
+    provider text NOT NULL CHECK (provider IN ('manual', 'razorpay')),
+    plan_code text NOT NULL CHECK (plan_code IN ('pro')),
+    status text NOT NULL DEFAULT 'pending' CHECK (
+        status IN (
+            'pending', 'trialing', 'active', 'past_due', 'paused',
+            'cancelled', 'expired'
+        )
+    ),
+    provider_customer_id text,
+    provider_subscription_id text,
+    current_period_start timestamptz,
+    current_period_end timestamptz,
+    cancel_at_period_end boolean NOT NULL DEFAULT false,
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX saas_subscriptions_user_status_idx
+ON saas_subscriptions (user_id, status, current_period_end DESC);
+
+CREATE UNIQUE INDEX saas_subscriptions_provider_reference_uidx
+ON saas_subscriptions (provider, provider_subscription_id)
+WHERE provider_subscription_id IS NOT NULL;
+
+CREATE TRIGGER saas_subscriptions_set_updated_at
+BEFORE UPDATE ON saas_subscriptions
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE instruments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

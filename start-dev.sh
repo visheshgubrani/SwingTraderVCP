@@ -14,7 +14,7 @@ CLIENT_DIR="$ROOT_DIR/client"
 RUNTIME_DIR="$ROOT_DIR/.dev-runtime"
 
 API_PORT=8000
-UI_PORT=3000
+UI_PORT=5173
 
 API_PID_FILE="$RUNTIME_DIR/api.pid"
 WORKER_PID_FILE="$RUNTIME_DIR/worker.pid"
@@ -197,7 +197,7 @@ main() {
   free_port "$UI_PORT"
 
   echo "Ensuring Postgres and Redis are running..."
-  (cd "$ROOT_DIR" && docker compose up -d --wait)
+  (cd "$ROOT_DIR" && docker compose -f docker-compose.dev.yml up -d --wait)
 
   start_service "API" "$API_PID_FILE" "$API_LOG" \
     bash -c 'cd "$1" && exec uv run uvicorn main:app --host 127.0.0.1 --port 8000 --reload' _ "$SERVER_DIR"

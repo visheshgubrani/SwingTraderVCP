@@ -10,7 +10,7 @@ import {
   type IChartApi,
 } from "lightweight-charts"
 
-import type { GeneratedCandle } from "@/lib/scanner/generate-stock-candles"
+import type { DailyCandle } from "@/lib/scanner/types"
 
 export function StockChartDark({
   candles,
@@ -18,18 +18,20 @@ export function StockChartDark({
   lastClose,
   dayChangePct,
   rangeLabel,
+  isLiveData = true,
 }: {
-  candles: GeneratedCandle[]
+  candles: DailyCandle[]
   symbol: string
   lastClose: number
   dayChangePct: number
   rangeLabel: string
+  isLiveData?: boolean
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
 
   useEffect(() => {
-    if (!containerRef.current) return
+    if (!containerRef.current || candles.length === 0) return
 
     const chart = createChart(containerRef.current, {
       autoSize: true,
@@ -87,8 +89,22 @@ export function StockChartDark({
     }
   }, [candles])
 
+  if (candles.length === 0) {
+    return (
+      <div
+        className="flex h-[300px] w-full items-center justify-center min-[901px]:h-[460px]"
+        role="status"
+      >
+        <p className="max-w-[36ch] text-center text-sm text-[var(--landing-muted)]">
+          Daily chart data is not available for this symbol right now.
+        </p>
+      </div>
+    )
+  }
+
   const up = dayChangePct >= 0
-  const ariaLabel = `Daily price chart for ${symbol}. Last close ₹${lastClose.toLocaleString("en-IN")}, ${up ? "up" : "down"} ${Math.abs(dayChangePct).toFixed(1)}% in the ${rangeLabel} view. Illustrative data.`
+  const dataNote = isLiveData ? "End-of-day data." : "Illustrative preview data."
+  const ariaLabel = `Daily price chart for ${symbol}. Last close ₹${lastClose.toLocaleString("en-IN")}, ${up ? "up" : "down"} ${Math.abs(dayChangePct).toFixed(1)}% in the ${rangeLabel} view. ${dataNote}`
 
   return (
     <div

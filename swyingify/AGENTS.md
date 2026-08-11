@@ -139,6 +139,10 @@ roster.
   **Past / as-of scan history** requires sign-in when that surface is built.
   Watchlists, Strict, and paid variant runs still require auth / paid later.
 - No FII/FPI data, no broker integration, no auto-entry from scores.
+- Entitlement enforcement is **production-only**. Development/test environments
+  open all SaaS capabilities. Production accounts with `role=admin` (or the
+  server-only bootstrap admin email allowlist) also bypass paid checks for QA.
+  Protected mutations and reads must still pass through the Next BFF.
 
 ### V2 — later (do not build until asked)
 
@@ -155,12 +159,12 @@ roster.
 | --- | --- | --- | --- |
 | Browse Minervini Standard today (top 25) | Yes | Yes | Yes |
 | Basic results table + chart / spark | Yes | Yes | Yes |
-| Past / as-of scan history | No (sign-in) | Yes | Yes |
+| Past / as-of scan history | No (sign-in) | Latest 20 sessions | Full |
 | Wide preset (when reintroduced) | TBD | TBD | TBD |
-| Strict / tight VCP, OBV / advanced presets | No | Upgrade prompt | Yes |
+| Strict / tight VCP, OBV / advanced presets | Public count only | Upgrade prompt | Yes |
 | Deeper stats / component breakdown | Limited | Limited | Full |
 | Personal watchlists | No | Yes | Yes |
-| Custom tighten / allowlisted variant run | No | No | Yes (quota) |
+| Custom tighten / allowlisted variant run | No | No | Yes (5/day) |
 | Other legend families | — | — | V2+ |
 
 Legal copy on public scanners: educational / not SEBI-registered / not
@@ -234,6 +238,16 @@ tables.
    in §3 without asking.
 9. **Do not confuse agents:** SaaS work → this file; personal money path →
    root `AGENTS.md`.
+10. **Paywalls are production-only.** Development/test and production admins
+    have full feature access. This bypass is for product development and QA;
+    it never grants access to personal money-path APIs.
+11. **Cashfree is not yet an approved billing provider.** Adding it requires an
+    explicit update to the locked billing decision in §3; keep current billing
+    state provider-aware without activating Cashfree checkout/webhooks.
+12. **FastAPI paid access is BFF-only.** Next resolves Better Auth and
+    subscription state, then mints a short-lived HMAC assertion containing the
+    subject and granted features. FastAPI must not trust caller-declared user
+    IDs or accept the raw shared key as a paid entitlement.
 
 ---
 
@@ -246,8 +260,8 @@ Status tags: `[done]`, `[next]`, `[ ]`.
 | S0 | Dual-product agent docs (this file + root §0) | `[done]` |
 | S1 | Better Auth + landing + scanner shell | `[done]` |
 | S2 | Global daily Minervini Standard (top 25); public results + chart; Wide deferred | `[done]` |
-| S3 | Razorpay entitlements + Strict template behind paywall | `[ ]` |
-| S4 | Watchlists + richer stats + paid allowlisted variants | `[ ]` |
+| S3 | Razorpay entitlements + Strict template behind paywall | `[partial]` — production entitlement enforcement, admin/dev bypass, subscription state, Strict template/API/UI done; Razorpay checkout/webhooks pending |
+| S4 | Watchlists + richer stats + paid allowlisted variants | `[partial]` — guided 5/day custom variants and 20-session/free archive done; watchlists, alerts, exports pending |
 | V2 | O’Neil → Qullamaggie → Darvas → Livermore (one-by-one); optional S&P 500 | `[ ]` |
 
 Do not reorder or pull V2 universes/legends into V1 without an explicit user

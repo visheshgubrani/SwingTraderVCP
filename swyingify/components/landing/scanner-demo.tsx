@@ -103,8 +103,8 @@ export function ScannerDemo({ scans, asOfDate, isLiveData }: ScannerDemoProps) {
           <div className="border-b border-[var(--landing-border)] p-5 lg:border-b-0 lg:border-r">
             {item ? (
               <>
-                <VcpDemoChart item={item} />
-                <ChartMeta stage={item.stage} />
+                <VcpDemoChart item={item} isLiveData={isLiveData} />
+                <ChartMeta stage={item.stage} isLiveData={isLiveData} />
               </>
             ) : (
               <p className="text-sm text-[var(--landing-muted)]">Waiting for tonight&apos;s Standard shortlist.</p>
@@ -182,21 +182,26 @@ function DemoHead({
   )
 }
 
-function ChartMeta({ stage }: { stage: string }) {
+function ChartMeta({ stage, isLiveData }: { stage: string; isLiveData?: boolean }) {
   return (
     <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
       <div className="flex flex-wrap gap-4 font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-wider text-[var(--landing-muted)]">
-        <span className="inline-flex items-center gap-1.5">
-          <span className="inline-block h-0.5 w-[18px] bg-white/60" />
-          Stage 2 trend
-        </span>
-        <span className="inline-flex items-center gap-1.5">
-          <span className="inline-block w-[18px] border-t border-dashed border-white/40" />
-          Pivot
-        </span>
+        <span>Daily · EOD</span>
+        {!isLiveData ? (
+          <>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-0.5 w-[18px] bg-white/60" />
+              Stage 2 trend
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block w-[18px] border-t border-dashed border-white/40" />
+              Pivot
+            </span>
+          </>
+        ) : null}
         <span className="inline-flex items-center gap-1.5">
           <span className="inline-block size-2 bg-white/30" />
-          Volume dry-up
+          Volume
         </span>
       </div>
       <span className="font-[family-name:var(--font-landing-mono)] text-xs uppercase tracking-wider text-[var(--landing-muted)]">

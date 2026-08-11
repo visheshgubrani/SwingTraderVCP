@@ -1,5 +1,11 @@
 # SwingTraderVCP Server
 
+The backend defaults to `APP_ENVIRONMENT=production` and therefore fails
+closed. Set `APP_ENVIRONMENT=development` in the local `server/.env` (or
+`test` in tests) so paid scanner development does not require subscription
+fixtures. Protected production calls use short-lived HMAC assertions minted
+by Next from Better Auth sessions; FastAPI should remain BFF-only.
+
 ## P7 survivor-only fundamental annotations
 
 P7 runs as a separate arq job after a technical scan has persisted its

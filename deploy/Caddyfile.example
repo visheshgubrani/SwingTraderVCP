@@ -1,0 +1,27 @@
+# Caddy site blocks for SwingTraderVCP on the VPS.
+# Merge into your existing Caddyfile, then reload Caddy.
+#
+# DNS (A → 80.225.207.109):
+#   app.edurel.xyz  → personal client
+#   api.edurel.xyz  → FastAPI
+#
+# Compose binds these to loopback only:
+#   127.0.0.1:8090  client
+#   127.0.0.1:8002  api
+#   127.0.0.1:3002  swyingify (later, --profile saas)
+
+app.edurel.xyz {
+	encode gzip
+	reverse_proxy 127.0.0.1:8090
+}
+
+api.edurel.xyz {
+	encode gzip
+	reverse_proxy 127.0.0.1:8002
+}
+
+# Swyingify — enable later on its own domain, e.g.:
+# swyingify.com, www.swyingify.com {
+# 	encode gzip
+# 	reverse_proxy 127.0.0.1:3002
+# }

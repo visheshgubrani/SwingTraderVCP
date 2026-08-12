@@ -21,8 +21,8 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/visheshgubrani/swingtradervcp
-  VITE_API_BASE_URL: http://80.225.207.109:8002/api/v1
-  VITE_WS_URL: ws://80.225.207.109:8002/ws
+  VITE_API_BASE_URL: https://api.edurel.xyz/api/v1
+  VITE_WS_URL: wss://api.edurel.xyz/ws
 
 jobs:
   build:

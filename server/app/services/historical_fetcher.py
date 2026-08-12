@@ -301,7 +301,7 @@ async def run_historical_sync(
             is_async=True,
             client_id=settings.fyers_app_id,
             token=access_token,
-            log_path="",
+            log_path=settings.fyers_log_path,
         )
 
         upsert_query = text(

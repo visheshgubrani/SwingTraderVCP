@@ -110,7 +110,7 @@ async def run_data_validation(years: int = 2):
             is_async=True,
             client_id=settings.fyers_app_id,
             token=access_token,
-            log_path=""
+            log_path=settings.fyers_log_path,
         )
     else:
         validation_progress.log("WARNING: Fyers access token is missing or expired. Listing checking will assume first available candle as the listing date.")

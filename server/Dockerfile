@@ -33,13 +33,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM python:3.13-slim-bookworm AS runtime
 
-RUN useradd --create-home --uid 10001 appuser
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app \
+    && chown appuser:appuser /app
 
 WORKDIR /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    FYERS_LOG_PATH=/tmp
 
 COPY --from=builder --chown=appuser:appuser /app /app
 

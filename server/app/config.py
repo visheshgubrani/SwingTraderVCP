@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # Where the GET /auth/callback browser bounce should land after Fyers OAuth.
     # Defaults to the personal Vite app; set to the public client URL on the VPS.
     frontend_public_url: str = "http://localhost:5173"
+    # Directory for fyers-apiv3 FileHandlers (fyersApi.log / fyersRequests.log).
+    # Must be writable by the process user — use /tmp in containers.
+    fyers_log_path: str = "/tmp"
 
     scheduler_timezone: str = "Asia/Kolkata"
     eod_sync_enabled: bool = True

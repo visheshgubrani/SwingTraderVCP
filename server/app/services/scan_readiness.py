@@ -71,7 +71,7 @@ async def load_scan_readiness(
             text(
                 """
                 SELECT
-                    COUNT(c.id) AS session_count,
+                    COUNT(c.instrument_id) AS session_count,
                     (MAX(c.candle_start) AT TIME ZONE 'Asia/Kolkata')::date
                         AS latest_candle_date
                 FROM instruments i

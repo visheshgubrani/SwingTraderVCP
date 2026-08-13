@@ -23,6 +23,10 @@ from app.services.screening_ranker import (
     fundamental_selection_status,
     rank_and_cap_shortlist,
 )
+from app.services.scan_readiness import (
+    evaluate_scan_readiness,
+    scan_readiness_error,
+)
 from app.services.technical_scoring import evaluate_technical_setup
 
 logger = logging.getLogger(__name__)
@@ -96,7 +100,8 @@ async def load_rs_benchmark_closes(
     if synthetic.empty:
         raise ValueError(
             f"Unable to build RS benchmark: no {fyers_symbol} candles and "
-            "synthetic equal-weight index is empty."
+            "synthetic equal-weight index is empty. Register the index in "
+            "instruments and re-run historical sync (see migration 009 / schema seeds)."
         )
     return synthetic, "synthetic_equal_weight", "SYNTHETIC:NIFTY500-EW"
 
@@ -108,30 +113,33 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
     """
     logger.info("Starting technical scan run: %s", scan_run_id)
     
-    # 1. Update status to 'running'
+    # Atomically claim queued work. Duplicate ARQ deliveries become no-ops.
     async with async_session() as session:
-        update_run_query = text("""
+        claim_result = await session.execute(text("""
             UPDATE scan_runs
-            SET status = 'running', started_at = now()
-            WHERE id = :scan_run_id
-        """)
-        await session.execute(update_run_query, {"scan_run_id": scan_run_id})
+            SET
+                status = 'running',
+                started_at = now(),
+                completed_at = NULL,
+                error_message = NULL
+            WHERE id = :scan_run_id AND status = 'queued'
+            RETURNING technical_config, as_of_date
+        """), {"scan_run_id": scan_run_id})
+        claimed_run = claim_result.one_or_none()
         await session.commit()
 
+    if claimed_run is None:
+        logger.info(
+            "Ignoring technical scan delivery for %s because it is not queued.",
+            scan_run_id,
+        )
+        return
+
     try:
-        # Load the snapshot saved with this run so every shortlist is reproducible.
-        async with async_session() as session:
-            config_query = text("""
-                SELECT technical_config
-                FROM scan_runs
-                WHERE id = :scan_run_id
-            """)
-            config_result = await session.execute(
-                config_query,
-                {"scan_run_id": scan_run_id},
-            )
-            config_payload = config_result.scalar_one_or_none() or {}
-        config = TechnicalScreeningConfig.model_validate(config_payload)
+        # The claim returns the immutable run snapshot used for this execution.
+        config = TechnicalScreeningConfig.model_validate(
+            claimed_run.technical_config or {}
+        )
 
         # 2. Fetch active universe members
         async with async_session() as session:
@@ -152,9 +160,14 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
         logger.info("Loaded %s active Nifty 500 instruments.", len(instruments))
 
         # 3. Fetch candles for all instruments with windowing (trailing 450 calendar days ~ 310 trading days)
-        today = datetime.date.today()
-        window_start = today - datetime.timedelta(days=450)
+        reference_limit = claimed_run.as_of_date or datetime.date.today()
+        window_start = reference_limit - datetime.timedelta(days=450)
         start_dt = datetime.datetime.combine(window_start, datetime.time.min, tzinfo=datetime.timezone.utc)
+        end_dt = datetime.datetime.combine(
+            reference_limit + datetime.timedelta(days=1),
+            datetime.time.min,
+            tzinfo=datetime.timezone.utc,
+        )
         
         logger.info("Querying daily candles since %s...", window_start)
         async with async_session() as session:
@@ -167,10 +180,15 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     close_price,
                     volume
                 FROM market_candles
-                WHERE timeframe = '1d' AND candle_start >= :start_dt
+                WHERE timeframe = '1d'
+                  AND candle_start >= :start_dt
+                  AND candle_start < :end_dt
                 ORDER BY instrument_id, candle_start ASC
             """)
-            candles_res = await session.execute(candles_query, {"start_dt": start_dt})
+            candles_res = await session.execute(
+                candles_query,
+                {"start_dt": start_dt, "end_dt": end_dt},
+            )
             all_candles = candles_res.all()
 
         logger.info("Loaded %s candles. Grouping by instrument...", len(all_candles))
@@ -189,6 +207,29 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
         reference_eod_date = select_reference_eod_date(
             list(latest_dates_by_inst.values())
         )
+        if reference_eod_date is None:
+            raise ValueError("No Nifty 500 EOD candles are available to scan.")
+        if (
+            claimed_run.as_of_date is not None
+            and reference_eod_date != claimed_run.as_of_date
+        ):
+            raise ValueError(
+                "Candle coverage does not match the scan's persisted EOD date "
+                f"({reference_eod_date} != {claimed_run.as_of_date})."
+            )
+        readiness = evaluate_scan_readiness(
+            (
+                (
+                    len(candles_by_inst[inst_id]),
+                    latest_dates_by_inst.get(inst_id),
+                )
+                for inst_id in candles_by_inst
+            ),
+            reference_eod_date=reference_eod_date,
+            minimum_history_days=config.minimum_history_days,
+        )
+        if not readiness.scanner_ready:
+            raise ValueError(scan_readiness_error(readiness))
         stale_instrument_ids = {
             inst_id
             for inst_id in candles_by_inst
@@ -238,6 +279,13 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                 })
             except Exception as prep_err:
                 logger.exception("Error preparing indicators for %s: %s", inst.symbol, prep_err)
+
+        if len(prepared_stocks) < readiness.required_scoreable_instruments:
+            raise ValueError(
+                "Indicator preparation reduced the scoreable Nifty 500 universe "
+                f"to {len(prepared_stocks)}/{readiness.active_instruments}; "
+                f"{readiness.required_scoreable_instruments} required (95%)."
+            )
 
         index_closes: pd.Series | None = None
         rs_benchmark_source = "not_required"
@@ -403,9 +451,13 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             config.fundamental_limit,
         )
 
-        # 5. Insert results in batch
-        if survivors:
-            async with async_session() as session:
+        # Persist the complete result set and terminal run status atomically.
+        async with async_session() as session:
+            await session.execute(
+                text("DELETE FROM screening_results WHERE scan_run_id = :scan_run_id"),
+                {"scan_run_id": scan_run_id},
+            )
+            if survivors:
                 insert_query = text("""
                     INSERT INTO screening_results (
                         scan_run_id,
@@ -441,20 +493,15 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     )
                 """)
                 await session.execute(insert_query, survivors)
-                await session.commit()
-                logger.info("Saved screening results to database.")
-
-        # 6. Update scan run status to 'succeeded'
-        async with async_session() as session:
             success_query = text("""
                 UPDATE scan_runs
                 SET
                     status = 'succeeded',
                     completed_at = now(),
                     llm_config = CAST(:llm_config AS jsonb)
-                WHERE id = :scan_run_id
+                WHERE id = :scan_run_id AND status = 'running'
             """)
-            await session.execute(
+            success_result = await session.execute(
                 success_query,
                 {
                     "scan_run_id": scan_run_id,
@@ -463,7 +510,12 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     ),
                 },
             )
+            if success_result.rowcount != 1:
+                raise RuntimeError(
+                    "Scan run left the running state before results were committed."
+                )
             await session.commit()
+            logger.info("Saved screening results to database.")
 
         # P7 is intentionally a separate background job. Enqueue failures are
         # recorded on the annotations and never turn a valid technical scan
@@ -565,7 +617,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             fail_query = text("""
                 UPDATE scan_runs
                 SET status = 'failed', completed_at = now(), error_message = :error
-                WHERE id = :scan_run_id
+                WHERE id = :scan_run_id AND status = 'running'
             """)
             await session.execute(fail_query, {
                 "scan_run_id": scan_run_id,

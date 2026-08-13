@@ -1,4 +1,3 @@
-import datetime
 import json
 import logging
 import uuid
@@ -28,6 +27,7 @@ from app.services.fundamental_data import (
 from app.services.fundamental_llm import sanitize_provider_payload
 from app.services.fundamental_pass import p7_run_config
 from app.services.fundamental_rules import unresolved_scorecard_evidence
+from app.services.personal_scan import ensure_personal_scan
 from app.services.screening_config import TechnicalScreeningConfig
 
 router = APIRouter(prefix="/screening", tags=["screening"])
@@ -291,43 +291,9 @@ async def get_fundamental_trace(
 @router.post("/scan", response_model=ScanTriggerResponse)
 async def trigger_scan(
     request: Request,
-    db: Annotated[AsyncSession, Depends(get_db)],
     config: TechnicalScreeningConfig | None = None,
 ) -> ScanTriggerResponse:
-    """Create a versioned technical-score run and enqueue it on Redis arq."""
-    # 1. Create a scan run entry in postgres
-    scan_run_id = uuid.uuid4()
-
-    effective_config = config or TechnicalScreeningConfig()
-    insert_run_query = text(
-        """
-        INSERT INTO scan_runs (
-            id,
-            universe_code,
-            status,
-            triggered_by,
-            technical_config
-        )
-        VALUES (
-            :id,
-            'NIFTY500',
-            'queued',
-            'manual',
-            CAST(:technical_config AS jsonb)
-        )
-        """
-    )
-
-    await db.execute(
-        insert_run_query,
-        {
-            "id": scan_run_id,
-            "technical_config": json.dumps(effective_config.model_dump()),
-        },
-    )
-    await db.commit()
-
-    # 2. Enqueue the background job using arq Redis connection pool
+    """Create or reuse today's versioned personal technical scan."""
     redis_pool = getattr(request.app.state, "redis", None)
     if not redis_pool:
         raise HTTPException(
@@ -336,46 +302,28 @@ async def trigger_scan(
         )
 
     try:
-        await redis_pool.enqueue_job("run_technical_scan", str(scan_run_id))
-    except Exception as enqueue_error:
-        # Update scan run to failed if enqueuing fails
-        fail_query = text("""
-            UPDATE scan_runs
-            SET status = 'failed', completed_at = now(), error_message = :error
-            WHERE id = :scan_run_id
-        """)
-        await db.execute(
-            fail_query,
-            {
-                "scan_run_id": scan_run_id,
-                "error": f"Enqueuing failed: {enqueue_error}",
-            },
+        run = await ensure_personal_scan(
+            redis_pool,
+            config=config,
+            triggered_by="manual",
         )
-        await db.commit()
+    except Exception as enqueue_error:
+        logger.exception("Could not ensure the personal EOD scan")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to enqueue scan job: {enqueue_error}",
+            detail=f"Failed to create or attach to the EOD scan: {enqueue_error}",
         ) from enqueue_error
 
-    # Personal "Run EOD SCAN" often skips candle sync when data is already
-    # current — still refresh the public Swyingify Standard board for today.
-    try:
-        await redis_pool.enqueue_job(
-            "run_saas_global_standard_scan",
-            None,
-            "manual_eod_scan",
-            _job_id=f"saas-standard-manual:{datetime.date.today().isoformat()}",
-        )
-    except Exception:
-        logger.exception(
-            "Personal scan queued, but SaaS Standard enqueue failed for %s",
-            scan_run_id,
-        )
-
     return ScanTriggerResponse(
-        status="queued",
-        scan_run_id=scan_run_id,
-        message="Technical scoring job enqueued successfully.",
+        status=run.status,
+        scan_run_id=run.scan_run_id,
+        reused=run.reused,
+        as_of_date=run.as_of_date,
+        message=(
+            "Opened the existing EOD scan."
+            if run.reused
+            else "Technical scoring job enqueued successfully."
+        ),
     )
 
 
@@ -394,10 +342,12 @@ async def list_scan_runs(
             r.completed_at, 
             r.error_message, 
             r.technical_config,
+            r.as_of_date,
             r.created_at,
             COUNT(s.id) as passing_count
         FROM scan_runs r
         LEFT JOIN screening_results s ON r.id = s.scan_run_id
+        WHERE r.visibility = 'personal'
         GROUP BY r.id
         ORDER BY r.created_at DESC
         LIMIT 50
@@ -417,6 +367,7 @@ async def list_scan_runs(
                 "completed_at": run.completed_at,
                 "error_message": run.error_message,
                 "technical_config": run.technical_config,
+                "as_of_date": run.as_of_date,
                 "created_at": run.created_at,
                 "passing_count": run.passing_count,
             }
@@ -602,6 +553,19 @@ async def get_scan_results(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[ScanResultResponse]:
     """Return the persisted score-ranked setups for manual VCP review."""
+    personal_run = await db.execute(
+        text(
+            """
+            SELECT 1
+            FROM scan_runs
+            WHERE id = :run_id AND visibility = 'personal'
+            """
+        ),
+        {"run_id": run_id},
+    )
+    if personal_run.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Personal scan run not found")
+
     query = text("""
         SELECT 
             s.id, 

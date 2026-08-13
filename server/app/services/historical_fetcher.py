@@ -13,6 +13,9 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import async_session
 from app.security import get_fyers_token
+from app.services.personal_scan import ensure_personal_scan
+from app.services.scan_readiness import load_scan_readiness
+from app.services.screening_config import TechnicalScreeningConfig
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,7 @@ class SyncProgress:
     started_at: str | None = None
     enqueued_at: str | None = None
     completed_at: str | None = None
+    personal_scan_run_id: str | None = None
 
     def log(self, message: str) -> None:
         timestamp = datetime.datetime.now(INDIA_TZ).strftime("%H:%M:%S")
@@ -156,6 +160,37 @@ def next_sync_date(
     return today - datetime.timedelta(days=365 * backfill_years)
 
 
+def sync_date_ranges(
+    *,
+    earliest_candle_date: datetime.date | None,
+    latest_candle_date: datetime.date | None,
+    target_date: datetime.date,
+    backfill_years: int,
+    repair_history: bool,
+) -> list[tuple[datetime.date, datetime.date]]:
+    """Plan missing prefix/suffix ranges without rewriting stored candles."""
+    backfill_start = target_date - datetime.timedelta(days=365 * backfill_years)
+    if earliest_candle_date is None or latest_candle_date is None:
+        return [(backfill_start, target_date)]
+
+    ranges: list[tuple[datetime.date, datetime.date]] = []
+    if repair_history and earliest_candle_date > backfill_start:
+        ranges.append(
+            (backfill_start, earliest_candle_date - datetime.timedelta(days=1))
+        )
+    if latest_candle_date < target_date:
+        ranges.append(
+            (latest_candle_date + datetime.timedelta(days=1), target_date)
+        )
+    return ranges
+
+
+def history_response_has_no_data(response: dict[str, Any]) -> bool:
+    """Recognize Fyers' non-error response shape for pre-listing date ranges."""
+    message = str(response.get("message") or "").lower()
+    return response.get("s") == "no_data" or "no data" in message
+
+
 def latest_completed_eod_date(
     now: datetime.datetime | None = None,
 ) -> datetime.date:
@@ -200,6 +235,47 @@ def sync_status_is_current(
     )
 
 
+async def enqueue_eod_scans(
+    redis: ArqRedis,
+    progress: SyncProgress,
+    target_date: datetime.date,
+) -> None:
+    """Queue the personal scan first, then the independent SaaS refresh."""
+    try:
+        personal_run = await ensure_personal_scan(
+            redis,
+            triggered_by="eod_chain",
+        )
+        progress.personal_scan_run_id = str(personal_run.scan_run_id)
+        progress.log(
+            f"Personal EOD scan {personal_run.status}: "
+            f"{personal_run.scan_run_id}."
+        )
+    except Exception as exc:
+        logger.exception(
+            "Failed to ensure personal scan after EOD sync for %s",
+            target_date.isoformat(),
+        )
+        progress.log(f"ERROR (personal scan): {type(exc).__name__}: {exc}")
+
+    try:
+        await redis.enqueue_job(
+            "run_saas_global_standard_scan",
+            target_date.isoformat(),
+            "eod_chain",
+            _job_id=f"saas-standard:{target_date.isoformat()}",
+        )
+        logger.info(
+            "Enqueued SaaS Standard scan for as_of_date=%s after EOD sync",
+            target_date.isoformat(),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to enqueue SaaS Standard scan after EOD sync for %s",
+            target_date.isoformat(),
+        )
+
+
 def _token_is_expired(expires_at: datetime.datetime) -> bool:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
@@ -211,6 +287,7 @@ async def run_historical_sync(
     triggered_by: str = "scheduled",
     backfill_years: int = 1,
     run_id: str | None = None,
+    repair_history: bool = False,
 ) -> dict[str, Any]:
     """Incrementally fetch daily Nifty 500 candles as an arq worker job."""
     redis: ArqRedis = ctx["redis"]
@@ -235,7 +312,8 @@ async def run_historical_sync(
         target_date=target_date.isoformat(),
         started_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-    progress.log(f"Started {triggered_by} incremental EOD sync.")
+    sync_kind = "history-repair" if repair_history else "incremental"
+    progress.log(f"Started {triggered_by} {sync_kind} EOD sync.")
     await save_sync_status(redis, progress)
 
     fyers = None
@@ -262,6 +340,8 @@ async def run_historical_sync(
                         i.id,
                         i.symbol,
                         i.fyers_symbol,
+                        (MIN(c.candle_start) AT TIME ZONE 'Asia/Kolkata')::date
+                            AS earliest_candle_date,
                         (MAX(c.candle_start) AT TIME ZONE 'Asia/Kolkata')::date
                             AS latest_candle_date
                     FROM instruments i
@@ -333,30 +413,44 @@ async def run_historical_sync(
 
             progress.current_index = index
             progress.current_symbol = instrument.symbol
-            start_date = next_sync_date(
-                instrument.latest_candle_date,
-                target_date,
-                backfill_years,
+            date_ranges = sync_date_ranges(
+                earliest_candle_date=instrument.earliest_candle_date,
+                latest_candle_date=instrument.latest_candle_date,
+                target_date=target_date,
+                backfill_years=backfill_years,
+                repair_history=repair_history,
             )
 
-            if start_date > target_date:
+            if not date_ranges:
                 progress.skipped_symbols += 1
                 progress.successful_symbols += 1
                 progress.log(
-                    f"{instrument.symbol} is already current through {target_date}."
+                    f"{instrument.symbol} already has the requested EOD coverage."
                 )
                 await save_sync_status(redis, progress)
                 continue
 
             symbol_candles = 0
             symbol_failed = False
-            chunks = build_date_chunks(start_date, target_date)
-            progress.log(
-                f"Syncing {instrument.symbol} from {start_date.isoformat()} "
-                f"to {target_date.isoformat()}."
+            chunks = [
+                (chunk_start, chunk_end, is_prefix)
+                for range_start, range_end in date_ranges
+                for is_prefix in [
+                    instrument.earliest_candle_date is not None
+                    and range_end < instrument.earliest_candle_date
+                ]
+                for chunk_start, chunk_end in build_date_chunks(
+                    range_start,
+                    range_end,
+                )
+            ]
+            range_summary = ", ".join(
+                f"{range_start.isoformat()}..{range_end.isoformat()}"
+                for range_start, range_end in date_ranges
             )
+            progress.log(f"Syncing {instrument.symbol}: {range_summary}.")
 
-            for chunk_start, chunk_end in chunks:
+            for chunk_start, chunk_end, is_prefix in chunks:
                 payload = {
                     "symbol": instrument.fyers_symbol,
                     "resolution": "D",
@@ -368,11 +462,21 @@ async def run_historical_sync(
                 try:
                     response = await fyers.history(data=payload)
                     if response.get("s") != "ok":
-                        symbol_failed = True
-                        progress.add_error(
-                            instrument.symbol,
-                            response.get("message", "Fyers history API returned an error."),
-                        )
+                        if is_prefix and history_response_has_no_data(response):
+                            progress.log(
+                                f"{instrument.symbol}: no Fyers candles before "
+                                f"{instrument.earliest_candle_date}; treating it "
+                                "as listing-limited history."
+                            )
+                        else:
+                            symbol_failed = True
+                            progress.add_error(
+                                instrument.symbol,
+                                response.get(
+                                    "message",
+                                    "Fyers history API returned an error.",
+                                ),
+                            )
                     else:
                         candles = response.get("candles", [])
                         if candles:
@@ -418,29 +522,34 @@ async def run_historical_sync(
             f"Sync complete: {progress.candles_upserted} candles saved for "
             f"{progress.successful_symbols}/{progress.total_symbols} symbols.",
         )
-        await save_sync_status(redis, progress)
+        date_coverage_ready = sync_status_is_current(asdict(progress), target_date)
+        async with async_session() as session:
+            readiness = await load_scan_readiness(
+                session,
+                reference_eod_date=target_date,
+                minimum_history_days=(
+                    TechnicalScreeningConfig().minimum_history_days
+                ),
+            )
+        scan_ready = date_coverage_ready and readiness.scanner_ready
 
-        if final_state in ("succeeded", "partial"):
-            try:
-                await redis.enqueue_job(
-                    "run_saas_global_standard_scan",
-                    target_date.isoformat(),
-                    "eod_chain",
-                    _job_id=f"saas-standard:{target_date.isoformat()}",
-                )
-                logger.info(
-                    "Enqueued SaaS Standard scan for as_of_date=%s after EOD sync",
-                    target_date.isoformat(),
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to enqueue SaaS Standard scan after EOD sync for %s",
-                    target_date.isoformat(),
-                )
+        if scan_ready:
+            await enqueue_eod_scans(redis, progress, target_date)
+        else:
+            progress.log(
+                "Scanner jobs were not queued: "
+                f"{readiness.scoreable_instruments}/"
+                f"{readiness.active_instruments} instruments are scoreable; "
+                f"{readiness.required_scoreable_instruments} required."
+            )
+
+        await save_sync_status(redis, progress)
 
         return {
             "status": final_state,
             "candles_upserted": progress.candles_upserted,
+            "personal_scan_run_id": progress.personal_scan_run_id,
+            "scanner_ready": scan_ready,
         }
     except Exception as exc:
         logger.exception("Historical EOD sync failed")

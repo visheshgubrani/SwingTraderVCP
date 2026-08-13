@@ -1,12 +1,19 @@
 import datetime
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+from uuid import uuid4
 
 from zoneinfo import ZoneInfo
 
 from app.services.historical_fetcher import (
+    SyncProgress,
     build_date_chunks,
+    enqueue_eod_scans,
+    history_response_has_no_data,
     latest_completed_eod_date,
     next_sync_date,
+    sync_date_ranges,
     sync_status_is_current,
 )
 from app.worker import WorkerSettings
@@ -43,6 +50,111 @@ class HistoricalFetcherDateTests(unittest.TestCase):
         chunks = build_date_chunks(today + datetime.timedelta(days=1), today)
 
         self.assertEqual(chunks, [])
+
+    def test_empty_symbol_gets_full_backfill_range(self) -> None:
+        target = datetime.date(2026, 8, 12)
+
+        ranges = sync_date_ranges(
+            earliest_candle_date=None,
+            latest_candle_date=None,
+            target_date=target,
+            backfill_years=2,
+            repair_history=True,
+        )
+
+        self.assertEqual(
+            ranges,
+            [(datetime.date(2024, 8, 12), target)],
+        )
+
+    def test_current_short_history_gets_missing_prefix_only(self) -> None:
+        target = datetime.date(2026, 8, 12)
+
+        ranges = sync_date_ranges(
+            earliest_candle_date=datetime.date(2025, 8, 12),
+            latest_candle_date=target,
+            target_date=target,
+            backfill_years=2,
+            repair_history=True,
+        )
+
+        self.assertEqual(
+            ranges,
+            [(datetime.date(2024, 8, 12), datetime.date(2025, 8, 11))],
+        )
+
+    def test_stale_short_history_gets_prefix_and_suffix(self) -> None:
+        target = datetime.date(2026, 8, 12)
+
+        ranges = sync_date_ranges(
+            earliest_candle_date=datetime.date(2025, 8, 12),
+            latest_candle_date=datetime.date(2026, 8, 10),
+            target_date=target,
+            backfill_years=2,
+            repair_history=True,
+        )
+
+        self.assertEqual(
+            ranges,
+            [
+                (datetime.date(2024, 8, 12), datetime.date(2025, 8, 11)),
+                (datetime.date(2026, 8, 11), target),
+            ],
+        )
+
+    def test_sufficient_current_history_needs_no_repair(self) -> None:
+        target = datetime.date(2026, 8, 12)
+
+        ranges = sync_date_ranges(
+            earliest_candle_date=datetime.date(2024, 8, 1),
+            latest_candle_date=target,
+            target_date=target,
+            backfill_years=2,
+            repair_history=True,
+        )
+
+        self.assertEqual(ranges, [])
+
+    def test_recent_listing_is_safely_probed_for_earlier_history(self) -> None:
+        target = datetime.date(2026, 8, 12)
+
+        ranges = sync_date_ranges(
+            earliest_candle_date=datetime.date(2026, 1, 15),
+            latest_candle_date=target,
+            target_date=target,
+            backfill_years=2,
+            repair_history=True,
+        )
+
+        self.assertEqual(
+            ranges,
+            [(datetime.date(2024, 8, 12), datetime.date(2026, 1, 14))],
+        )
+
+    def test_incremental_sync_does_not_refetch_current_prefix(self) -> None:
+        target = datetime.date(2026, 8, 12)
+
+        ranges = sync_date_ranges(
+            earliest_candle_date=datetime.date(2025, 8, 12),
+            latest_candle_date=target,
+            target_date=target,
+            backfill_years=2,
+            repair_history=False,
+        )
+
+        self.assertEqual(ranges, [])
+
+    def test_fyers_pre_listing_no_data_is_recognized(self) -> None:
+        self.assertTrue(
+            history_response_has_no_data(
+                {"s": "no_data", "message": "No data found"}
+            )
+        )
+        self.assertFalse(
+            history_response_has_no_data(
+                {"s": "error", "message": "Could not authenticate the user"}
+            )
+        )
 
     def test_saturday_targets_fridays_completed_candle(self) -> None:
         saturday = datetime.datetime(
@@ -104,6 +216,41 @@ class HistoricalFetcherDateTests(unittest.TestCase):
         self.assertTrue(
             sync_status_is_current(status, datetime.date(2026, 7, 31))
         )
+
+
+class HistoricalScanChainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_personal_scan_is_ensured_before_saas_refresh(self) -> None:
+        events: list[str] = []
+        scan_run_id = uuid4()
+
+        async def ensure_personal(_redis, *, triggered_by):
+            events.append(f"personal:{triggered_by}")
+            return SimpleNamespace(
+                scan_run_id=scan_run_id,
+                status="queued",
+            )
+
+        class Redis:
+            async def enqueue_job(self, function, *_args, **_kwargs):
+                events.append(function)
+                return SimpleNamespace()
+
+        progress = SyncProgress()
+        with patch(
+            "app.services.historical_fetcher.ensure_personal_scan",
+            ensure_personal,
+        ):
+            await enqueue_eod_scans(
+                Redis(),
+                progress,
+                datetime.date(2026, 8, 12),
+            )
+
+        self.assertEqual(
+            events,
+            ["personal:eod_chain", "run_saas_global_standard_scan"],
+        )
+        self.assertEqual(progress.personal_scan_run_id, str(scan_run_id))
 
 
 class HistoricalSyncScheduleTests(unittest.TestCase):

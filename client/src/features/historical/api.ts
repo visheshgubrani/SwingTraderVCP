@@ -33,8 +33,13 @@ export interface SyncStatus {
   logs: string[]
   target_date: string | null
   data_current: boolean
+  scanner_ready: boolean
+  scoreable_instruments: number
+  required_scoreable_instruments: number
+  minimum_history_days: number
   started_at: string | null
   completed_at: string | null
+  personal_scan_run_id: string | null
   db_metrics: {
     total_candles: number
     nifty500_instruments: number
@@ -54,6 +59,11 @@ interface SyncTriggerResponse {
   status: "queued"
   run_id: string
   message: string
+}
+
+interface SyncTriggerInput {
+  backfillYears: number
+  repairHistory?: boolean
 }
 
 interface SyncCancelResponse {
@@ -91,6 +101,7 @@ export function isSyncActive(status?: SyncStatus) {
 
 export function canScanAfterSync(status?: SyncStatus) {
   if (!status) return false
+  if (!status.data_current || !status.scanner_ready) return false
   if (status.state === "succeeded") return true
   if (status.state !== "partial" || status.total_symbols <= 0) return false
 
@@ -139,10 +150,13 @@ export function useSyncStatus() {
 export function useTriggerSync() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (backfillYears: number) =>
+    mutationFn: ({ backfillYears, repairHistory = false }: SyncTriggerInput) =>
       apiRequest<SyncTriggerResponse>("/historical/sync", {
         method: "POST",
-        body: JSON.stringify({ backfill_years: backfillYears }),
+        body: JSON.stringify({
+          backfill_years: backfillYears,
+          repair_history: repairHistory,
+        }),
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({

@@ -105,7 +105,11 @@ export function TradingDashboard() {
   useEffect(() => {
     const runs = scanRuns.data
     if (!runs?.length || selectedRunId) return
-    setSelectedRunId(runs.find((run) => run.status === "succeeded")?.id ?? runs[0].id)
+    setSelectedRunId(
+      runs.find((run) => run.status === "queued" || run.status === "running")?.id ??
+        runs.find((run) => run.status === "succeeded")?.id ??
+        runs[0].id,
+    )
   }, [scanRuns.data, selectedRunId])
 
   useEffect(() => {

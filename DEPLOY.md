@@ -76,15 +76,42 @@ COMPOSE=(docker compose -f docker-compose.prod.yml --env-file .env.prod)
 # 2) Nifty 500 instruments (CSV is baked into the image)
 "${COMPOSE[@]}" exec api python scripts/import_nifty500_instruments.py
 
+# 2b) Ensure RS / regime index symbols exist (required for vcp_score_v3).
+# Fresh schema.sql now seeds these; this is safe to re-run on older DBs.
+"${COMPOSE[@]}" exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U algo -d algo_trading <<'SQL'
+INSERT INTO instruments (
+    exchange, segment, symbol, trading_symbol, fyers_symbol, name,
+    lot_size, tick_size, active, metadata
+) VALUES
+    (
+        'NSE', 'INDEX', 'NIFTY50', 'NIFTY50-INDEX', 'NSE:NIFTY50-INDEX',
+        'Nifty 50 Index', 1, 0.05, true,
+        '{"role": "benchmark", "p8_regime": true}'::jsonb
+    ),
+    (
+        'NSE', 'INDEX', 'NIFTY500', 'NIFTY500-INDEX', 'NSE:NIFTY500-INDEX',
+        'Nifty 500 Index', 1, 0.05, true,
+        '{"role": "rs_benchmark", "pipeline": "vcp_score_v3"}'::jsonb
+    )
+ON CONFLICT (fyers_symbol) DO NOTHING;
+SQL
+
 # 3) Fyers OAuth via personal client
 #    Open https://app.edurel.xyz → Login Fyers
 
-# 4) Two-year candle backfill (arq worker must be running)
+# 4) Two-year candle backfill (also pulls NIFTY50/NIFTY500 index history)
 curl -X POST http://127.0.0.1:8002/api/v1/historical/sync \
   -H 'Content-Type: application/json' \
   -d '{"backfill_years": 2}'
 
 curl http://127.0.0.1:8002/api/v1/historical/status
+
+# If status reports scanner_ready=false, fill missing historical prefixes.
+# This is additive/upsert-only and also catches up any latest-date suffixes.
+curl -X POST http://127.0.0.1:8002/api/v1/historical/sync \
+  -H 'Content-Type: application/json' \
+  -d '{"backfill_years":2,"repair_history":true}'
 
 # 5) Personal scan (also enqueues SaaS Standard)
 curl -X POST http://127.0.0.1:8002/api/v1/screening/scan

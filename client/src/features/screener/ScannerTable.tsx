@@ -44,11 +44,15 @@ interface ScannerTableProps {
 }
 
 function formatRun(run: ScanRun) {
-  const date = new Intl.DateTimeFormat("en-IN", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(run.created_at))
-  return `${date} · ${run.status} · ${run.passing_count} setups`
+  const date = run.as_of_date
+    ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(
+        new Date(`${run.as_of_date}T00:00:00+05:30`),
+      )
+    : new Intl.DateTimeFormat("en-IN", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(new Date(run.created_at))
+  return `EOD ${date} · ${run.status} · ${run.passing_count} eligible setups`
 }
 
 function gradeVariant(grade: TechnicalScoreGrade | null) {
@@ -133,7 +137,7 @@ export function ScannerTable({
             ) : (
               <Play data-icon="inline-start" />
             )}
-            {isRunning ? "SYNCING / SCORING" : "RUN EOD SCAN"}
+            {isRunning ? "EOD SCAN IN PROGRESS" : "RUN EOD SCAN"}
           </Button>
         </div>
       </div>

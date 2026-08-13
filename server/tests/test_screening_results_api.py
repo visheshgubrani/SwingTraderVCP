@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
-from app.routers.screening import get_scan_results
+from fastapi import HTTPException
+
+from app.routers.screening import get_scan_results, list_scan_runs
 
 
 def result_row(*, legacy: bool = False) -> SimpleNamespace:
@@ -105,6 +107,29 @@ class ScreeningResultsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response.score_grade)
         self.assertEqual(response.score_components, {})
         self.assertFalse(response.fundamental_selected)
+
+    async def test_non_personal_run_is_not_exposed(self) -> None:
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = None
+        db = AsyncMock()
+        db.execute.return_value = execute_result
+
+        with self.assertRaises(HTTPException) as raised:
+            await get_scan_results(str(uuid4()), db)
+
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertEqual(db.execute.await_count, 1)
+
+    async def test_run_history_is_scoped_to_personal_visibility(self) -> None:
+        execute_result = MagicMock()
+        execute_result.all.return_value = []
+        db = AsyncMock()
+        db.execute.return_value = execute_result
+
+        self.assertEqual(await list_scan_runs(db), [])
+
+        statement = str(db.execute.await_args.args[0])
+        self.assertIn("WHERE r.visibility = 'personal'", statement)
 
 
 if __name__ == "__main__":

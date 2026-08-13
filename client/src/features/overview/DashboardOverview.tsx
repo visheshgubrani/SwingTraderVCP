@@ -238,7 +238,9 @@ export function DashboardOverview({
                 disabled={
                   !authStatus.data?.healthy || triggerSync.isPending
                 }
-                onClick={() => triggerSync.mutate(1)}
+                onClick={() =>
+                  triggerSync.mutate({ backfillYears: 1 })
+                }
                 type="button"
               >
                 {triggerSync.isPending ? (

@@ -176,8 +176,10 @@ class FundamentalTraceResponse(BaseModel):
 
 
 class ScanTriggerResponse(BaseModel):
-    status: Literal["queued"]
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     scan_run_id: uuid.UUID
+    reused: bool = False
+    as_of_date: datetime.date | None = None
     message: str
 
 
@@ -212,6 +214,7 @@ class ScanRunResponse(BaseModel):
     completed_at: datetime.datetime | None = None
     error_message: str | None = None
     technical_config: dict[str, Any]
+    as_of_date: datetime.date | None = None
     created_at: datetime.datetime
     passing_count: int
 

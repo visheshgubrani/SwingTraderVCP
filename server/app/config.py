@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     saas_standard_scan_fallback_enabled: bool = True
     saas_standard_scan_fallback_hour: int = Field(default=19, ge=0, le=23)
     saas_standard_scan_fallback_minute: int = Field(default=0, ge=0, le=59)
+    # A running personal scan with no corresponding ARQ job is only recovered
+    # after this grace period, avoiding false recovery during worker transitions.
+    personal_scan_running_stale_seconds: int = Field(default=3600, ge=300, le=21600)
 
     # Token refresh: run daily before market open (default 08:50 IST).
     # Fyers access tokens expire ~midnight IST; refresh early so workers

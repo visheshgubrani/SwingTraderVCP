@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import {
   ChevronLeft,
   ChevronRight,
@@ -38,11 +38,15 @@ import { useScanWorkflow } from "@/features/screener/useScanWorkflow"
 import { cn } from "@/lib/utils"
 
 function formatRun(run: ScanRun) {
-  const date = new Intl.DateTimeFormat("en-IN", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(run.created_at))
-  return `${date} · ${run.status} · ${run.passing_count} setups`
+  const date = run.as_of_date
+    ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(
+        new Date(`${run.as_of_date}T00:00:00+05:30`),
+      )
+    : new Intl.DateTimeFormat("en-IN", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(new Date(run.created_at))
+  return `EOD ${date} · ${run.status} · ${run.passing_count} eligible setups`
 }
 
 function gradeVariant(grade: TechnicalScoreGrade | null) {
@@ -66,9 +70,20 @@ export function ScannerPage() {
   const [selectedResultId, setSelectedResultId] = useState<string | null>(null)
 
   // Default to latest successful run if not explicitly selected
-  const activeRunId = selectedRunId ?? scanRuns.data?.find((r) => r.status === "succeeded")?.id ?? scanRuns.data?.[0]?.id ?? null
+  const activeRunId =
+    selectedRunId ??
+    scanRuns.data?.find((r) => r.status === "queued" || r.status === "running")?.id ??
+    scanRuns.data?.find((r) => r.status === "succeeded")?.id ??
+    scanRuns.data?.[0]?.id ??
+    null
   const activeRun = scanRuns.data?.find((r) => r.id === activeRunId)
   const scanResults = useScanResults(activeRunId, activeRun?.status)
+
+  useEffect(() => {
+    if (!scanWorkflow.scanRunId) return
+    setSelectedRunId(scanWorkflow.scanRunId)
+    setCurrentPage(1)
+  }, [scanWorkflow.scanRunId])
 
   // Filter items based on search and grade
   const filteredItems = useMemo(() => {
@@ -119,6 +134,19 @@ export function ScannerPage() {
       {/* Top Header Banner */}
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b bg-card px-4 py-2.5">
         <div className="flex items-center gap-3">
+          {scanWorkflow.message && (
+            <span
+              className={cn(
+                "max-w-96 truncate text-[11px]",
+                scanWorkflow.phase === "failed"
+                  ? "text-destructive"
+                  : "text-muted-foreground",
+              )}
+              title={scanWorkflow.message}
+            >
+              {scanWorkflow.message}
+            </span>
+          )}
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
             <h1 className="text-sm font-bold tracking-tight text-foreground">
@@ -174,7 +202,15 @@ export function ScannerPage() {
             ) : (
               <Play className="size-3.5 fill-current" />
             )}
-            {scanWorkflow.isBusy ? "SYNCING / SCORING" : "RUN EOD SCAN"}
+            {scanWorkflow.phase === "syncing"
+              ? "SYNCING EOD"
+              : scanWorkflow.phase === "attaching_scan"
+                ? "OPENING SCAN"
+                : scanWorkflow.phase === "queued"
+                  ? "WAITING FOR WORKER"
+                  : scanWorkflow.phase === "scanning"
+                    ? "SCORING NIFTY 500"
+                    : "RUN EOD SCAN"}
           </Button>
         </div>
       </div>
@@ -268,6 +304,21 @@ export function ScannerPage() {
                 </Button>
               </AlertAction>
             </Alert>
+          </div>
+        ) : activeRun?.status === "failed" ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+            <XCircle className="text-destructive" />
+            <strong>Scanner run failed</strong>
+            <span className="max-w-xl text-muted-foreground">
+              {activeRun.error_message ?? "The worker did not provide an error message."}
+            </span>
+          </div>
+        ) : activeRun?.status === "queued" || activeRun?.status === "running" ? (
+          <div className="flex h-full items-center justify-center gap-2 text-muted-foreground">
+            <Spinner />
+            {activeRun.status === "queued"
+              ? "Personal scan is waiting for the scanner worker…"
+              : "Technical scoring is running across the Nifty 500…"}
           </div>
         ) : displayedItems.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-muted-foreground">

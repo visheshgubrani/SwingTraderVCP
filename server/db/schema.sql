@@ -126,6 +126,25 @@ BEFORE UPDATE ON instruments
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
+-- Benchmark / RS index symbols (not in Nifty 500 equity membership).
+-- Synced by historical EOD alongside the equity universe.
+INSERT INTO instruments (
+    exchange, segment, symbol, trading_symbol, fyers_symbol, name,
+    lot_size, tick_size, active, metadata
+)
+VALUES
+    (
+        'NSE', 'INDEX', 'NIFTY50', 'NIFTY50-INDEX', 'NSE:NIFTY50-INDEX',
+        'Nifty 50 Index', 1, 0.05, true,
+        '{"role": "benchmark", "p8_regime": true}'::jsonb
+    ),
+    (
+        'NSE', 'INDEX', 'NIFTY500', 'NIFTY500-INDEX', 'NSE:NIFTY500-INDEX',
+        'Nifty 500 Index', 1, 0.05, true,
+        '{"role": "rs_benchmark", "pipeline": "vcp_score_v3"}'::jsonb
+    )
+ON CONFLICT (fyers_symbol) DO NOTHING;
+
 CREATE TABLE universe_memberships (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     instrument_id uuid NOT NULL REFERENCES instruments(id),

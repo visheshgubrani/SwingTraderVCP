@@ -21,6 +21,7 @@ export interface ScanRun {
     pipeline_version?: string
     [key: string]: unknown
   }
+  as_of_date: string | null
   created_at: string
   passing_count: number
 }
@@ -282,8 +283,10 @@ export interface FundamentalTrace {
 }
 
 interface ScanTriggerResponse {
-  status: "queued"
+  status: ScanRunStatus
   scan_run_id: string
+  reused: boolean
+  as_of_date: string | null
   message: string
 }
 

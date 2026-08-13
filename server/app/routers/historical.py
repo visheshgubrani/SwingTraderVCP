@@ -20,11 +20,14 @@ from app.services.historical_fetcher import (
     sync_status_blocks_enqueue,
     sync_status_is_current,
 )
+from app.services.scan_readiness import load_scan_readiness
+from app.services.screening_config import TechnicalScreeningConfig
 
 router = APIRouter(prefix="/historical", tags=["historical"])
 
 class SyncRequest(BaseModel):
     backfill_years: int = Field(default=1, ge=1, le=2)
+    repair_history: bool = False
 
 
 class SyncTriggerResponse(BaseModel):
@@ -42,8 +45,8 @@ async def trigger_sync(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SyncTriggerResponse:
     """
-    Enqueue an incremental EOD sync. The backfill window is only used for symbols
-    that do not have any daily candles yet.
+    Enqueue an EOD sync. A repair also fills missing historical prefixes for
+    symbols whose latest candle is already current.
     """
     redis = request.app.state.redis
     current_status = await get_stored_sync_status(redis)
@@ -70,7 +73,8 @@ async def trigger_sync(
         target_date=latest_completed_eod_date().isoformat(),
         enqueued_at=enqueued_at,
     )
-    progress.log("Manual incremental EOD sync queued.")
+    sync_kind = "history-repair" if payload.repair_history else "incremental"
+    progress.log(f"Manual {sync_kind} EOD sync queued.")
     await save_sync_status(redis, progress)
 
     try:
@@ -79,6 +83,7 @@ async def trigger_sync(
             "manual",
             payload.backfill_years,
             run_id,
+            payload.repair_history,
         )
     except Exception as exc:
         progress.finish("failed", f"Failed to enqueue sync: {exc}")
@@ -93,7 +98,11 @@ async def trigger_sync(
     return SyncTriggerResponse(
         status="queued",
         run_id=run_id,
-        message="Latest EOD data sync queued.",
+        message=(
+            "EOD history repair queued."
+            if payload.repair_history
+            else "Latest EOD data sync queued."
+        ),
     )
 
 @router.get("/status")
@@ -153,10 +162,21 @@ async def get_sync_status(
 
     status = await get_stored_sync_status(request.app.state.redis)
     expected_target_date = latest_completed_eod_date()
+    readiness = await load_scan_readiness(
+        db,
+        reference_eod_date=expected_target_date,
+        minimum_history_days=TechnicalScreeningConfig().minimum_history_days,
+    )
     status["data_current"] = sync_status_is_current(
         status,
         expected_target_date,
     )
+    status["scanner_ready"] = readiness.scanner_ready
+    status["scoreable_instruments"] = readiness.scoreable_instruments
+    status["required_scoreable_instruments"] = (
+        readiness.required_scoreable_instruments
+    )
+    status["minimum_history_days"] = readiness.minimum_history_days
     status["db_metrics"] = {
         "total_candles": candles_count,
         "nifty500_instruments": nifty500_count,

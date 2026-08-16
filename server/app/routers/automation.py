@@ -33,7 +33,17 @@ from app.schemas.proposals import (
     MarketContextPolicyEnforceRequest,
     StopStreakResetRequest,
     StopStreakResponse,
+    RolloutPromoteRequest,
+    PaperAccountResetRequest,
 )
+from app.services.p10_rollout import (
+    RolloutBlockedError,
+    get_rollout_state,
+    promote_rollout_stage,
+    require_approvals_allowed,
+)
+from app.services.paper_broker import PaperBrokerError, reset_paper_account
+from app.services.paper_portfolio import load_paper_portfolio
 from app.services.risk_stop_streak import reset_stop_streak, synchronize_stop_streak
 
 
@@ -203,6 +213,12 @@ async def record_proposal_decision(
             status_code=400,
             detail=f"Proposal approval deadline ({prop.approval_deadline}) has passed. Proposal is expired.",
         )
+
+    if payload.decision == "approved":
+        try:
+            await require_approvals_allowed(db)
+        except RolloutBlockedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # Record decision audit record
     decision_stmt = text("""
@@ -769,3 +785,91 @@ async def get_entry_supervisor_status(
         "armed_legs": armed_legs,
         "recent_allocation_events": recent_ledger,
     }
+
+
+@router.get("/rollout")
+async def get_p10_rollout(db: db_dep) -> dict[str, Any]:
+    try:
+        return await get_rollout_state(db)
+    except RolloutBlockedError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/rollout/promote")
+async def promote_p10_rollout(
+    payload: RolloutPromoteRequest,
+    db: db_dep,
+) -> dict[str, Any]:
+    try:
+        state = await promote_rollout_stage(
+            db,
+            target_stage=payload.target_stage,
+            confirmation=payload.confirmation,
+            changed_by=payload.changed_by,
+            reason=payload.reason,
+        )
+    except RolloutBlockedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await db.commit()
+    return state
+
+
+@router.get("/paper-portfolio")
+async def get_paper_portfolio(db: db_dep) -> dict[str, Any]:
+    try:
+        return await load_paper_portfolio(db)
+    except PaperBrokerError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/paper-portfolio/reset")
+async def reset_paper_portfolio(
+    payload: PaperAccountResetRequest,
+    db: db_dep,
+) -> dict[str, Any]:
+    policy = (
+        await db.execute(
+            text(
+                """
+                SELECT version, deployable_capital_override
+                FROM risk_policies WHERE is_active = true
+                """
+            )
+        )
+    ).mappings().one_or_none()
+    starting = (
+        policy["deployable_capital_override"]
+        if policy and policy["deployable_capital_override"] is not None
+        else None
+    )
+    try:
+        account = await reset_paper_account(
+            db,
+            starting_cash=starting,
+            policy_version=int(policy["version"]) if policy else None,
+        )
+    except PaperBrokerError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await db.execute(
+        text(
+            """
+            INSERT INTO system_events (
+                component, severity, event_type, payload
+            ) VALUES (
+                'automation', 'info', 'paper_account_reset', CAST(:payload AS jsonb)
+            )
+            """
+        ),
+        {
+            "payload": json.dumps(
+                {
+                    "changed_by": payload.changed_by,
+                    "reason": payload.reason,
+                    "starting_cash": str(account["starting_cash"]),
+                }
+            )
+        },
+    )
+    await db.commit()
+    return account
+

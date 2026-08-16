@@ -11,7 +11,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { useRecordProposalDecision, useTradeProposal, type TradeProposalItem } from "./api"
+import { useRecordProposalDecision, useTradeProposal, useP10Rollout, type TradeProposalItem } from "./api"
 
 interface ProposalDetailModalProps {
   proposal: TradeProposalItem | null
@@ -23,6 +23,8 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
   const [notes] = useState("")
   const recordDecision = useRecordProposalDecision()
   const { data: detail } = useTradeProposal(open ? proposal?.id ?? null : null)
+  const rollout = useP10Rollout()
+  const approvalsAllowed = rollout.data?.approvals_allowed === true
 
   if (!proposal) return null
   const activeProposal = detail ?? proposal
@@ -184,12 +186,17 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
                   variant="default"
                   size="sm"
                   className="flex-1 font-mono bg-emerald-600 hover:bg-emerald-500 text-white"
-                  disabled={recordDecision.isPending}
+                  disabled={recordDecision.isPending || !approvalsAllowed}
                   onClick={() => handleDecision("approved")}
                 >
                   <CheckCircle2Icon className="mr-1.5 h-3.5 w-3.5" /> Approve & Arm Leg 1
                 </Button>
               </div>
+              {!approvalsAllowed && (
+                <p className="text-[10px] text-amber-400">
+                  Shadow stage: review or reject only. Promote to Paper before arming entries.
+                </p>
+              )}
             </div>
           )}
 

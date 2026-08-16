@@ -20,6 +20,12 @@ from app.database import async_session
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.services.execution_engine import ensure_execution_mode_armed
 from app.services.order_gateway import process_order_message, process_trade_message
+from app.services.paper_broker import (
+    REDIS_PAPER_ORDER_CHANNEL,
+    build_paper_fill_messages,
+    load_unfilled_submitted_paper_intents,
+    release_unaccepted_paper_claims,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,10 +41,6 @@ _LOCK_REFRESH_SECONDS = 10
 
 async def run_order_gateway() -> None:
     ensure_execution_mode_armed()
-    if settings.execution_mode != "live":
-        raise RuntimeError(
-            "Order gateway is a live-money process and requires EXECUTION_MODE=live."
-        )
     redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     worker_id = str(uuid4())
     if not await redis.set(
@@ -47,7 +49,7 @@ async def run_order_gateway() -> None:
         nx=True,
         ex=_LOCK_TTL_SECONDS,
     ):
-        logger.error("Another order gateway owns the live singleton lock.")
+        logger.error("Another order gateway owns the singleton lock.")
         await redis.aclose()
         return
 
@@ -55,6 +57,10 @@ async def run_order_gateway() -> None:
     loop = asyncio.get_running_loop()
     for signal_name in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signal_name, stop_event.set)
+
+    if settings.execution_mode == "paper":
+        await _run_paper_gateway(redis, worker_id, stop_event)
+        return
 
     try:
         access_token = await get_valid_access_token(redis)
@@ -147,6 +153,92 @@ async def run_order_gateway() -> None:
         await _emit_worker_event("info", "order_gateway_stopped", {})
         await _release_lock(redis, worker_id)
         await redis.aclose()
+
+
+async def _run_paper_gateway(redis, worker_id: str, stop_event: asyncio.Event) -> None:
+    await _set_status(redis, "running", worker_id)
+    await _emit_worker_event("info", "order_gateway_started", {"mode": "paper"})
+    await _recover_paper_fills()
+    heartbeat = asyncio.create_task(_heartbeat(redis, worker_id, stop_event))
+    pubsub = redis.pubsub()
+    await pubsub.subscribe(REDIS_PAPER_ORDER_CHANNEL)
+    try:
+        while not stop_event.is_set():
+            message = await pubsub.get_message(
+                ignore_subscribe_messages=True,
+                timeout=1.0,
+            )
+            if not message or message["type"] != "message":
+                continue
+            try:
+                payload = json.loads(message["data"])
+                kind = payload["kind"]
+                event = payload["message"]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+            try:
+                async with async_session() as db:
+                    if kind == "order":
+                        await process_order_message(db, event)
+                    elif kind == "trade":
+                        await process_trade_message(db, event)
+                    await db.commit()
+            except Exception:
+                logger.exception("Failed to persist paper %s update", kind)
+    finally:
+        heartbeat.cancel()
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            pass
+        await pubsub.unsubscribe(REDIS_PAPER_ORDER_CHANNEL)
+        await pubsub.close()
+        await _set_status(redis, "stopped", worker_id)
+        await _emit_worker_event("info", "order_gateway_stopped", {"mode": "paper"})
+        await _release_lock(redis, worker_id)
+        await redis.aclose()
+
+
+async def _recover_paper_fills() -> None:
+    async with async_session() as db:
+        await release_unaccepted_paper_claims(db)
+        rows = await load_unfilled_submitted_paper_intents(db)
+        for row in rows:
+            await db.execute(
+                text(
+                    """
+                    UPDATE order_intents
+                    SET
+                        status = CASE
+                            WHEN status = 'submission_pending' THEN 'submitted'
+                            ELSE status
+                        END,
+                        fyers_async_id = COALESCE(fyers_async_id, :fyers_async_id),
+                        fyers_order_id = COALESCE(fyers_order_id, :fyers_order_id)
+                    WHERE id = :order_intent_id
+                    """
+                ),
+                {
+                    "order_intent_id": row["id"],
+                    "fyers_async_id": row["fyers_async_id"],
+                    "fyers_order_id": row["fyers_order_id"],
+                },
+            )
+            result = build_paper_fill_messages(
+                snapshot={
+                    "id": row["id"],
+                    "quantity": row["quantity"],
+                    "symbol": row["symbol"],
+                    "side": row["side"],
+                },
+                fyers_async_id=row["fyers_async_id"],
+                fyers_order_id=row["fyers_order_id"],
+                trade_number=row["trade_number"],
+                fill_price=row["traded_price"],
+            )
+            await process_order_message(db, result.order_message)
+            await process_trade_message(db, result.trade_message)
+        await db.commit()
 
 
 async def _process_events(

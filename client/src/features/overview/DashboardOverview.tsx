@@ -29,7 +29,14 @@ import {
   useTriggerSync,
 } from "@/features/historical/api"
 import { useScanRuns } from "@/features/screener/api"
+import {
+  useP10Rollout,
+  usePromoteP10Rollout,
+  usePaperPortfolio,
+} from "@/features/proposals/api"
 import type { TickWorkerStatus } from "@/lib/MarketWSContext"
+import { Input } from "@/components/ui/input"
+import { useState } from "react"
 
 interface DashboardOverviewProps {
   tickWorkerStatus: TickWorkerStatus | null
@@ -53,6 +60,11 @@ export function DashboardOverview({
   const triggerSync = useTriggerSync()
   const cancelSync = useCancelSync()
   const scanRuns = useScanRuns()
+  const rollout = useP10Rollout()
+  const promote = usePromoteP10Rollout()
+  const paper = usePaperPortfolio(rollout.data?.stage === "paper")
+  const [promoteBy, setPromoteBy] = useState("")
+  const [promoteReason, setPromoteReason] = useState("")
 
   const sync = syncStatus.data
   const syncing = isSyncActive(sync)
@@ -153,6 +165,66 @@ export function DashboardOverview({
           )}
         </section>
       </div>
+
+      <section className="rounded-lg border bg-card p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-muted-foreground">P10 ROLLOUT</span>
+          <Badge variant="outline">{rollout.data?.stage?.replaceAll("_", " ") ?? "…"}</Badge>
+        </div>
+        <p className="text-muted-foreground">
+          Shadow blocks approve. Paper uses the ₹1,00,000 fake ledger and the same fill processors as live.
+          {paper.data
+            ? ` Cash ${Number(paper.data.cash_available).toLocaleString("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 })}.`
+            : ""}
+        </p>
+        {rollout.data?.next_stage && rollout.data.required_confirmation && (
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <Input
+              aria-label="Rollout operator"
+              className="h-8 w-40 text-[11px]"
+              onChange={(event) => setPromoteBy(event.target.value)}
+              placeholder="Changed by"
+              value={promoteBy}
+            />
+            <Input
+              aria-label="Rollout reason"
+              className="h-8 min-w-48 flex-1 text-[11px]"
+              onChange={(event) => setPromoteReason(event.target.value)}
+              placeholder="Reason"
+              value={promoteReason}
+            />
+            <Button
+              disabled={
+                promote.isPending
+                || promoteBy.trim().length === 0
+                || promoteReason.trim().length === 0
+              }
+              onClick={() =>
+                rollout.data?.next_stage &&
+                rollout.data.required_confirmation &&
+                promote.mutate({
+                  targetStage: rollout.data.next_stage,
+                  confirmation: rollout.data.required_confirmation,
+                  changedBy: promoteBy.trim(),
+                  reason: promoteReason.trim(),
+                })
+              }
+              size="sm"
+              type="button"
+            >
+              Promote to {rollout.data.next_stage.replaceAll("_", " ")}
+            </Button>
+          </div>
+        )}
+        {rollout.data?.required_confirmation && (
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Confirmation phrase: {rollout.data.required_confirmation}
+          </p>
+        )}
+        {promote.error instanceof Error && (
+          <p className="mt-2 text-destructive">{promote.error.message}</p>
+        )}
+      </section>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <section className="flex flex-col gap-4 rounded-lg border bg-card p-4">

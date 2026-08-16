@@ -169,7 +169,6 @@ services:
       test: ["CMD", "python", "-c", "raise SystemExit(0)"]
 
   order-gateway:
-    profiles: ["live"]
     image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/server:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: ["python", "-m", "app.workers.order_gateway"]

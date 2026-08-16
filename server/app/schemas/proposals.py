@@ -225,3 +225,20 @@ class StopStreakResponse(BaseModel):
     tripped: bool
     tripped_at: dt.datetime | None
     trip_position_id: UUID | None
+
+
+class RolloutPromoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_stage: Literal["paper", "reduced_live", "full_live"]
+    confirmation: str = Field(min_length=1, max_length=80)
+    changed_by: str = Field(min_length=1, max_length=120)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class PaperAccountResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation: Literal["CONFIRM_PAPER_RESET"]
+    changed_by: str = Field(min_length=1, max_length=120)
+    reason: str = Field(min_length=1, max_length=500)

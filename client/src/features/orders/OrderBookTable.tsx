@@ -1,5 +1,5 @@
 import React from 'react';
-import { CheckCircle, Clock, FileCheck2, XCircle } from 'lucide-react';
+import { CheckCircle, Clock, XCircle } from 'lucide-react';
 
 export interface OrderIntentItem {
   id: string;
@@ -86,14 +86,14 @@ export const OrderBookTable: React.FC<OrderBookTableProps> = ({ orders }) => {
                   )}
                   {ord.execution_mode === 'paper' && ord.status === 'created' && (
                     <span
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#3b82f6]/10 text-[#3b82f6] border border-[#3b82f6]/30 text-[10px] font-bold"
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/30 text-[10px] font-bold"
                       title={ord.reason}
                     >
-                      <FileCheck2 className="w-3 h-3" /> PAPER LOGGED
+                      <Clock className="w-3 h-3" /> PENDING
                     </span>
                   )}
-                  {ord.execution_mode === 'live' &&
-                    (ord.status === 'created' || ord.status === 'submitted') && (
+                  {(ord.execution_mode === 'live' || ord.execution_mode === 'paper') &&
+                    (ord.status === 'submitted' || ord.status === 'acknowledged' || ord.status === 'partially_filled') && (
                     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/30 text-[10px] font-bold">
                       <Clock className="w-3 h-3" /> PENDING
                     </span>

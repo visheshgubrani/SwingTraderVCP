@@ -16,7 +16,8 @@ import { JournalView } from "@/features/journal/JournalView"
 import { OrderBookTable, type OrderIntentItem } from "@/features/orders/OrderBookTable"
 import { DashboardOverview } from "@/features/overview/DashboardOverview"
 import { PositionsTable, type PositionItem } from "@/features/positions/PositionsTable"
-import { ProposalInbox } from "@/features/proposals/ProposalInbox"
+import { RolloutBanner } from "@/features/proposals/RolloutBanner"
+import { PaperLedgerView } from "@/features/proposals/PaperLedgerView"
 import { ScannerPage } from "@/features/screener/ScannerPage"
 import { TradebookView } from "@/features/tradebook/TradebookView"
 import { useOrderIntents, usePositions } from "@/features/trade/api"
@@ -121,6 +122,7 @@ function AppShell() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TopBar activeLtp={activeInstrument?.ltp} activeSymbol={activeInstrument?.symbol} activeTick={activeInstrument?.tick} setSidebarOpen={setSidebarOpen} sidebarOpen={sidebarOpen} />
+      <RolloutBanner />
       <AuthBanner />
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         <Sidebar open={sidebarOpen} setOpen={setSidebarOpen} />
@@ -163,7 +165,7 @@ const router = createBrowserRouter([
         { path: "tradebook", Component: TradebookView },
         { path: "journal", Component: JournalView },
         { path: "operations", Component: OperationsRoute },
-        { path: "ledger", Component: () => <UnavailableFeature title="Account ledger is not connected" description="No broker ledger API exists in the current backend, so fabricated balances are intentionally hidden." /> },
+        { path: "ledger", Component: PaperLedgerView },
         { path: "*", Component: () => <UnavailableFeature title="Page not found" description="Use the trading workstation navigation to return to an available view." /> },
       ],
     }],

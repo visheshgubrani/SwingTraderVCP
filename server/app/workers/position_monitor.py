@@ -178,19 +178,18 @@ class PositionMonitorRuntime:
                         continue
 
                     if exit_intent_id is not None:
-                        if settings.execution_mode == "live":
-                            async with async_session() as submit_db:
-                                try:
-                                    await submit_live_exit_intent(
-                                        submit_db,
-                                        redis,
-                                        order_intent_id=exit_intent_id,
-                                    )
-                                except Exception:
-                                    logger.exception(
-                                        "Failed submitting live exit for %s",
-                                        exit_intent_id,
-                                    )
+                        async with async_session() as submit_db:
+                            try:
+                                await submit_live_exit_intent(
+                                    submit_db,
+                                    redis,
+                                    order_intent_id=exit_intent_id,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Failed submitting exit for %s",
+                                    exit_intent_id,
+                                )
                         logger.info(
                             "Exit triggered for %s (%s) at LTP %s",
                             position.symbol,

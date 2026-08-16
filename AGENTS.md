@@ -176,9 +176,11 @@ money-path workers into the API process.
   watchlist ∪ open chart sessions ∪ **`NSE:NIFTY50-INDEX` benchmark**. It
   periodically reconciles intraday bars with Fyers data. No entry/risk logic.
 - **Order gateway** — the _only_ component holding the Fyers **order**
-  WebSocket. Receives async place/modify/cancel correlation (`id_fyers`,
-  exchange ids, fills) and persists `order_events` / `order_fills`. Does not
-  decide _when_ to trade.
+  WebSocket in live mode. In paper mode the same process never opens a Fyers
+  order socket; it consumes paper order/trade events and runs the same
+  `process_order_message` / `process_trade_message` fill processors. Receives
+  async place/modify/cancel correlation (`id_fyers`, exchange ids, fills) and
+  persists `order_events` / `order_fills`. Does not decide _when_ to trade.
 - **Execution engine** — the _only_ module allowed to place, modify, or
   cancel orders with Fyers REST. Called by the entry supervisor for approved
   entries/adds/corrections and by the position monitor for exits. Must:
@@ -256,8 +258,10 @@ without updating this file.
 | `routers/*`                  | Thin HTTP; no Fyers orders; no screening loop                   |
 | Browser WS handler           | Fan-out of Redis LTP / position events to sessions              |
 | Tick ingestion worker        | Fyers market WS → Redis/LTP cache; persisted completed 5m bars  |
-| Order gateway worker         | Fyers order WS → order_events / fills                           |
-| Execution engine service     | order_intents + Fyers async REST place/modify/cancel            |
+| Order gateway worker         | Live: Fyers order WS → events/fills. Paper: paper-event drain into the same processors |
+| Paper broker                 | `paper_broker_*` cash/books; never Fyers `/funds` or order APIs                         |
+| P10 rollout                  | `p10_rollout_state` / `p10_rollout_events`; owner-gated stage lock                      |
+| Execution engine service     | order_intents + paper-broker or Fyers async REST place/modify/cancel |
 | Position monitor worker      | positions / position_events; calls execution engine for exits   |
 | Screener / LLM jobs          | scan_runs, screening_results                                    |
 | Proposal worker              | frozen charts, vision attempts, immutable trade proposals       |
@@ -456,10 +460,15 @@ The initial **Balanced** policy is locked as:
 - maximum 8 open positions
 - long-only CNC, maximum three entry legs
 
-Deployable capital is operator-configured but is bounded by a Fyers funds
+Deployable capital is operator-configured but is bounded by a broker funds
 snapshot no older than 15 seconds at execution. Broker-reported available
-funds win when lower; do not optimistically recycle capital before Fyers
+funds win when lower; do not optimistically recycle capital before the broker
 reports it available.
+
+In `EXECUTION_MODE=paper`, that snapshot is the durable paper-broker cash
+ledger (seeded from `deployable_capital_override`, default ₹1,00,000), not
+Fyers `/funds`. Fyers remains market-data and auth only. In live mode the
+snapshot is Fyers Available Balance as before.
 
 - Open risk uses remaining quantity and the current effective stop; risk is
   zero, not negative, when a stop has ratcheted above entry.
@@ -478,7 +487,9 @@ reports it available.
 Approval reserves neither cash nor shares. Immediately before **every** initial
 entry, add, or correction:
 
-1. Fetch fresh Fyers funds, positions, orders, and fills.
+1. Fetch a fresh broker preflight (funds, positions, orders, fills). Paper
+   reads the paper-broker ledger; live reads Fyers. The two books never share
+   one snapshot.
 2. Acquire the Postgres allocation advisory lock.
 3. Reject broker snapshots older than 15 seconds or superseded local allocation
    generations.
@@ -871,19 +882,28 @@ the phase table above is authoritative going forward.
 
 ### 12.2 Rollout gates
 
-1. **Shadow:** generate/audit proposals with no approvals or orders. Validate
+Durable `p10_rollout_state.stage` is `shadow → paper → reduced_live → full_live`.
+Owner-only, never self-promotes, cannot skip. Default `shadow`.
+
+1. **Shadow:** generate/audit proposals with no orders. Reject is allowed.
+   Approve is hard-blocked (API 409); no leg may become `armed`. Validate
    batch deadline, schema reliability, target rejection, and human VCP
    agreement.
 2. **Paper:** run the complete approval, trigger, allocation, multi-leg, exit,
    reconciliation, and restart path for at least 50 triggered proposals with
    zero duplicate orders, unexplained state transitions, or cap breaches beyond
    the explicit one-lot post-fill tolerance. P9 counterfactuals, fresh-trigger
-   resets, and three-stop pause/reset recovery must pass here.
+   resets, and three-stop pause/reset recovery must pass here. Paper uses the
+   same execution-engine claim/submit path and order-gateway fill processors as
+   live; only the transport is a paper broker with a mutating ₹1,00,000 cash
+   ledger. Positions, intents, daily-loss, stop-streak, and reconciliation are
+   scoped by `execution_mode`.
 3. **Reduced live:** explicit operator enablement; size P10 against `0.25×`
-   deployable capital while retaining the same percentage policy. Use small CNC
-   positions and complete live auth, restart, reconciliation, pause, and kill-
-   switch drills. This stage is blocked until an enforced P9 policy references
-   an owner-approved replay-report hash.
+   deployable capital while retaining the same percentage policy. Blocked while
+   any paper nonterminal position/intent exists. Use small CNC positions and
+   complete live auth, restart, reconciliation, pause, and kill-switch drills.
+   This stage is blocked until an enforced P9 policy references an
+   owner-approved replay-report hash.
 4. **Full live:** an explicit risk-policy version change to `1.0×` only after
    reviewing reduced-live fills, slippage, correction, and recovery evidence.
    No stage promotes itself.

@@ -403,22 +403,23 @@ sequenceDiagram
 
     ES->>R: Completed 5-minute bar
     ES->>DB: Two-bar price and relative-volume confirmation
-    ES->>FY: Fresh funds, positions, orders, fills
+    ES->>DB: Fresh broker preflight (paper ledger or Fyers)
     ES->>DB: Acquire allocation lock and recompute all caps
     ES->>DB: Persist sizing and allocation event
     ES->>EE: Request entry or add
+    EE->>R: Check kill switch, gateway, rate limit
+    EE->>DB: Commit submission_pending claim
     alt Paper mode
-        EE->>DB: Persist synthetic fill and open or scale position
+        EE->>DB: Paper broker accepts and books the fill
+        EE->>OG: Paper order/trade events
     else Live mode, double-armed
-        EE->>R: Check kill switch, gateway, auth, rate limit
-        EE->>DB: Commit submission_pending claim
         EE->>FY: POST /orders/async once
         EE->>DB: Record accepted, rejected, or unknown result
         FY-->>OG: Order and trade socket messages
-        OG->>DB: Persist replay-safe events and fills
-        OG->>DB: Advance position from fill facts
-        ES->>DB: Post-fill risk recheck; tighten and/or trim
     end
+    OG->>DB: Persist replay-safe events and fills
+    OG->>DB: Advance position from fill facts
+    ES->>DB: Post-fill risk recheck; tighten and/or trim
 ```
 
 Approval before 09:00 Asia/Kolkata on D1 arms the initial leg for **D1 only**.
@@ -429,10 +430,11 @@ policy may tighten or block an approved proposal at execution; it may never
 enlarge it without reapproval.
 
 Live placement still requires both `EXECUTION_MODE=live` and
-`LIVE_ORDER_PLACEMENT_ENABLED=true`. P10 operational rollout is separately
-gated: Shadow → Paper → reduced live (`0.25×` capital) → full live. No stage
+`LIVE_ORDER_PLACEMENT_ENABLED=true`. P10 operational rollout is a durable
+stage lock: Shadow (approve hard-blocked) → Paper (unified fill path, ₹1L
+paper ledger) → reduced live (`0.25×` capital) → full live. No stage
 promotes itself. Reduced live additionally requires an owner-approved P9
-replay-report hash on an enforced market-context policy.
+replay-report hash on an enforced market-context policy and empty paper books.
 
 ### 7.1 Intraday confirmation and adds
 
@@ -461,7 +463,8 @@ every unfilled add leg.
 Approval reserves neither cash nor shares. Immediately before every initial
 entry, add, or correction the supervisor:
 
-1. Fetches fresh Fyers funds, positions, orders, and fills.
+1. Fetches a fresh broker preflight. Paper reads the paper-broker ledger;
+   live reads Fyers funds, positions, orders, and fills.
 2. Acquires the Postgres allocation advisory lock.
 3. Rejects broker snapshots older than 15 seconds or superseded local
    allocation generations.
@@ -791,7 +794,7 @@ proposal worker
 tick ingestion worker
 entry supervisor
 position monitor
-order gateway (live mode only)
+order gateway (paper event drain or live Fyers order WS)
 React static application
 PostgreSQL
 Redis

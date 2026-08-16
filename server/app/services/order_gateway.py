@@ -11,6 +11,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.domain.trading import realized_pnl_on_exit
 from app.domain.p10_geometry import floor_to_tick
 from app.domain.p10_sizing import apportion_staged_exits
@@ -725,7 +726,7 @@ async def _find_intent(
                 p.open_quantity
             FROM order_intents oi
             JOIN positions p ON p.id = oi.position_id
-            WHERE oi.execution_mode = 'live'
+            WHERE oi.execution_mode = :execution_mode
               AND (
                     (:async_id IS NOT NULL AND oi.fyers_async_id = :async_id)
                  OR (:fyers_order_id IS NOT NULL
@@ -739,6 +740,7 @@ async def _find_intent(
             """
         ),
         {
+            "execution_mode": settings.execution_mode,
             "async_id": async_id,
             "fyers_order_id": fyers_order_id,
             "exchange_order_id": exchange_order_id,

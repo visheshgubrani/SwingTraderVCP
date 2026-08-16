@@ -1,5 +1,6 @@
 from typing import Literal, Self
 from urllib.parse import quote
+from decimal import Decimal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
@@ -87,6 +88,8 @@ class Settings(BaseSettings):
     # prevents an accidental EXECUTION_MODE change from moving money.
     execution_mode: Literal["paper", "live"] = "paper"
     live_order_placement_enabled: bool = False
+    # Fake P10 paper seed in INR. Keep aligned with deployable_capital_override.
+    paper_initial_capital: Decimal = Decimal("100000")
     fyers_async_orders_url: str = "https://api-t1.fyers.in/api/v3/orders/async"
     fyers_api_base_url: str = "https://api-t1.fyers.in/api/v3"
     fyers_order_timeout_seconds: float = Field(default=10.0, gt=0, le=30)

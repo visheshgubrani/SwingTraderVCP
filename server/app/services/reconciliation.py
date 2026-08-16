@@ -17,6 +17,7 @@ from app.database import async_session
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.services.fyers_broker_reads import BrokerBooks, FyersBrokerReadClient, FyersBrokerReadError
 from app.services.order_gateway import process_order_message, process_trade_message
+from app.services.paper_broker import PaperBrokerError, fetch_preflight as fetch_paper_preflight
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,14 @@ async def run_reconciliation(
         await db.commit()
 
         try:
-            access_token = await get_valid_access_token(redis)
-            client = FyersBrokerReadClient(app_id=settings.fyers_app_id)
-            books = await client.fetch_all(access_token=access_token)
-        except (AuthUnavailableError, FyersBrokerReadError) as exc:
+            if settings.execution_mode == "paper":
+                snapshot = await fetch_paper_preflight(db)
+                books = snapshot.books
+            else:
+                access_token = await get_valid_access_token(redis)
+                client = FyersBrokerReadClient(app_id=settings.fyers_app_id)
+                books = await client.fetch_all(access_token=access_token)
+        except (AuthUnavailableError, FyersBrokerReadError, PaperBrokerError) as exc:
             await _fail_runs(
                 db,
                 job_run_id=job_run_id,
@@ -501,11 +506,12 @@ async def _load_live_intents(db: AsyncSession) -> list[dict[str, Any]]:
                 p.open_quantity
             FROM order_intents oi
             JOIN positions p ON p.id = oi.position_id
-            WHERE oi.execution_mode = 'live'
+            WHERE oi.execution_mode = :execution_mode
               AND oi.status NOT IN ('rejected', 'cancelled')
             ORDER BY oi.created_at ASC
             """
-        )
+        ),
+        {"execution_mode": settings.execution_mode},
     )
     return [dict(row) for row in result.mappings().all()]
 
@@ -537,9 +543,11 @@ async def _load_open_positions(db: AsyncSession) -> list[dict[str, Any]]:
             FROM positions p
             JOIN instruments i ON i.id = p.instrument_id
             WHERE p.state NOT IN ('closed', 'cancelled')
+              AND p.execution_mode = :execution_mode
             ORDER BY i.fyers_symbol ASC
             """
-        )
+        ),
+        {"execution_mode": settings.execution_mode},
     )
     return [dict(row) for row in result.mappings().all()]
 

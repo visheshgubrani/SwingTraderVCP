@@ -222,7 +222,7 @@ async def ensure_order_gateway_ready(redis) -> None:
     raw = await redis.get("order_gateway:status")
     if raw is None:
         raise ExecutionBlockedError(
-            "Live order gateway heartbeat is unavailable; execution fails closed."
+            "Order gateway heartbeat is unavailable; execution fails closed."
         )
     if isinstance(raw, bytes):
         raw = raw.decode()
@@ -234,11 +234,11 @@ async def ensure_order_gateway_ready(redis) -> None:
         age_seconds = (datetime.now(timezone.utc) - heartbeat_at).total_seconds()
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ExecutionBlockedError(
-            "Live order gateway heartbeat is invalid; execution fails closed."
+            "Order gateway heartbeat is invalid; execution fails closed."
         ) from exc
     if status.get("status") != "running" or age_seconds > 30:
         raise ExecutionBlockedError(
-            "Live order gateway is not healthy; execution fails closed."
+            "Order gateway is not healthy; execution fails closed."
         )
 
 
@@ -488,11 +488,13 @@ async def create_proposal_entry_intent(
                     id, instrument_id, screening_result_id, state, side,
                     quantity, open_quantity, product_type, current_stop_loss,
                     current_target, trailing_rule, proposal_id, entry_template,
-                    trailing_rule_type, t1_target, t2_target, t3_target
+                    trailing_rule_type, t1_target, t2_target, t3_target,
+                    execution_mode
                 ) VALUES (
                     :id, :instrument_id, :screening_result_id, 'pending_entry', 'long',
                     :quantity, 0, 'CNC', :stop, NULL, CAST(:trailing_rule AS jsonb),
-                    :proposal_id, :entry_template, 'p10_staged_atr', :t1, :t2, :t3
+                    :proposal_id, :entry_template, 'p10_staged_atr', :t1, :t2, :t3,
+                    :execution_mode
                 )
                 """
             ),
@@ -513,6 +515,7 @@ async def create_proposal_entry_intent(
                 "t1": plan["t1"],
                 "t2": plan["t2"],
                 "t3": plan["t3"],
+                "execution_mode": execution_mode,
             },
         )
     else:
@@ -1423,15 +1426,10 @@ async def submit_live_exit_intent(
     order_intent_id: UUID,
     broker_client: FyersAsyncOrderClient | None = None,
     rate_limiter: RedisOrderRateLimiter | None = None,
+    fill_price: Decimal | None = None,
 ) -> SubmissionResult:
-    """Claim and submit a durable live exit intent exactly once."""
+    """Claim and submit a durable exit intent exactly once."""
     ensure_execution_mode_armed()
-    if settings.execution_mode != "live":
-        return SubmissionResult(
-            broker_call_made=False,
-            outcome="paper_logged",
-            message="Paper intent logged; no broker request was made.",
-        )
 
     snapshot = await _load_live_intent_for_submission(db, order_intent_id)
     if snapshot["intent_type"] == "entry":
@@ -1456,10 +1454,12 @@ async def submit_live_exit_intent(
         )
 
     await ensure_orders_allowed(db)
-    try:
-        access_token = await get_valid_access_token(redis)
-    except AuthUnavailableError as exc:
-        raise ExecutionBlockedError(str(exc)) from exc
+    access_token = None
+    if settings.execution_mode == "live":
+        try:
+            access_token = await get_valid_access_token(redis)
+        except AuthUnavailableError as exc:
+            raise ExecutionBlockedError(str(exc)) from exc
 
     await ensure_order_gateway_ready(redis)
     limiter = rate_limiter or RedisOrderRateLimiter(
@@ -1477,14 +1477,17 @@ async def submit_live_exit_intent(
             SET
                 status = 'submission_pending',
                 broker_requested_at = now(),
-                reason = 'Claimed for one async Fyers exit submission; automatic concurrent retries are blocked.'
+                reason = 'Claimed for one async exit submission; automatic concurrent retries are blocked.'
             WHERE id = :order_intent_id
-              AND execution_mode = 'live'
+              AND execution_mode = :execution_mode
               AND status = 'created'
             RETURNING id
             """
         ),
-        {"order_intent_id": order_intent_id},
+        {
+            "order_intent_id": order_intent_id,
+            "execution_mode": settings.execution_mode,
+        },
     )
     if claim.mappings().one_or_none() is None:
         await db.rollback()
@@ -1495,11 +1498,16 @@ async def submit_live_exit_intent(
         )
     await db.commit()
 
+    if settings.execution_mode == "paper":
+        return await _complete_paper_submission(
+            db, redis, snapshot=snapshot, fill_price=fill_price
+        )
+
     payload = _build_fyers_order_payload(snapshot)
     client = broker_client or FyersAsyncOrderClient(app_id=settings.fyers_app_id)
     try:
         acceptance = await client.place_order(
-            access_token=access_token,
+            access_token=access_token or "",
             payload=payload,
         )
     except BrokerOrderRejectedError as exc:
@@ -1617,15 +1625,10 @@ async def submit_live_entry_intent(
     order_intent_id: UUID,
     broker_client: FyersAsyncOrderClient | None = None,
     rate_limiter: RedisOrderRateLimiter | None = None,
+    fill_price: Decimal | None = None,
 ) -> SubmissionResult:
-    """Claim and submit a durable live intent exactly once automatically."""
+    """Claim and submit a durable entry intent exactly once automatically."""
     ensure_execution_mode_armed()
-    if settings.execution_mode != "live":
-        return SubmissionResult(
-            broker_call_made=False,
-            outcome="paper_logged",
-            message="Paper intent logged; no broker request was made.",
-        )
 
     snapshot = await _load_live_intent_for_submission(db, order_intent_id)
     if snapshot["intent_type"] != "entry":
@@ -1649,10 +1652,12 @@ async def submit_live_entry_intent(
         )
 
     await ensure_orders_allowed(db)
-    try:
-        access_token = await get_valid_access_token(redis)
-    except AuthUnavailableError as exc:
-        raise ExecutionBlockedError(str(exc)) from exc
+    access_token = None
+    if settings.execution_mode == "live":
+        try:
+            access_token = await get_valid_access_token(redis)
+        except AuthUnavailableError as exc:
+            raise ExecutionBlockedError(str(exc)) from exc
 
     await ensure_order_gateway_ready(redis)
     limiter = rate_limiter or RedisOrderRateLimiter(
@@ -1671,14 +1676,17 @@ async def submit_live_entry_intent(
             SET
                 status = 'submission_pending',
                 broker_requested_at = now(),
-                reason = 'Claimed for one async Fyers submission; automatic concurrent retries are blocked.'
+                reason = 'Claimed for one async submission; automatic concurrent retries are blocked.'
             WHERE id = :order_intent_id
-              AND execution_mode = 'live'
+              AND execution_mode = :execution_mode
               AND status = 'created'
             RETURNING id
             """
         ),
-        {"order_intent_id": order_intent_id},
+        {
+            "order_intent_id": order_intent_id,
+            "execution_mode": settings.execution_mode,
+        },
     )
     if claim.mappings().one_or_none() is None:
         await db.rollback()
@@ -1691,11 +1699,16 @@ async def submit_live_entry_intent(
     # before the HTTP request can leave this process.
     await db.commit()
 
+    if settings.execution_mode == "paper":
+        return await _complete_paper_submission(
+            db, redis, snapshot=snapshot, fill_price=fill_price
+        )
+
     payload = _build_fyers_order_payload(snapshot)
     client = broker_client or FyersAsyncOrderClient(app_id=settings.fyers_app_id)
     try:
         acceptance = await client.place_order(
-            access_token=access_token,
+            access_token=access_token or "",
             payload=payload,
         )
     except BrokerOrderRejectedError as exc:
@@ -1806,6 +1819,104 @@ async def submit_live_entry_intent(
     )
 
 
+async def _complete_paper_submission(
+    db: AsyncSession,
+    redis,
+    *,
+    snapshot: dict[str, Any],
+    fill_price: Decimal | None,
+) -> SubmissionResult:
+    """Accept a claimed paper intent, book the fill, and run gateway processors."""
+    from app.services.order_gateway import process_order_message, process_trade_message
+    from app.services.paper_broker import (
+        PaperBrokerError,
+        place_paper_order,
+        publish_paper_fill_events,
+    )
+
+    price = fill_price
+    if price is None:
+        raw = await redis.get(f"ltp:{snapshot['symbol']}")
+        if raw is None:
+            await _record_definite_rejection(
+                db,
+                snapshot=snapshot,
+                payload={"s": "error", "message": "missing LTP"},
+                message="Paper submission requires a fill price or fresh LTP.",
+            )
+            await db.commit()
+            return SubmissionResult(
+                broker_call_made=True,
+                outcome="rejected",
+                message="Paper submission requires a fill price or fresh LTP.",
+            )
+        payload = json.loads(raw)
+        price = Decimal(str(payload["ltp"]))
+    try:
+        paper_result = await place_paper_order(
+            db, snapshot=snapshot, fill_price=price
+        )
+    except PaperBrokerError as exc:
+        await _record_definite_rejection(
+            db,
+            snapshot=snapshot,
+            payload={"s": "error", "message": str(exc)},
+            message=str(exc),
+        )
+        await db.commit()
+        return SubmissionResult(
+            broker_call_made=True,
+            outcome="rejected",
+            message=str(exc),
+        )
+
+    recorded = await db.execute(
+        text(
+            """
+            UPDATE order_intents
+            SET
+                status = CASE
+                    WHEN status = 'submission_pending' THEN 'submitted'
+                    ELSE status
+                END,
+                fyers_async_id = COALESCE(fyers_async_id, :fyers_async_id),
+                fyers_order_id = COALESCE(fyers_order_id, :fyers_order_id),
+                broker_responded_at = now(),
+                reason = CASE
+                    WHEN status = 'submission_pending'
+                    THEN 'Paper broker accepted; applying synthetic fill events.'
+                    ELSE reason
+                END
+            WHERE id = :order_intent_id
+              AND status NOT IN ('submission_unknown', 'rejected', 'cancelled')
+            RETURNING id
+            """
+        ),
+        {
+            "order_intent_id": snapshot["id"],
+            "fyers_async_id": paper_result.fyers_async_id,
+            "fyers_order_id": paper_result.fyers_order_id,
+        },
+    )
+    if recorded.mappings().one_or_none() is None:
+        await db.rollback()
+        raise ExecutionSafetyError(
+            "The intent changed state while recording paper acceptance."
+        )
+    await process_order_message(db, paper_result.order_message)
+    await process_trade_message(db, paper_result.trade_message)
+    await db.commit()
+    try:
+        await publish_paper_fill_events(redis, paper_result)
+    except Exception:
+        pass
+    return SubmissionResult(
+        broker_call_made=True,
+        outcome="submitted",
+        message="Paper broker accepted and applied the fill.",
+    )
+
+
 async def _load_live_intent_for_submission(
     db: AsyncSession,
     order_intent_id: UUID,
@@ -1860,10 +1971,12 @@ async def _load_live_intent_for_submission(
     if row is None:
         raise ExecutionSafetyError("Order intent was not found.")
     snapshot = dict(row)
-    if snapshot["execution_mode"] != "live":
-        raise ExecutionSafetyError("Only a live intent can be submitted here.")
+    if snapshot["execution_mode"] != settings.execution_mode:
+        raise ExecutionSafetyError(
+            "Intent execution_mode does not match the process EXECUTION_MODE."
+        )
     if snapshot["product_type"] != "CNC":
-        raise ExecutionSafetyError("Live intents require product_type=CNC.")
+        raise ExecutionSafetyError("Intents require product_type=CNC.")
 
     intent_type = snapshot["intent_type"]
     if intent_type == "entry":

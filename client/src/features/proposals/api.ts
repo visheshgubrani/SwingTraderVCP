@@ -130,9 +130,50 @@ export interface StopStreakState {
   trip_position_id: string | null
 }
 
+export type P10RolloutStage = "shadow" | "paper" | "reduced_live" | "full_live"
+
+export interface P10RolloutState {
+  stage: P10RolloutStage
+  changed_by: string
+  changed_at: string
+  reason: string | null
+  next_stage: P10RolloutStage | null
+  required_confirmation: string | null
+  execution_mode: "paper" | "live"
+  live_order_placement_enabled: boolean
+  approvals_allowed: boolean
+}
+
+export interface PaperPortfolio {
+  starting_cash: number
+  cash_available: number
+  invested_notional: number
+  equity: number
+  open_risk: number
+  realized_pnl: number
+  unrealized_pnl: number
+  closed_trade_count: number
+  win_rate: number | null
+  average_r_multiple: number | null
+  max_drawdown_from_start: number
+  seeded_from_policy_version: number | null
+  seeded_at: string
+  updated_at: string
+  open_positions: Array<{
+    id: string
+    symbol: string
+    state: string
+    open_quantity: number
+    average_entry_price: number | null
+    realized_pnl: number | null
+  }>
+}
+
 const operationsKeys = {
   marketContext: ["automation", "market-context", "latest"] as const,
   stopStreak: (mode: "paper" | "live") => ["automation", "stop-streak", mode] as const,
+  rollout: ["automation", "rollout"] as const,
+  paperPortfolio: ["automation", "paper-portfolio"] as const,
 }
 
 async function responseJson<T>(response: Response, fallback: string): Promise<T> {
@@ -188,6 +229,92 @@ export function useResetStopStreak() {
       ),
     onSuccess: (state) => {
       queryClient.setQueryData(operationsKeys.stopStreak(state.execution_mode), state)
+    },
+  })
+}
+
+export function useP10Rollout() {
+  return useQuery<P10RolloutState>({
+    queryKey: operationsKeys.rollout,
+    queryFn: async () => responseJson(
+      await fetch("/api/v1/automation/rollout"),
+      "Failed to fetch P10 rollout stage",
+    ),
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+  })
+}
+
+export function usePromoteP10Rollout() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({
+      targetStage,
+      confirmation,
+      changedBy,
+      reason,
+    }: {
+      targetStage: Exclude<P10RolloutStage, "shadow">
+      confirmation: string
+      changedBy: string
+      reason: string
+    }) => responseJson<P10RolloutState>(
+      await fetch("/api/v1/automation/rollout/promote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_stage: targetStage,
+          confirmation,
+          changed_by: changedBy,
+          reason,
+        }),
+      }),
+      "Failed to promote P10 rollout stage",
+    ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: operationsKeys.rollout })
+      void queryClient.invalidateQueries({ queryKey: operationsKeys.paperPortfolio })
+    },
+  })
+}
+
+export function usePaperPortfolio(enabled = true) {
+  return useQuery<PaperPortfolio>({
+    queryKey: operationsKeys.paperPortfolio,
+    queryFn: async () => responseJson(
+      await fetch("/api/v1/automation/paper-portfolio"),
+      "Failed to fetch paper portfolio",
+    ),
+    enabled,
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+    retry: false,
+  })
+}
+
+export function useResetPaperPortfolio() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({
+      changedBy,
+      reason,
+    }: {
+      changedBy: string
+      reason: string
+    }) => responseJson<{ starting_cash: number; cash_available: number }>(
+      await fetch("/api/v1/automation/paper-portfolio/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          confirmation: "CONFIRM_PAPER_RESET",
+          changed_by: changedBy,
+          reason,
+        }),
+      }),
+      "Failed to reset paper portfolio",
+    ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: operationsKeys.paperPortfolio })
     },
   })
 }

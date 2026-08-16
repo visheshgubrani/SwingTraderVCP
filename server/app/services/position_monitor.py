@@ -20,7 +20,6 @@ from app.domain.trading import (
 )
 from app.services.execution_engine import (
     create_exit_intent,
-    complete_paper_exit,
     publish_tick_subscriptions,
 )
 from app.services.staged_exit_manager import (
@@ -142,9 +141,11 @@ async def load_monitored_positions(db: AsyncSession) -> list[MonitoredPosition]:
             JOIN instruments i ON i.id = p.instrument_id
             LEFT JOIN trade_proposals tp ON tp.id = p.proposal_id
             WHERE p.state NOT IN ('closed', 'cancelled')
+              AND p.execution_mode = :execution_mode
               AND i.fyers_symbol IS NOT NULL
             """
-        )
+        ),
+        {"execution_mode": settings.execution_mode},
     )
     positions: list[MonitoredPosition] = []
     for row in result.mappings().all():
@@ -342,13 +343,6 @@ async def trigger_exit_for_signal(
     if intent_ref is None:
         return None
 
-    if settings.execution_mode == "paper":
-        await complete_paper_exit(
-            db,
-            order_intent_id=intent_ref.id,
-            position_id=position.id,
-            exit_price=signal.trigger_price,
-        )
     return intent_ref.id
 
 
@@ -548,13 +542,6 @@ async def _process_p10_position_tick(
     )
     if intent is None:
         return None
-    if settings.execution_mode == "paper":
-        await complete_paper_exit(
-            db,
-            order_intent_id=intent.id,
-            position_id=position.id,
-            exit_price=action.trigger_price,
-        )
     return intent.id
 
 

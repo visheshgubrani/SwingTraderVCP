@@ -55,8 +55,6 @@ from app.services.bar_aggregator import REDIS_CHANNEL_5M_BARS
 from app.services.execution_engine import (
     ExecutionBlockedError,
     _order_tag,
-    complete_paper_entry_fill,
-    complete_paper_exit,
     create_exit_intent,
     create_proposal_entry_intent,
     submit_live_entry_intent,
@@ -66,6 +64,7 @@ from app.services.fyers_broker_reads import (
     BrokerPreflightSnapshot,
     FyersBrokerReadClient,
 )
+from app.services.paper_broker import PaperBrokerError, fetch_preflight as fetch_paper_preflight
 from app.services.p9_allocation_gate import emit_p9_gate_event, load_p9_allocation_gate
 from app.services.risk_stop_streak import synchronize_stop_streak
 
@@ -229,11 +228,13 @@ async def load_portfolio_state_under_lock(
                 FROM positions p
                 JOIN instruments i ON i.id = p.instrument_id
                 LEFT JOIN trade_proposals tp ON tp.id = p.proposal_id
-                WHERE p.state IN (
+                WHERE p.execution_mode = :execution_mode
+                  AND p.state IN (
                     'pending_entry', 'open', 'trailing_active', 'exit_pending'
                 )
                 """
-            )
+            ),
+            {"execution_mode": settings.execution_mode},
         )
     ).mappings().all()
 
@@ -328,10 +329,11 @@ async def load_portfolio_state_under_lock(
                 JOIN order_intents oi ON oi.id = f.order_intent_id
                 JOIN positions p ON p.id = oi.position_id
                 WHERE oi.intent_type <> 'entry'
+                  AND p.execution_mode = :execution_mode
                   AND (f.filled_at AT TIME ZONE 'Asia/Kolkata')::date = :today
                 """
             ),
-            {"today": today_ist},
+            {"today": today_ist, "execution_mode": settings.execution_mode},
         )
     ).mappings().all()
     daily_losses = Decimal("0")
@@ -424,6 +426,12 @@ async def _fresh_ltp(redis: aioredis.Redis, symbol: str) -> Decimal:
 
 
 async def _fetch_broker_preflight(redis: aioredis.Redis) -> BrokerPreflightSnapshot:
+    if settings.execution_mode == "paper":
+        async with async_session() as db:
+            try:
+                return await fetch_paper_preflight(db)
+            except PaperBrokerError as exc:
+                raise ExecutionBlockedError(str(exc)) from exc
     try:
         token = await get_valid_access_token(redis)
     except AuthUnavailableError as exc:
@@ -448,10 +456,12 @@ async def verify_broker_state_under_lock(
                 FROM positions p
                 JOIN instruments i ON i.id = p.instrument_id
                 WHERE p.state IN ('open', 'trailing_active', 'exit_pending')
+                  AND p.execution_mode = :execution_mode
                   AND p.open_quantity > 0
                 GROUP BY i.fyers_symbol
                 """
-            )
+            ),
+            {"execution_mode": settings.execution_mode},
         )
     ).mappings().all()
     local_qty = {row["symbol"]: int(row["quantity"]) for row in local_positions}
@@ -479,10 +489,11 @@ async def verify_broker_state_under_lock(
                 """
                 SELECT id, fyers_async_id, fyers_order_id, exchange_order_id
                 FROM order_intents
-                WHERE execution_mode = 'live'
+                WHERE execution_mode = :execution_mode
                   AND status NOT IN ('filled', 'rejected', 'cancelled')
                 """
-            )
+            ),
+            {"execution_mode": settings.execution_mode},
         )
     ).mappings().all()
     known_order_keys: set[str] = set()
@@ -516,7 +527,17 @@ async def verify_broker_state_under_lock(
     known_trade_ids = {
         str(row[0])
         for row in (
-            await db.execute(text("SELECT fyers_trade_id FROM order_fills"))
+            await db.execute(
+                text(
+                    """
+                    SELECT f.fyers_trade_id
+                    FROM order_fills f
+                    JOIN order_intents oi ON oi.id = f.order_intent_id
+                    WHERE oi.execution_mode = :execution_mode
+                    """
+                ),
+                {"execution_mode": settings.execution_mode},
+            )
         ).all()
         if row[0]
     }
@@ -547,8 +568,7 @@ async def execute_confirmed_leg_allocation(
         age = (dt.datetime.now(dt.timezone.utc) - broker_snapshot.fetched_at).total_seconds()
         if age > BROKER_SNAPSHOT_MAX_AGE_SECONDS:
             raise ExecutionBlockedError("Broker preflight snapshot is older than 15 seconds.")
-        if settings.execution_mode == "live":
-            await verify_broker_state_under_lock(db, broker_snapshot)
+        await verify_broker_state_under_lock(db, broker_snapshot)
 
         leg = (
             await db.execute(
@@ -817,15 +837,14 @@ async def execute_confirmed_leg_allocation(
         )
 
         if settings.execution_mode == "paper":
-            await complete_paper_entry_fill(
-                db,
-                order_intent_id=intent.id,
-                position_id=position_id,
-                fill_price=current_price,
-                quantity=sizing.shares,
-            )
             await db.commit()
-            return True
+            result = await submit_live_entry_intent(
+                db,
+                redis,
+                order_intent_id=intent.id,
+                fill_price=current_price,
+            )
+            return result.outcome == "submitted"
 
         # Reservation + intent become durable before the only broker caller
         # releases the HTTP request. Its internal claim remains replay-safe.
@@ -1468,8 +1487,7 @@ async def recheck_filled_entry_risk(redis: aioredis.Redis) -> int:
             )
             if (dt.datetime.now(dt.timezone.utc) - snapshot.fetched_at).total_seconds() > 15:
                 raise ExecutionBlockedError("Post-fill broker snapshot is stale.")
-            if settings.execution_mode == "live":
-                await verify_broker_state_under_lock(db, snapshot)
+            await verify_broker_state_under_lock(db, snapshot)
             row = (
                 await db.execute(
                     text(
@@ -1701,16 +1719,14 @@ async def recheck_filled_entry_risk(redis: aioredis.Redis) -> int:
                     "details": json.dumps(details),
                 },
             )
-            if settings.execution_mode == "paper" and intent_to_submit is not None:
-                await complete_paper_exit(
-                    db, order_intent_id=intent_to_submit,
-                    position_id=row["position_id"], exit_price=current_price,
-                )
             await db.commit()
-        if settings.execution_mode == "live" and intent_to_submit is not None:
+        if intent_to_submit is not None:
             async with async_session() as submit_db:
                 await submit_live_exit_intent(
-                    submit_db, redis, order_intent_id=intent_to_submit
+                    submit_db,
+                    redis,
+                    order_intent_id=intent_to_submit,
+                    fill_price=current_price,
                 )
         corrected += 1
     return corrected

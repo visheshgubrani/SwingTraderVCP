@@ -54,6 +54,9 @@ architecture and component-boundary source of truth.
 - `migrations/018_p9_market_context.sql` - adds immutable P9 policy, market and
   sector snapshots, contextual screening/allocation audit links, metadata-driven
   P9 indices, and execution-mode-isolated consecutive-stop breaker state/events.
+- `migrations/019_p10_paper_broker.sql` - adds `positions.execution_mode`, the
+  ₹1,00,000 paper-broker cash/books ledger, and durable `p10_rollout_state`
+  starting at Shadow.
 
 ## Domain Layout
 
@@ -164,7 +167,9 @@ Model reasoning details and provider credentials are never stored.
 P3 persists `product_type = 'CNC'` and `execution_mode = 'paper'` on the
 money-path records. Confirmation creates exactly one pending position and one
 entry intent per trade instruction. The intent remains `created`: this means
-the paper engine logged it but deliberately made no broker request.
+the paper engine logged it but deliberately made no broker request. That
+shortcut remains for the manual P3 form only. Scanner-sourced P10 paper uses
+the same claim → paper-broker accept → order-gateway fill processors as live.
 
 ## P4 Live Entry and Order Gateway
 

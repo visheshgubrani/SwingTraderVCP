@@ -168,17 +168,18 @@ docker exec -i algo-trading-postgres \
   < server/db/migrations/002_p4_live_order_gateway.sql
 ```
 
-Run the single order gateway as its own supervised process whenever live mode
-is armed:
+Run the single order gateway as its own supervised process in **both paper and
+live**. Paper drains Redis `paper_order_events` into the same fill processors;
+it must not open a Fyers order WebSocket. Live owns the one Fyers order
+WebSocket and subscribes only to `OnOrders,OnTrades`.
 
 ```bash
 cd server
 uv run python -m app.workers.order_gateway
 ```
 
-The gateway owns the one Fyers order WebSocket and subscribes only to
-`OnOrders,OnTrades`. A Redis singleton lock prevents two gateways from running
-at once.
+A Redis singleton lock prevents two gateways from running at once. P10 paper
+entries fail closed if this heartbeat is missing.
 
 ## P5 position monitor
 

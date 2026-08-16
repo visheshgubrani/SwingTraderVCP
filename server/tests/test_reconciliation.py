@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from app.config import settings
 from app.services.auth_service import AuthUnavailableError
 from app.services.execution_engine import _order_tag
 from app.services.fyers_broker_reads import (
@@ -363,10 +364,13 @@ class RunReconciliationJobTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.services.reconciliation.async_session") as session_ctx:
             session_ctx.return_value.__aenter__.return_value = db
-            with patch(
-                "app.services.reconciliation.get_valid_access_token",
-                new=AsyncMock(
-                    side_effect=AuthUnavailableError("auth down"),
+            with (
+                patch.object(settings, "execution_mode", "live"),
+                patch(
+                    "app.services.reconciliation.get_valid_access_token",
+                    new=AsyncMock(
+                        side_effect=AuthUnavailableError("auth down"),
+                    ),
                 ),
             ):
                 result = await run_reconciliation(ctx, triggered_by="manual")
@@ -378,6 +382,29 @@ class RunReconciliationJobTests(unittest.IsolatedAsyncioTestCase):
             if "status = 'failed'" in str(call.args[0])
         ]
         self.assertTrue(failed_updates)
+
+    async def test_paper_unseeded_marks_run_failed(self) -> None:
+        ctx = {"redis": AsyncMock(), "job_id": "job-paper"}
+        db = AsyncMock()
+        db.commit = AsyncMock()
+        db.execute = AsyncMock(
+            side_effect=[
+                FakeResult(row=uuid4()),
+                FakeResult(row=uuid4()),
+                FakeResult(row=None),
+                FakeResult(),
+                FakeResult(),
+                FakeResult(),
+            ]
+        )
+
+        with patch("app.services.reconciliation.async_session") as session_ctx:
+            session_ctx.return_value.__aenter__.return_value = db
+            with patch.object(settings, "execution_mode", "paper"):
+                result = await run_reconciliation(ctx, triggered_by="manual")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("not seeded", result["error"])
 
 
 class ReconciliationScheduleTests(unittest.TestCase):

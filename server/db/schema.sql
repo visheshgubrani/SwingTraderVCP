@@ -561,6 +561,7 @@ CREATE TABLE positions (
     ),
     trailing_rule jsonb NOT NULL DEFAULT '{}'::jsonb,
     realized_pnl numeric(18, 4) NOT NULL DEFAULT 0,
+    execution_mode text NOT NULL DEFAULT 'paper',
     opened_at timestamptz,
     closed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -577,6 +578,9 @@ CREATE TABLE positions (
     ),
     CONSTRAINT positions_side_check CHECK (side IN ('long', 'short')),
     CONSTRAINT positions_product_type_check CHECK (product_type IN ('CNC')),
+    CONSTRAINT positions_execution_mode_check CHECK (
+        execution_mode IN ('paper', 'live')
+    ),
     CONSTRAINT positions_open_quantity_lte_quantity_check CHECK (open_quantity <= quantity),
     CONSTRAINT positions_dates_check CHECK (
         closed_at IS NULL OR opened_at IS NULL OR closed_at >= opened_at
@@ -1405,6 +1409,18 @@ EXECUTE FUNCTION set_updated_at();
 CREATE UNIQUE INDEX risk_policies_single_active_uidx
 ON risk_policies ((true)) WHERE is_active = true;
 
+INSERT INTO risk_policies (
+    version, name, is_active, risk_per_trade_pct, max_total_open_risk_pct,
+    max_single_name_notional_pct, max_sector_notional_pct, max_cluster_notional_pct,
+    correlation_cluster_threshold, correlation_lookback_sessions,
+    daily_loss_limit_pct, max_open_positions, deployable_capital_override
+)
+VALUES (
+    1, 'Balanced', true, 0.0100, 0.0400, 0.1500, 0.3000, 0.3000,
+    0.80, 60, 0.0200, 8, 100000.0000
+)
+ON CONFLICT (version) DO NOTHING;
+
 CREATE TABLE allocation_ledger (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     generation integer NOT NULL,
@@ -1482,7 +1498,8 @@ ALTER TABLE positions
     ADD COLUMN IF NOT EXISTS t1_filled_shares integer NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS t2_filled_shares integer NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS t3_filled_shares integer NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS runner_filled_shares integer NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS runner_filled_shares integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS execution_mode text NOT NULL DEFAULT 'paper';
 
 ALTER TABLE order_intents
     ADD COLUMN IF NOT EXISTS proposal_id uuid REFERENCES trade_proposals(id) ON DELETE SET NULL,
@@ -1784,6 +1801,98 @@ CREATE TABLE risk_stop_streak_events (
 
 CREATE INDEX risk_stop_streak_events_mode_closed_idx
 ON risk_stop_streak_events (execution_mode, closed_at, created_at);
+
+ALTER TABLE positions
+    DROP CONSTRAINT IF EXISTS positions_execution_mode_check;
+ALTER TABLE positions
+    ADD CONSTRAINT positions_execution_mode_check CHECK (
+        execution_mode IN ('paper', 'live')
+    );
+CREATE INDEX IF NOT EXISTS positions_execution_mode_state_idx
+ON positions (execution_mode, state);
+
+CREATE TABLE IF NOT EXISTS paper_broker_account (
+    id boolean PRIMARY KEY DEFAULT true CHECK (id),
+    starting_cash numeric(18, 4) NOT NULL CHECK (starting_cash > 0),
+    cash_available numeric(18, 4) NOT NULL CHECK (cash_available >= 0),
+    seeded_from_policy_version integer REFERENCES risk_policies(version),
+    seeded_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS paper_broker_orders (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_intent_id uuid NOT NULL REFERENCES order_intents(id),
+    fyers_async_id text NOT NULL UNIQUE,
+    fyers_order_id text NOT NULL UNIQUE,
+    symbol text NOT NULL,
+    side text NOT NULL CHECK (side IN ('buy', 'sell')),
+    quantity integer NOT NULL CHECK (quantity > 0),
+    filled_quantity integer NOT NULL DEFAULT 0 CHECK (filled_quantity >= 0),
+    product_type text NOT NULL DEFAULT 'CNC' CHECK (product_type IN ('CNC')),
+    status text NOT NULL,
+    traded_price numeric(18, 4),
+    order_tag text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS paper_broker_orders_intent_idx
+ON paper_broker_orders (order_intent_id);
+
+CREATE TABLE IF NOT EXISTS paper_broker_trades (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    paper_order_id uuid NOT NULL REFERENCES paper_broker_orders(id),
+    order_intent_id uuid NOT NULL REFERENCES order_intents(id),
+    trade_number text NOT NULL UNIQUE,
+    symbol text NOT NULL,
+    side text NOT NULL CHECK (side IN ('buy', 'sell')),
+    quantity integer NOT NULL CHECK (quantity > 0),
+    price numeric(18, 4) NOT NULL CHECK (price >= 0),
+    product_type text NOT NULL DEFAULT 'CNC' CHECK (product_type IN ('CNC')),
+    filled_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS paper_broker_positions (
+    symbol text PRIMARY KEY,
+    net_qty integer NOT NULL,
+    avg_price numeric(18, 4) NOT NULL CHECK (avg_price >= 0),
+    product_type text NOT NULL DEFAULT 'CNC' CHECK (product_type IN ('CNC')),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS p10_rollout_state (
+    id boolean PRIMARY KEY DEFAULT true CHECK (id),
+    stage text NOT NULL CHECK (stage IN ('shadow', 'paper', 'reduced_live', 'full_live')),
+    changed_by text NOT NULL,
+    changed_at timestamptz NOT NULL DEFAULT now(),
+    reason text
+);
+
+INSERT INTO p10_rollout_state (id, stage, changed_by, reason)
+VALUES (
+    true,
+    'shadow',
+    'schema',
+    'P10 starts at Shadow; approve cannot arm entries.'
+)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS p10_rollout_events (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    from_stage text,
+    to_stage text NOT NULL,
+    changed_by text NOT NULL,
+    reason text,
+    confirmation text,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+UPDATE risk_policies
+SET deployable_capital_override = 100000.0000,
+    updated_at = now()
+WHERE is_active = true
+  AND deployable_capital_override IS NULL;
 
 INSERT INTO instruments (
     exchange, segment, symbol, trading_symbol, fyers_symbol, name,

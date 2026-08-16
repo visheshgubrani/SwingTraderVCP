@@ -136,6 +136,34 @@ curl http://127.0.0.1:8002/saas/scans/minervini/standard/latest
 # after owner sign-off. P9 starts shadow; no deployment stage self-promotes.
 ```
 
+## P10 Shadow → Paper (₹1,00,000)
+
+Keep `EXECUTION_MODE=paper` and `LIVE_ORDER_PLACEMENT_ENABLED=false`. Paper
+uses Fyers for market data and daily login only. It must never call Fyers
+`/funds` or `/orders/async`.
+
+1. Apply `server/db/migrations/019_p10_paper_broker.sql` (or start from current
+   `schema.sql`). Confirm the active Balanced policy has
+   `deployable_capital_override = 100000`.
+2. Set `PROPOSAL_AUTOMATION_ENABLED=true` when you want nightly proposal
+   generation. P10 still starts at **Shadow**: review and reject are allowed;
+   approve is a 409 until promotion.
+3. Complete Fyers login so ticks and EOD history work.
+4. Confirm `order-gateway` is running (Compose runs it without a live profile).
+   Paper mode drains Redis `paper_order_events`; it does not open a Fyers
+   order WebSocket.
+5. On the personal dashboard, promote Shadow → Paper with
+   `CONFIRM_P10_PAPER`, operator name, and reason. That seeds the fake ledger
+   at ₹1,00,000. Account Ledger then shows cash, invested notional, and R stats.
+6. Approve a live-eligible proposal only after that promotion. Entry, SL, T1–T3,
+   journal, kill switch, and the three-stop breaker use the same processors as
+   live against the paper books.
+
+Reduced live is **not** flipping two env flags. It requires an owner-approved
+P9 replay-report hash on an enforced policy, empty paper books, then
+`CONFIRM_P10_REDUCED_LIVE` with `EXECUTION_MODE=live` and
+`LIVE_ORDER_PLACEMENT_ENABLED=true`.
+
 Before reduced-live P10, run paper restart/duplicate-fill/concurrent-close
 drills until the paper three-stop breaker trips at exactly three qualifying
 closures and its owner reset is verified not to clear a manual pause. Reduced

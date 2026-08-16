@@ -41,11 +41,9 @@ class PositionMonitorServiceTests(unittest.IsolatedAsyncioTestCase):
         db.execute.assert_not_called()
 
     @patch("app.services.position_monitor.create_exit_intent", new_callable=AsyncMock)
-    @patch("app.services.position_monitor.complete_paper_exit", new_callable=AsyncMock)
     @patch("app.services.position_monitor.settings.execution_mode", "paper")
     async def test_stop_loss_triggers_paper_exit(
         self,
-        complete_paper_exit: AsyncMock,
         create_exit_intent: AsyncMock,
     ) -> None:
         intent_id = uuid4()
@@ -65,19 +63,11 @@ class PositionMonitorServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, intent_id)
         create_exit_intent.assert_awaited_once()
-        complete_paper_exit.assert_awaited_once_with(
-            db,
-            order_intent_id=intent_id,
-            position_id=create_exit_intent.await_args.kwargs["position_id"],
-            exit_price=Decimal("94.00"),
-        )
 
     @patch("app.services.position_monitor.create_exit_intent", new_callable=AsyncMock)
-    @patch("app.services.position_monitor.complete_paper_exit", new_callable=AsyncMock)
     @patch("app.services.position_monitor.settings.execution_mode", "paper")
     async def test_target_hit_before_stop(
         self,
-        complete_paper_exit: AsyncMock,
         create_exit_intent: AsyncMock,
     ) -> None:
         intent_id = uuid4()

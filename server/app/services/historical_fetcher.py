@@ -13,7 +13,6 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import async_session
 from app.security import get_fyers_token
-from app.services.personal_scan import ensure_personal_scan
 from app.services.scan_readiness import load_scan_readiness
 from app.services.screening_config import TechnicalScreeningConfig
 
@@ -240,23 +239,25 @@ async def enqueue_eod_scans(
     progress: SyncProgress,
     target_date: datetime.date,
 ) -> None:
-    """Queue the personal scan first, then the independent SaaS refresh."""
+    """Queue P9→personal processing and the independent SaaS refresh."""
     try:
-        personal_run = await ensure_personal_scan(
-            redis,
-            triggered_by="eod_chain",
+        job = await redis.enqueue_job(
+            "run_market_context",
+            target_date.isoformat(),
+            True,
         )
-        progress.personal_scan_run_id = str(personal_run.scan_run_id)
+        if job is None:
+            raise RuntimeError("Redis did not accept the P9 market-context job")
         progress.log(
-            f"Personal EOD scan {personal_run.status}: "
-            f"{personal_run.scan_run_id}."
+            f"P9 market context queued for {target_date.isoformat()}; "
+            "the job will enqueue the personal scan after persistence."
         )
     except Exception as exc:
         logger.exception(
-            "Failed to ensure personal scan after EOD sync for %s",
+            "Failed to enqueue P9/personal chain after EOD sync for %s",
             target_date.isoformat(),
         )
-        progress.log(f"ERROR (personal scan): {type(exc).__name__}: {exc}")
+        progress.log(f"ERROR (P9/personal chain): {type(exc).__name__}: {exc}")
 
     try:
         await redis.enqueue_job(
@@ -354,11 +355,11 @@ async def run_historical_sync(
                     WHERE i.active = true
                       AND (
                             m.instrument_id IS NOT NULL
-                            -- One extra index symbol (~0.35s sleep/chunk) is
-                            -- negligible next to the ~500 equity EOD sync.
-                            OR i.fyers_symbol IN (
-                                'NSE:NIFTY50-INDEX',
-                                'NSE:NIFTY500-INDEX'
+                            OR i.metadata ->> 'role' IN (
+                                'benchmark',
+                                'rs_benchmark',
+                                'p9_trend_benchmark',
+                                'p9_sector_index'
                             )
                           )
                     GROUP BY i.id, i.symbol, i.fyers_symbol

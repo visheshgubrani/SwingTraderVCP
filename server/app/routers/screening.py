@@ -721,6 +721,16 @@ async def get_scan_results(
             "industry": tech_metrics.get("industry"),
             "industry_key": tech_metrics.get("industry_key"),
             "fundamental_cap_exclusion_reason": tech_metrics.get("fundamental_cap_exclusion_reason"),
+            "market_context_mode": tech_metrics.get("market_context_mode"),
+            "sector_code": tech_metrics.get("sector_code"),
+            "sector_tier": tech_metrics.get("sector_tier", "unavailable"),
+            "sector_gate_tier": tech_metrics.get("sector_gate_tier", "unavailable"),
+            "sector_rs_rating": tech_metrics.get("sector_rs_rating"),
+            "contextual_selection_rank": tech_metrics.get("contextual_selection_rank"),
+            "p9_would_fundamental_select": bool(
+                tech_metrics.get("p9_would_fundamental_select", False)
+            ),
+            "p9_would_exclusion_reason": tech_metrics.get("p9_would_exclusion_reason"),
             "risk_checks": (row.llm_flags or {}).get("risk_checks") or {},
             "source_snapshots": (row.llm_flags or {}).get("source_snapshots") or [],
             "llm_status": row.llm_status,

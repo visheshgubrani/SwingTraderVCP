@@ -9,6 +9,7 @@ from app.services.fundamental_pass import run_fundamental_pass
 from app.services.historical_fetcher import run_historical_sync
 from app.services.journal_ai_coach import run_journal_ai_coach
 from app.services.journal_processor import run_journal_dispatcher
+from app.services.market_context import run_market_context
 from app.services.reconciliation import run_reconciliation
 from app.services.saas_scan import run_saas_global_standard_scan
 from app.services.screener import run_technical_scan
@@ -27,6 +28,7 @@ class WorkerSettings:
         run_technical_scan,
         run_fundamental_pass,
         run_historical_sync,
+        run_market_context,
         run_token_refresh,
         run_reconciliation,
         run_journal_dispatcher,

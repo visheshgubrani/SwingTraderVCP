@@ -97,13 +97,21 @@ INSERT INTO instruments (
 ON CONFLICT (fyers_symbol) DO NOTHING;
 SQL
 
+# 2c) Validate every P9 index against the current FYERS NSE symbol master.
+# Download the current CSV from FYERS Symbol Master Documentation, copy it into
+# the API container, then run this. Enforcement is rejected until it succeeds.
+"${COMPOSE[@]}" exec api python scripts/validate_p9_fyers_symbols.py \
+  --master /app/private/NSE_symbol_master.csv
+
 # 3) Fyers OAuth via personal client
 #    Open https://app.edurel.xyz → Login Fyers
 
-# 4) Two-year candle backfill (also pulls NIFTY50/NIFTY500 index history)
+# 4) P9 replay requires 2018-present daily history for the three broad indices,
+# all 16 sector indices, and point-in-time Nifty 500 constituents when available.
+# A shorter normal sync is not sufficient for rollout sign-off.
 curl -X POST http://127.0.0.1:8002/api/v1/historical/sync \
   -H 'Content-Type: application/json' \
-  -d '{"backfill_years": 2}'
+  -d '{"backfill_years": 10}'
 
 curl http://127.0.0.1:8002/api/v1/historical/status
 
@@ -118,7 +126,21 @@ curl -X POST http://127.0.0.1:8002/api/v1/screening/scan
 
 # 6) Confirm SaaS board data
 curl http://127.0.0.1:8002/saas/scans/minervini/standard/latest
+
+# 7) Generate the review-only replay report. It rolls back synthetic snapshots.
+"${COMPOSE[@]}" exec api python scripts/replay_p9_market_context.py \
+  --start 2018-01-01 --end "$(date +%F)" --output /tmp/p9-replay.json
+
+# Review 2018/2020/2022, sector formula comparison, failures, and membership
+# warning. Record the printed SHA-256 through the personal Operations UI only
+# after owner sign-off. P9 starts shadow; no deployment stage self-promotes.
 ```
+
+Before reduced-live P10, run paper restart/duplicate-fill/concurrent-close
+drills until the paper three-stop breaker trips at exactly three qualifying
+closures and its owner reset is verified not to clear a manual pause. Reduced
+live remains blocked until P9 is enforced with its signed report hash and both
+P9/breaker readiness have explicit owner approval.
 
 If `POSTGRES_USER` / `POSTGRES_DB` in `.env.prod` are not `algo` / `algo_trading`, change the `psql -U … -d …` flags to match.
 

@@ -283,6 +283,14 @@ class ScanResultResponse(BaseModel):
     industry: str | None = None
     industry_key: str | None = None
     fundamental_cap_exclusion_reason: str | None = None
+    market_context_mode: str | None = None
+    sector_code: str | None = None
+    sector_tier: str = "unavailable"
+    sector_gate_tier: str = "unavailable"
+    sector_rs_rating: int | None = None
+    contextual_selection_rank: int | None = None
+    p9_would_fundamental_select: bool = False
+    p9_would_exclusion_reason: str | None = None
     risk_checks: dict[str, Any] = Field(default_factory=dict)
     source_snapshots: list[dict[str, Any]] = Field(default_factory=list)
     llm_status: Literal[

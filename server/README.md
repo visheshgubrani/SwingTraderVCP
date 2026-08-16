@@ -204,6 +204,30 @@ The monitor:
 When the global kill switch is engaged, the monitor **does not** create new exit
 intents or trailing-stop writes.
 
+## P9 market context and stop-streak protection
+
+Migration `018_p9_market_context.sql` installs P9 in shadow mode. The core EOD
+chain is `candle sync → run_market_context → personal scan`; the SaaS scan is
+queued independently and never consumes P9 ordering. P9 index history is
+selected from instrument metadata and remains EOD-only.
+
+Before policy enforcement, validate a freshly downloaded FYERS NSE symbol
+master and produce the 2018-present replay report:
+
+```bash
+uv run python scripts/validate_p9_fyers_symbols.py --master /secure/NSE_symbol_master.csv
+uv run python scripts/replay_p9_market_context.py \
+  --start 2018-01-01 --end "$(date +%F)" --output /tmp/p9-replay.json
+```
+
+Review the report's 2018/2020/2022 windows, data failures, formula overlap, and
+membership warning. The report command is transactionally rolled back and
+cannot promote a policy. The personal proposal page exposes the exact snapshot,
+sector tiers, policy sign-off fields, allocation gate evidence, breaker state,
+and owner reset. An enforced policy fails closed for stale/incomplete context
+or an unavailable sector; neither P9 nor the breaker changes existing-position
+management.
+
 ## P10 proposal and entry workers
 
 Run the P10 processes separately from the core arq worker:
@@ -216,7 +240,8 @@ uv run python -m app.workers.entry_supervisor
 The proposal worker is serial and uses its dedicated Redis queue. The entry
 supervisor reconstructs verified 5-minute triggers and add/correction state
 from Postgres; approval requests never place orders inline. Apply migrations
-`015`, `016`, and `017` in order on an existing database before starting them.
+`015`, `016`, `017`, and `018` in order on an existing database before starting
+them.
 
 ### Live submission safety
 

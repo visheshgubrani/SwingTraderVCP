@@ -208,6 +208,7 @@ export function ScannerTable({
                 <th className="px-3 py-1.5 text-right">SMA 200</th>
                 <th className="px-3 py-1.5 text-right">Below 52W high</th>
                 <th className="px-3 py-1.5 text-center">RS</th>
+                <th className="px-3 py-1.5 text-center">Sector</th>
                 <th className="px-3 py-1.5 text-center">Setup</th>
                 <th className="px-3 py-1.5 text-center">Funda</th>
                 <th className="px-3 py-1.5 text-center">Vision</th>
@@ -258,6 +259,14 @@ export function ScannerTable({
                       {(row.pct_from_52w_high * 100).toFixed(2)}%
                     </td>
                     <td className="px-3 py-2 text-center">{row.rs_rating}</td>
+                    <td className="px-3 py-2 text-center">
+                      <Badge
+                        title={`P9 contextual rank ${row.contextual_selection_rank ?? "—"}; technical rank remains #${row.rank}`}
+                        variant={row.sector_gate_tier === "lagging" || row.sector_gate_tier === "unavailable" ? "destructive" : row.sector_gate_tier === "leading" ? "default" : "outline"}
+                      >
+                        {row.sector_code ?? "unmapped"} · {row.sector_gate_tier}
+                      </Badge>
+                    </td>
                     <td className="px-3 py-2 text-center">
                       <Badge variant="outline">
                         {row.technical_score === null ? "Legacy" : "Scored"}

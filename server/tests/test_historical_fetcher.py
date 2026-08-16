@@ -1,8 +1,6 @@
 import datetime
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
-from uuid import uuid4
 
 from zoneinfo import ZoneInfo
 
@@ -219,16 +217,8 @@ class HistoricalFetcherDateTests(unittest.TestCase):
 
 
 class HistoricalScanChainTests(unittest.IsolatedAsyncioTestCase):
-    async def test_personal_scan_is_ensured_before_saas_refresh(self) -> None:
+    async def test_p9_chain_is_queued_before_independent_saas_refresh(self) -> None:
         events: list[str] = []
-        scan_run_id = uuid4()
-
-        async def ensure_personal(_redis, *, triggered_by):
-            events.append(f"personal:{triggered_by}")
-            return SimpleNamespace(
-                scan_run_id=scan_run_id,
-                status="queued",
-            )
 
         class Redis:
             async def enqueue_job(self, function, *_args, **_kwargs):
@@ -236,21 +226,17 @@ class HistoricalScanChainTests(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace()
 
         progress = SyncProgress()
-        with patch(
-            "app.services.historical_fetcher.ensure_personal_scan",
-            ensure_personal,
-        ):
-            await enqueue_eod_scans(
-                Redis(),
-                progress,
-                datetime.date(2026, 8, 12),
-            )
+        await enqueue_eod_scans(
+            Redis(),
+            progress,
+            datetime.date(2026, 8, 12),
+        )
 
         self.assertEqual(
             events,
-            ["personal:eod_chain", "run_saas_global_standard_scan"],
+            ["run_market_context", "run_saas_global_standard_scan"],
         )
-        self.assertEqual(progress.personal_scan_run_id, str(scan_run_id))
+        self.assertIsNone(progress.personal_scan_run_id)
 
 
 class HistoricalSyncScheduleTests(unittest.TestCase):

@@ -29,6 +29,8 @@ from app.services.scan_readiness import (
 )
 from app.services.technical_scoring import evaluate_technical_setup
 from app.services.proposal_queue import enqueue_proposal_batch
+from app.services.market_context import load_sector_context_for_industries
+from app.domain.p9_market_context import contextual_selection_order
 
 logger = logging.getLogger(__name__)
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
@@ -124,7 +126,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                 completed_at = NULL,
                 error_message = NULL
             WHERE id = :scan_run_id AND status = 'queued'
-            RETURNING technical_config, as_of_date
+            RETURNING technical_config, as_of_date, visibility
         """), {"scan_run_id": scan_run_id})
         claimed_run = claim_result.one_or_none()
         await session.commit()
@@ -431,12 +433,54 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
 
         # Step 4d: Score first, deterministic tie-breaks, and a broad top-50 cap.
         survivors = rank_and_cap_shortlist(survivors, config.shortlist_limit)
-        survivors = apply_fundamental_industry_cap(
-            survivors,
+        context_mode = "unavailable"
+        sector_context: dict[str, dict[str, Any]] = {}
+        if claimed_run.visibility == "personal":
+            async with async_session() as session:
+                context_mode, sector_context = await load_sector_context_for_industries(
+                    session,
+                    reference_eod_date,
+                    {str(item.get("industry") or "") for item in survivors},
+                )
+        for survivor in survivors:
+            context = sector_context.get(str(survivor.get("industry") or ""), {})
+            survivor["sector_code"] = context.get("sector_code")
+            survivor["sector_tier"] = context.get("sector_tier", "unavailable")
+            survivor["sector_gate_tier"] = context.get(
+                "sector_gate_tier", "unavailable"
+            )
+            survivor["sector_rs_rating"] = context.get("sector_rs_rating")
+            survivor["sector_strength_result_id"] = context.get(
+                "sector_strength_result_id"
+            )
+
+        contextual = contextual_selection_order(survivors)
+        contextual_by_instrument = {
+            item["instrument_id"]: item for item in contextual
+        }
+        counterfactual = apply_fundamental_industry_cap(
+            contextual,
             limit=config.fundamental_limit,
             industry_cap=config.fundamental_industry_cap,
             enabled=settings.p7_fundamental_pass_enabled,
         )
+        counterfactual_by_instrument = {
+            item["instrument_id"]: item for item in counterfactual
+        }
+        actual_order = (
+            contextual
+            if claimed_run.visibility == "personal" and context_mode == "enforced"
+            else survivors
+        )
+        survivors = apply_fundamental_industry_cap(
+            actual_order,
+            limit=config.fundamental_limit,
+            industry_cap=config.fundamental_industry_cap,
+            enabled=settings.p7_fundamental_pass_enabled,
+        )
+        # Persistence and public technical ordering remain byte-for-byte based
+        # on result_rank, regardless of the separate contextual selection order.
+        survivors.sort(key=lambda item: int(item["result_rank"]))
         missing_industries = [
             {
                 "scan_run_id": scan_run_id,
@@ -448,6 +492,11 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             if survivor["industry_key"].startswith("unknown:")
         ]
         for survivor in survivors:
+            contextual_item = contextual_by_instrument[survivor["instrument_id"]]
+            would_item = counterfactual_by_instrument[survivor["instrument_id"]]
+            survivor["contextual_selection_rank"] = contextual_item[
+                "contextual_selection_rank"
+            ]
             survivor["technical_metrics"]["fundamental_selected"] = (
                 survivor["fundamental_selected"]
             )
@@ -459,6 +508,24 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             survivor["technical_metrics"]["fundamental_cap_exclusion_reason"] = (
                 survivor["fundamental_cap_exclusion_reason"]
             )
+            survivor["technical_metrics"]["market_context_mode"] = context_mode
+            survivor["technical_metrics"]["sector_code"] = survivor["sector_code"]
+            survivor["technical_metrics"]["sector_tier"] = survivor["sector_tier"]
+            survivor["technical_metrics"]["sector_gate_tier"] = survivor[
+                "sector_gate_tier"
+            ]
+            survivor["technical_metrics"]["sector_rs_rating"] = survivor[
+                "sector_rs_rating"
+            ]
+            survivor["technical_metrics"]["contextual_selection_rank"] = survivor[
+                "contextual_selection_rank"
+            ]
+            survivor["technical_metrics"]["p9_would_fundamental_select"] = would_item[
+                "fundamental_selected"
+            ]
+            survivor["technical_metrics"]["p9_would_exclusion_reason"] = would_item[
+                "fundamental_cap_exclusion_reason"
+            ]
             survivor["technical_metrics"] = json.dumps(survivor["technical_metrics"])
             survivor.pop("rs_rating")
             survivor.pop("symbol")
@@ -467,6 +534,10 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             survivor.pop("fundamental_selected")
             survivor.pop("fundamental_selection_rank")
             survivor.pop("fundamental_cap_exclusion_reason")
+            survivor.pop("sector_code")
+            survivor.pop("sector_tier")
+            survivor.pop("sector_gate_tier")
+            survivor.pop("sector_rs_rating")
 
         logger.info(
             "Technical score eligibility rejections=%s. Ranked setups retained=%s "
@@ -491,6 +562,8 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         result_rank,
                         technical_passed,
                         technical_score,
+                        sector_strength_result_id,
+                        contextual_selection_rank,
                         close_price,
                         sma_50,
                         sma_200,
@@ -507,6 +580,8 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         :result_rank,
                         true,
                         :technical_score,
+                        :sector_strength_result_id,
+                        :contextual_selection_rank,
                         :close_price,
                         :sma_50,
                         :sma_200,

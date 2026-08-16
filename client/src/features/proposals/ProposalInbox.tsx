@@ -14,6 +14,7 @@ import {
   type TradeProposalItem,
 } from "./api"
 import { ProposalDetailModal } from "./ProposalDetailModal"
+import { MarketContextPanel } from "./MarketContextPanel"
 
 export function ProposalInbox() {
   const [statusFilter, setStatusFilter] = useState<string>("pending_approval")
@@ -69,6 +70,18 @@ export function ProposalInbox() {
           </div>
         </div>
       </div>
+
+      <MarketContextPanel />
+
+      {(supervisorStatus?.recent_allocation_events ?? [])
+        .filter((event) => event.context_gate_reasons?.length)
+        .slice(0, 3)
+        .map((event) => (
+          <div key={event.id} className="mx-4 mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10px] text-amber-200">
+            Allocation {event.event_type.replaceAll("_", " ")} · {event.market_context_mode ?? "breaker"} · {event.context_gate_reasons.join(", ")}
+            {event.context_adjusted_risk_ceiling !== null && ` · ceiling ₹${Number(event.context_adjusted_risk_ceiling).toFixed(2)}`}
+          </div>
+        ))}
 
       {/* Filter Tabs */}
       <div className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-card/30 px-4 py-2">

@@ -118,6 +118,14 @@ export interface ScanResult {
   industry: string | null
   industry_key: string | null
   fundamental_cap_exclusion_reason: string | null
+  market_context_mode: "shadow" | "enforced" | "unavailable" | null
+  sector_code: string | null
+  sector_tier: "leading" | "neutral" | "lagging" | "unavailable"
+  sector_gate_tier: "leading" | "neutral" | "lagging" | "unavailable"
+  sector_rs_rating: number | null
+  contextual_selection_rank: number | null
+  p9_would_fundamental_select: boolean
+  p9_would_exclusion_reason: string | null
   risk_checks: Record<string, unknown>
   source_snapshots: Array<Record<string, unknown>>
   llm_status:

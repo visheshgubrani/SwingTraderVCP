@@ -15,6 +15,7 @@ from app.domain.trading import realized_pnl_on_exit
 from app.domain.p10_geometry import floor_to_tick
 from app.domain.p10_sizing import apportion_staged_exits
 from app.services.journal_outbox import enqueue_journal_fill_event
+from app.services.risk_stop_streak import record_closed_position, synchronize_stop_streak
 from app.services.staged_exit_manager import (
     StagedPositionState,
     allocate_cumulative_target_fill,
@@ -484,6 +485,8 @@ async def process_trade_message(
         "risk_reduction_exit",
         "invalid_fill_exit",
     }:
+        if intent.get("proposal_id") is not None:
+            await synchronize_stop_streak(db, str(intent["execution_mode"]))
         position_result = await db.execute(
             text(
                 """
@@ -641,6 +644,13 @@ async def process_trade_message(
                 "t3_delta": t3_delta,
             },
         )
+        if new_state == "closed" and intent.get("proposal_id") is not None:
+            await record_closed_position(
+                db,
+                str(intent["execution_mode"]),
+                intent["position_id"],
+                filled_at,
+            )
         await db.execute(
             text(
                 """
@@ -725,7 +735,7 @@ async def _find_intent(
                  OR (:tagged_intent_id IS NOT NULL
                      AND oi.id = :tagged_intent_id)
               )
-            FOR UPDATE OF oi, p
+            FOR UPDATE OF oi
             """
         ),
         {

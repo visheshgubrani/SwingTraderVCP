@@ -224,7 +224,10 @@ money-path workers into the API process.
   and allocation state before calling the execution engine and reconstructs
   nonterminal legs on restart.
 - **Scheduler (core arq cron)** — EOD candle sync, optional EOD screen,
-  broker-auth readiness validation/alerts, and reconciliation cadence.
+  deterministic P9 market-context computation, broker-auth readiness
+  validation/alerts, and reconciliation cadence. Personal processing is
+  ordered EOD sync → P9 context → personal scan; the independent SaaS scan
+  does not consume P9 selection or money-path policy.
   Proposal jobs never share this worker's single execution slot.
 - **Reconciliation job** — compares DB orders/positions/fills to Fyers.
   Manual trades placed in the Fyers app are detected and imported/flagged —
@@ -448,6 +451,8 @@ The initial **Balanced** policy is locked as:
 - 30% maximum sector notional
 - 30% maximum correlation-cluster notional
 - 2% daily realized-loss stop
+- three consecutive proposal-backed pure stop-loss closures pause every new
+  initial/add leg until an explicit owner reset
 - maximum 8 open positions
 - long-only CNC, maximum three entry legs
 
@@ -479,7 +484,8 @@ entry, add, or correction:
    generations.
 4. Recompute cash, per-trade and total open risk, position count, single-name,
    sector, the complete `rho >= 0.80` correlation-cluster exposure, daily loss,
-   chase ceiling, and trigger validity.
+   the consecutive-stop circuit breaker, current P9 market/sector gates, chase
+   ceiling, and trigger validity.
 5. Persist the sizing decision and allocation generation/event, then invoke the
    execution-engine service within the locked workflow so it persists the
    idempotent order intent before any Fyers call.
@@ -616,6 +622,39 @@ deterministic validation, pivot/T1–T3, stop/risk rules, template, TTL, and liv
 leg/correction/recovery state. It must not offer quantity, stop, target, or
 template edits for a scanner-sourced live proposal.
 
+### 6.11 P9 deterministic market context
+
+P9 is a versioned deterministic EOD layer, not an LLM surface. It must never
+change `technical_score` or `result_rank`. It computes:
+
+- a green/yellow/red market light from two-of-three trend, Nifty 500 breadth,
+  and constituent-turnover distribution evidence across Nifty 50, Nifty 500,
+  and Nifty Midcap 150 context;
+- cross-sectional sector strength for the checked-in 16-sector taxonomy versus
+  Nifty 500; and
+- a separate contextual P7 selection order only within inclusive two-point
+  technical-score bands.
+
+In enforced mode green/yellow/red multiply a new leg's deterministic risk
+ceiling by `1.0/0.5/0.0`. A sector confirmed lagging on two consecutive EOD
+snapshots, or unavailable context, blocks the new initial/add. The first
+non-lagging EOD releases the sector block, but any confirmation observed while
+blocked is consumed and a fresh two-bar trigger is required. P9 never exits,
+trims, lowers a stop, or otherwise changes management of an existing position.
+
+P9 starts in shadow mode and may become enforced only through an immutable
+policy version with an owner-approved replay-report hash. It cannot
+self-promote. Missing, stale, incomplete, or hash-invalid context fails closed
+for new initials/adds only after enforcement.
+
+The three-stop circuit breaker is also deterministic and has no LLM. It counts
+future, same-execution-mode P10 proposal closures whose only exit fills are
+stop-loss fills and whose versioned estimated net P&L is negative. Normal
+target/trailing/mixed closures reset an untripped streak; manual, external,
+invalid-fill, and risk-correction closures do not affect it. The third stop-out
+atomically trips `new_entries_paused`; only an owner acknowledgement/reset may
+re-arm entries, and that reset must not clear an independent manual pause.
+
 ---
 
 ## 7. Kill switch policy
@@ -673,7 +712,7 @@ or weaken the global kill switch.
 
 ---
 
-## 9. AI / LLM surfaces (four separate concerns)
+## 9. AI / LLM surfaces (three separate concerns)
 
 Do not build one “AI god service.” Split:
 
@@ -682,7 +721,10 @@ Do not build one “AI god service.” Split:
 | Fundamental pass   | Python-authoritative fit plus blind AI pass/fail/uncertain second opinion | No          |
 | VCP proposal reader | Serial chart-pattern verdict, anchors, pivot, T1–T3, confidence, and template enum; Python validates and owns money rules | No |
 | Journal coach      | Post-trade patterns/mistakes from closed trades   | No             |
-| Nifty sentiment    | Optional regime tag / overlay                     | No             |
+
+P9 market context is deliberately absent from this table: it is pure,
+versioned Python that may gate only new P10 initials/adds under §6.11. It has no
+model, prompt, provider call, broker/account input, or order-side effect.
 
 Hard rule: **LLM/AI never confirms a proposal, reads broker funds/account
 state, computes money/risk/quantity/trailing rules, or calls the execution
@@ -768,14 +810,14 @@ Do not reorder phases without asking. Status tags: `[done]`, `[next]`,
 | **P7** | LLM fundamental pass on technical survivors | `[done]` — cached Upstox snapshots, deterministic normalization, strict OpenRouter verdicts, and manual-review UI |
 | **P8** | Journal + AI coach (read-only) | `[done]` — future-fill outbox, frozen entry snapshots, regime tag at first fill, CNC charge estimates, chart PNG capture, period summaries, tradebook from journal, async AI coach with input-hash reuse |
 | **VCP vision** | On-demand VCP validator (advisory screening/manual-review extension) | `[done]` — frozen EOD candle snapshot + reuse key, standardized 1280×720 capture, blind strict structured OpenRouter verdict with date-anchor validation, attempt audit trail, sheet UI with read-only overlay + source images, human review, and workstation overlay toggle |
-| **P9** | Nifty sentiment overlay (optional) | `[ ]` |
+| **P9** | Deterministic Nifty/sector context, shadow-first P10 entry/add gates | `[done]` — implementation is complete; replay review and owner-controlled shadow→enforced rollout remain operational gates |
 | **P10** | Automated proposal generation → immutable approval → deterministic multi-leg entry/risk/exit automation | `[done]` — implementation and review hardening are complete; operational rollout remains gated and starts at Shadow |
 
 Notes:
 
 - P10 implementation is complete; its next operational step is the Shadow
-  gate in §12.2. P9 remains optional/deferred. No rollout stage may be skipped
-  or self-promote.
+  gate in §12.2. P9 must complete its own replay-backed Shadow gate before any
+  reduced-live P10 rollout. No rollout stage may be skipped or self-promote.
 - P10 must reuse the single market WS, single order WS, execution-engine-only
   order mutation, reconciliation, journal, and kill-switch foundations. Do not
   replace them with a parallel broker path.
@@ -803,7 +845,8 @@ the phase table above is authoritative going forward.
   unsnappable dates, bad templates, unordered targets, and insufficient R:R.
 - Pure rules: geometry, ATR/tick snapping, chase ceiling, all template/relative-
   volume mappings, Hold/Base/EMA21, add expiry, 25/25/25/25 apportionment, stop
-  ratchets, and daily-loss accounting.
+  ratchets, daily-loss accounting, P9 market/sector classification, and the
+  consecutive-stop circuit breaker.
 - Five-minute replay: first-15-minute exclusion, robust profile, two-bar
   confirmation, stale volume, reconciliation drift, lost capacity, and fresh
   re-trigger behavior.
@@ -834,11 +877,13 @@ the phase table above is authoritative going forward.
 2. **Paper:** run the complete approval, trigger, allocation, multi-leg, exit,
    reconciliation, and restart path for at least 50 triggered proposals with
    zero duplicate orders, unexplained state transitions, or cap breaches beyond
-   the explicit one-lot post-fill tolerance.
+   the explicit one-lot post-fill tolerance. P9 counterfactuals, fresh-trigger
+   resets, and three-stop pause/reset recovery must pass here.
 3. **Reduced live:** explicit operator enablement; size P10 against `0.25×`
    deployable capital while retaining the same percentage policy. Use small CNC
    positions and complete live auth, restart, reconciliation, pause, and kill-
-   switch drills.
+   switch drills. This stage is blocked until an enforced P9 policy references
+   an owner-approved replay-report hash.
 4. **Full live:** an explicit risk-policy version change to `1.0×` only after
    reviewing reduced-live fills, slippage, correction, and recovery evidence.
    No stage promotes itself.

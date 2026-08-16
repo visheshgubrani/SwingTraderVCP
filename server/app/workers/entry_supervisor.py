@@ -66,6 +66,8 @@ from app.services.fyers_broker_reads import (
     BrokerPreflightSnapshot,
     FyersBrokerReadClient,
 )
+from app.services.p9_allocation_gate import emit_p9_gate_event, load_p9_allocation_gate
+from app.services.risk_stop_streak import synchronize_stop_streak
 
 
 logger = logging.getLogger("entry_supervisor")
@@ -552,9 +554,10 @@ async def execute_confirmed_leg_allocation(
             await db.execute(
                 text(
                     """
-                    SELECT el.id, el.status, el.risk_allocation_pct,
+                    SELECT el.id, el.status, el.risk_allocation_pct, el.position_id,
                            tp.approved_risk_budget_amount, tp.status AS proposal_status,
-                           i.lot_size
+                           tp.instrument_id, i.lot_size,
+                           i.metadata ->> 'industry' AS industry
                     FROM entry_legs el
                     JOIN trade_proposals tp ON tp.id = el.proposal_id
                     JOIN instruments i ON i.id = tp.instrument_id
@@ -573,6 +576,62 @@ async def execute_confirmed_leg_allocation(
         ):
             return False
 
+        stop_streak = await synchronize_stop_streak(db, settings.execution_mode)
+        if stop_streak.tripped:
+            generation = int(
+                (
+                    await db.execute(
+                        text("SELECT COALESCE(MAX(generation), 0) + 1 FROM allocation_ledger")
+                    )
+                ).scalar_one()
+            )
+            await db.execute(
+                text(
+                    """
+                    UPDATE entry_legs
+                    SET status = 'armed', signal_bar_timestamp = NULL
+                    WHERE id = :leg_id AND status = 'trigger_observed'
+                    """
+                ),
+                {"leg_id": confirmed.leg_id},
+            )
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO allocation_ledger (
+                        generation, leg_id, event_type, broker_funds_available,
+                        broker_snapshot_at, open_risk_before, open_risk_after,
+                        allocated_shares, allocated_risk_amount, allocated_notional,
+                        context_adjusted_risk_ceiling, context_gate_reasons, details
+                    ) VALUES (
+                        :generation, :leg_id, 'allocation_blocked', :funds,
+                        :snapshot_at, 0, 0, 0, 0, 0, 0,
+                        CAST(:reasons AS jsonb), CAST(:details AS jsonb)
+                    )
+                    """
+                ),
+                {
+                    "generation": generation,
+                    "leg_id": confirmed.leg_id,
+                    "funds": broker_snapshot.available_funds,
+                    "snapshot_at": broker_snapshot.fetched_at,
+                    "reasons": json.dumps(["three_stop_circuit_tripped"]),
+                    "details": json.dumps(
+                        {
+                            "execution_mode": settings.execution_mode,
+                            "consecutive_count": stop_streak.consecutive_count,
+                            "limit": stop_streak.limit,
+                            "fresh_trigger_required": True,
+                        }
+                    ),
+                },
+            )
+            await db.commit()
+            raise ExecutionBlockedError(
+                f"Three-stop circuit breaker is tripped for {settings.execution_mode}; "
+                "owner reset is required."
+            )
+
         policy = await get_active_risk_policy_config(db)
         state = await load_portfolio_state_under_lock(
             db,
@@ -589,6 +648,80 @@ async def execute_confirmed_leg_allocation(
         if cap_check.is_blocked:
             raise ExecutionBlockedError(cap_check.blocking_reason or "Risk cap blocked allocation.")
 
+        gate = await load_p9_allocation_gate(
+            db,
+            industry=leg["industry"],
+            session_date=confirmed.bar_time.astimezone(IST_TZ).date(),
+        )
+        await emit_p9_gate_event(
+            db,
+            position_id=leg["position_id"],
+            instrument_id=leg["instrument_id"],
+            gate=gate,
+        )
+        if gate.is_blocked:
+            generation = int(
+                (
+                    await db.execute(
+                        text("SELECT COALESCE(MAX(generation), 0) + 1 FROM allocation_ledger")
+                    )
+                ).scalar_one()
+            )
+            await db.execute(
+                text(
+                    """
+                    UPDATE entry_legs
+                    SET status = 'armed', signal_bar_timestamp = NULL
+                    WHERE id = :leg_id AND status = 'trigger_observed'
+                    """
+                ),
+                {"leg_id": confirmed.leg_id},
+            )
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO allocation_ledger (
+                        generation, leg_id, event_type, broker_funds_available,
+                        broker_snapshot_at, open_risk_before, open_risk_after,
+                        allocated_shares, allocated_risk_amount, allocated_notional,
+                        market_regime_snapshot_id, sector_strength_result_id,
+                        market_context_policy_id, market_context_mode,
+                        context_multiplier, context_adjusted_risk_ceiling,
+                        context_gate_reasons, details
+                    ) VALUES (
+                        :generation, :leg_id, 'allocation_blocked', :funds,
+                        :snapshot_at, :open_risk, :open_risk, 0, 0, 0,
+                        :regime_id, :sector_result_id, :policy_id, :mode,
+                        :multiplier, 0, CAST(:reasons AS jsonb), CAST(:details AS jsonb)
+                    )
+                    """
+                ),
+                {
+                    "generation": generation,
+                    "leg_id": confirmed.leg_id,
+                    "funds": broker_snapshot.available_funds,
+                    "snapshot_at": broker_snapshot.fetched_at,
+                    "open_risk": state.current_open_risk,
+                    "regime_id": gate.regime_snapshot_id,
+                    "sector_result_id": gate.sector_strength_result_id,
+                    "policy_id": gate.policy_id,
+                    "mode": gate.mode,
+                    "multiplier": gate.observed_multiplier,
+                    "reasons": json.dumps(gate.reasons),
+                    "details": json.dumps(
+                        {
+                            "policy_version": gate.policy_version,
+                            "reference_eod_date": gate.reference_eod_date.isoformat(),
+                            "fresh_trigger_required": True,
+                        }
+                    ),
+                },
+            )
+            await db.commit()
+            raise ExecutionBlockedError(
+                "P9 allocation gate blocked the confirmed leg: " + ", ".join(gate.reasons)
+            )
+
         approved_leg_budget = (
             Decimal(leg["approved_risk_budget_amount"])
             * Decimal(leg["risk_allocation_pct"])
@@ -602,7 +735,7 @@ async def execute_confirmed_leg_allocation(
             approved_leg_budget,
             active_policy_leg_cap,
             cap_check.allowed_risk_budget,
-        )
+        ) * gate.effective_multiplier
         allowed_notional = min(
             cap_check.allowed_notional_budget,
             broker_snapshot.available_funds,
@@ -639,11 +772,16 @@ async def execute_confirmed_leg_allocation(
                     generation, leg_id, event_type, broker_funds_available,
                     broker_snapshot_at, open_risk_before, open_risk_after,
                     allocated_shares, allocated_risk_amount, allocated_notional,
-                    details
+                    market_regime_snapshot_id, sector_strength_result_id,
+                    market_context_policy_id, market_context_mode,
+                    context_multiplier, context_adjusted_risk_ceiling,
+                    context_gate_reasons, details
                 ) VALUES (
                     :generation, :leg_id, 'sizing_allocated', :funds,
                     :snapshot_at, :before, :after, :shares, :risk, :notional,
-                    CAST(:details AS jsonb)
+                    :regime_id, :sector_result_id, :context_policy_id,
+                    :context_mode, :context_multiplier, :context_ceiling,
+                    CAST(:context_reasons AS jsonb), CAST(:details AS jsonb)
                 )
                 """
             ),
@@ -657,11 +795,22 @@ async def execute_confirmed_leg_allocation(
                 "shares": sizing.shares,
                 "risk": sizing.allocated_risk,
                 "notional": sizing.allocated_notional,
+                "regime_id": gate.regime_snapshot_id,
+                "sector_result_id": gate.sector_strength_result_id,
+                "context_policy_id": gate.policy_id,
+                "context_mode": gate.mode,
+                "context_multiplier": gate.observed_multiplier,
+                "context_ceiling": allowed_risk,
+                "context_reasons": json.dumps(gate.reasons),
                 "details": json.dumps(
                     {
                         "fresh_price": str(current_price),
                         "stop": str(confirmed.initial_stop),
                         "policy_version": policy.version,
+                        "market_context_policy_version": gate.policy_version,
+                        "market_context_reference_eod": gate.reference_eod_date.isoformat(),
+                        "market_light": gate.market_light,
+                        "sector_tier": gate.sector_tier,
                     }
                 ),
             },
@@ -1373,6 +1522,31 @@ async def recheck_filled_entry_risk(redis: aioredis.Redis) -> int:
                     - (state.current_open_risk - current_risk),
                 ),
             )
+            persisted_context_ceiling = Decimal(
+                (
+                    await db.execute(
+                        text(
+                            """
+                            SELECT COALESCE(SUM(context_adjusted_risk_ceiling), 0)
+                            FROM (
+                                SELECT DISTINCT ON (leg_id)
+                                       leg_id, context_adjusted_risk_ceiling
+                                FROM allocation_ledger
+                                WHERE leg_id IN (
+                                    SELECT id FROM entry_legs
+                                    WHERE position_id = :position_id
+                                )
+                                  AND event_type = 'sizing_allocated'
+                                ORDER BY leg_id, created_at DESC
+                            ) context_allocations
+                            """
+                        ),
+                        {"position_id": row["position_id"]},
+                    )
+                ).scalar_one()
+            )
+            if persisted_context_ceiling > 0:
+                approved_risk = min(approved_risk, persisted_context_ceiling)
             cash_budget = Decimal(
                 (
                     await db.execute(

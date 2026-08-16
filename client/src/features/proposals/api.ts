@@ -90,6 +90,139 @@ export interface CapacityConflict {
   }>
 }
 
+export type MarketLight = "green" | "yellow" | "red" | "unavailable"
+export type SectorTier = "leading" | "neutral" | "lagging" | "unavailable"
+
+export interface MarketContextSector {
+  sector_code: string
+  sector_name: string
+  index_symbol: string
+  ordinal_rank: number | null
+  rs_rating: number | null
+  raw_tier: SectorTier
+  gate_tier: SectorTier
+  blended_score: number | null
+}
+
+export interface MarketContextLatest {
+  policy_id: string
+  policy_version: string
+  mode: "shadow" | "enforced"
+  replay_report_hash: string | null
+  reference_eod_date: string | null
+  market_light: MarketLight
+  exposure_multiplier: number
+  trend_state: MarketLight
+  breadth_state: MarketLight
+  distribution_state: MarketLight
+  source_hash: string | null
+  evidence: Record<string, unknown>
+  data_quality: Record<string, unknown>
+  sectors: MarketContextSector[]
+}
+
+export interface StopStreakState {
+  execution_mode: "paper" | "live"
+  consecutive_count: number
+  limit: number
+  tripped: boolean
+  tripped_at: string | null
+  trip_position_id: string | null
+}
+
+const operationsKeys = {
+  marketContext: ["automation", "market-context", "latest"] as const,
+  stopStreak: (mode: "paper" | "live") => ["automation", "stop-streak", mode] as const,
+}
+
+async function responseJson<T>(response: Response, fallback: string): Promise<T> {
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ detail: fallback }))
+    const detail = body.detail
+    throw new Error(
+      typeof detail === "string"
+        ? detail
+        : detail
+          ? JSON.stringify(detail)
+          : fallback,
+    )
+  }
+  return response.json()
+}
+
+export function useMarketContext() {
+  return useQuery<MarketContextLatest>({
+    queryKey: operationsKeys.marketContext,
+    queryFn: async () => responseJson(
+      await fetch("/api/v1/automation/market-context/latest"),
+      "Failed to fetch P9 market context",
+    ),
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  })
+}
+
+export function useStopStreak(mode: "paper" | "live") {
+  return useQuery<StopStreakState>({
+    queryKey: operationsKeys.stopStreak(mode),
+    queryFn: async () => responseJson(
+      await fetch(`/api/v1/automation/stop-streak/${mode}`),
+      `Failed to fetch ${mode} stop streak`,
+    ),
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+  })
+}
+
+export function useResetStopStreak() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ mode, reason }: { mode: "paper" | "live"; reason: string }) =>
+      responseJson<StopStreakState>(
+        await fetch(`/api/v1/automation/stop-streak/${mode}/reset`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        }),
+        "Failed to reset stop streak",
+      ),
+    onSuccess: (state) => {
+      queryClient.setQueryData(operationsKeys.stopStreak(state.execution_mode), state)
+    },
+  })
+}
+
+export function useEnforceMarketContext() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({
+      version,
+      replayReportHash,
+      membershipMode,
+      approvedBy,
+    }: {
+      version: string
+      replayReportHash: string
+      membershipMode: "point_in_time" | "current_membership_survivorship_biased"
+      approvedBy: string
+    }) => responseJson<MarketContextLatest>(
+      await fetch(`/api/v1/automation/market-context/policies/${encodeURIComponent(version)}/enforce`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          replay_report_hash: replayReportHash,
+          replay_membership_mode: membershipMode,
+          approved_by: approvedBy,
+        }),
+      }),
+      "Failed to enforce P9 policy",
+    ),
+    onSuccess: (context) => {
+      queryClient.setQueryData(operationsKeys.marketContext, context)
+    },
+  })
+}
+
 export function useTradeProposals(statusFilter: string = "pending_approval") {
   return useQuery<TradeProposalItem[]>({
     queryKey: ["trade-proposals", statusFilter],
@@ -145,6 +278,16 @@ export function useEntrySupervisorStatus() {
     armed_legs_count: number
     trigger_observed_count: number
     pending_capacity_conflicts: number
+    recent_allocation_events: Array<{
+      id: string
+      event_type: string
+      market_context_mode: "shadow" | "enforced" | null
+      context_multiplier: number | null
+      context_adjusted_risk_ceiling: number | null
+      context_gate_reasons: string[]
+      details: Record<string, unknown>
+      created_at: string
+    }>
   }>({
     queryKey: ["entry-supervisor-status"],
     queryFn: async () => {

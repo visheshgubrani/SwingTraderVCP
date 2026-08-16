@@ -29,7 +29,12 @@ from app.schemas.proposals import (
     RiskPolicyResponse,
     RiskPolicyUpdateRequest,
     AutomationControlRequest,
+    MarketContextLatestResponse,
+    MarketContextPolicyEnforceRequest,
+    StopStreakResetRequest,
+    StopStreakResponse,
 )
+from app.services.risk_stop_streak import reset_stop_streak, synchronize_stop_streak
 
 
 logger = logging.getLogger(__name__)
@@ -385,6 +390,7 @@ async def get_active_risk_policy(
                max_single_name_notional_pct, max_sector_notional_pct, max_cluster_notional_pct,
                correlation_cluster_threshold, correlation_lookback_sessions,
                daily_loss_limit_pct, max_open_positions, deployable_capital_override,
+               consecutive_stop_limit,
                created_at, updated_at
         FROM risk_policies
         WHERE is_active = true
@@ -419,14 +425,14 @@ async def update_risk_policy(
                 max_sector_notional_pct, max_cluster_notional_pct,
                 correlation_cluster_threshold, correlation_lookback_sessions,
                 daily_loss_limit_pct, max_open_positions,
-                deployable_capital_override
+                deployable_capital_override, consecutive_stop_limit
             ) VALUES (
                 :version, :name, true, :risk_per_trade_pct,
                 :max_total_open_risk_pct, :max_single_name_notional_pct,
                 :max_sector_notional_pct, :max_cluster_notional_pct,
                 :correlation_cluster_threshold, :correlation_lookback_sessions,
                 :daily_loss_limit_pct, :max_open_positions,
-                :deployable_capital_override
+                :deployable_capital_override, :consecutive_stop_limit
             )
             RETURNING *
             """
@@ -468,6 +474,17 @@ async def update_automation_control(
     request: Request,
     db: db_dep,
 ) -> dict[str, Any]:
+    if control_key == "new_entries_paused" and not payload.enabled:
+        tripped = (
+            await db.execute(
+                text("SELECT EXISTS (SELECT 1 FROM risk_stop_streak_state WHERE tripped = true)")
+            )
+        ).scalar_one()
+        if tripped:
+            raise HTTPException(
+                status_code=409,
+                detail="The stop-streak breaker is tripped; use its owner reset endpoint.",
+            )
     result = await db.execute(
         text(
             """
@@ -499,6 +516,180 @@ async def update_automation_control(
         ),
     )
     return dict(row)
+
+
+@router.get("/market-context/latest")
+async def get_latest_market_context(db: db_dep) -> MarketContextLatestResponse:
+    policy = (
+        await db.execute(
+            text(
+                """
+                SELECT id, version, mode, replay_report_hash
+                FROM market_context_policies
+                WHERE mode IN ('enforced', 'shadow')
+                ORDER BY CASE mode WHEN 'enforced' THEN 0 ELSE 1 END, created_at DESC
+                LIMIT 1
+                """
+            )
+        )
+    ).mappings().one_or_none()
+    if policy is None:
+        raise HTTPException(status_code=404, detail="No P9 market-context policy found")
+    regime = (
+        await db.execute(
+            text(
+                """
+                SELECT reference_eod_date, market_light, exposure_multiplier,
+                       trend_state, breadth_state, distribution_state,
+                       source_hash, evidence, data_quality
+                FROM market_regime_snapshots
+                WHERE market_context_policy_id = :policy_id
+                ORDER BY reference_eod_date DESC, created_at DESC LIMIT 1
+                """
+            ),
+            {"policy_id": policy["id"]},
+        )
+    ).mappings().one_or_none()
+    sectors: list[dict[str, Any]] = []
+    if regime:
+        sectors = [
+            dict(row)
+            for row in (
+                await db.execute(
+                    text(
+                        """
+                        SELECT result.sector_code, result.sector_name,
+                               result.index_symbol, result.ordinal_rank,
+                               result.rs_rating, result.raw_tier,
+                               result.gate_tier, result.blended_score
+                        FROM sector_strength_results result
+                        JOIN sector_strength_runs run ON run.id = result.run_id
+                        WHERE run.market_context_policy_id = :policy_id
+                          AND run.reference_eod_date = :reference_date
+                        ORDER BY result.ordinal_rank NULLS LAST, result.sector_code
+                        """
+                    ),
+                    {
+                        "policy_id": policy["id"],
+                        "reference_date": regime["reference_eod_date"],
+                    },
+                )
+            ).mappings().all()
+        ]
+    return MarketContextLatestResponse(
+        policy_id=policy["id"],
+        policy_version=str(policy["version"]),
+        mode=policy["mode"],
+        replay_report_hash=policy["replay_report_hash"],
+        reference_eod_date=regime["reference_eod_date"] if regime else None,
+        market_light=str(regime["market_light"] or "unavailable") if regime else "unavailable",
+        exposure_multiplier=(
+            regime["exposure_multiplier"]
+            if regime and regime["exposure_multiplier"] is not None
+            else 0
+        ),
+        trend_state=str(regime["trend_state"] or "unavailable") if regime else "unavailable",
+        breadth_state=str(regime["breadth_state"] or "unavailable") if regime else "unavailable",
+        distribution_state=(
+            str(regime["distribution_state"] or "unavailable") if regime else "unavailable"
+        ),
+        source_hash=regime["source_hash"] if regime else None,
+        evidence=dict(regime["evidence"] or {}) if regime else {},
+        data_quality=dict(regime["data_quality"] or {}) if regime else {},
+        sectors=sectors,
+    )
+
+
+@router.post("/market-context/policies/{version}/enforce")
+async def enforce_market_context_policy(
+    version: str,
+    payload: MarketContextPolicyEnforceRequest,
+    db: db_dep,
+) -> MarketContextLatestResponse:
+    await db.execute(text("SELECT pg_advisory_xact_lock(987654323)"))
+    target = (
+        await db.execute(
+            text("SELECT id, mode FROM market_context_policies WHERE version = :version FOR UPDATE"),
+            {"version": version},
+        )
+    ).mappings().one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="Market-context policy not found")
+    if target["mode"] == "retired":
+        raise HTTPException(status_code=409, detail="A retired policy cannot be re-enforced")
+    unverified_symbols = list(
+        (
+            await db.execute(
+                text(
+                    """
+                    SELECT fyers_symbol FROM instruments
+                    WHERE (
+                        metadata ->> 'role' IN ('benchmark', 'rs_benchmark', 'p9_trend_benchmark', 'p9_sector_index')
+                        OR fyers_symbol IN ('NSE:NIFTY50-INDEX', 'NSE:NIFTY500-INDEX')
+                    )
+                      AND COALESCE((metadata ->> 'verified')::boolean, false) = false
+                    ORDER BY fyers_symbol
+                    """
+                )
+            )
+        ).scalars()
+    )
+    if unverified_symbols:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "P9 symbols must be validated against the current FYERS symbol master before enforcement.",
+                "unverified_symbols": unverified_symbols,
+            },
+        )
+    await db.execute(
+        text("UPDATE market_context_policies SET mode = 'retired' WHERE mode = 'enforced' AND id <> :id"),
+        {"id": target["id"]},
+    )
+    await db.execute(
+        text(
+            """
+            UPDATE market_context_policies
+            SET mode = 'enforced', replay_report_hash = :report_hash,
+                replay_membership_mode = :membership_mode,
+                approved_at = now(), approved_by = :approved_by
+            WHERE id = :id
+            """
+        ),
+        {
+            "id": target["id"],
+            "report_hash": payload.replay_report_hash,
+            "membership_mode": payload.replay_membership_mode,
+            "approved_by": payload.approved_by,
+        },
+    )
+    await db.commit()
+    return await get_latest_market_context(db)
+
+
+@router.get("/stop-streak/{execution_mode}")
+async def get_stop_streak(
+    execution_mode: Literal["paper", "live"], db: db_dep
+) -> StopStreakResponse:
+    status = await synchronize_stop_streak(db, execution_mode)
+    await db.commit()
+    return StopStreakResponse(**status.__dict__)
+
+
+@router.post("/stop-streak/{execution_mode}/reset")
+async def reset_stop_streak_control(
+    execution_mode: Literal["paper", "live"],
+    payload: StopStreakResetRequest,
+    db: db_dep,
+) -> StopStreakResponse:
+    status = await reset_stop_streak(
+        db,
+        execution_mode=execution_mode,
+        changed_by="owner_api",
+        reason=payload.reason,
+    )
+    await db.commit()
+    return StopStreakResponse(**status.__dict__)
 
 
 @router.get("/proposals/{proposal_id}/charts/{chart_type}")
@@ -537,7 +728,10 @@ async def get_entry_supervisor_status(
 
     recent_ledger_stmt = text("""
         SELECT id, generation, leg_id, event_type, broker_funds_available,
-               open_risk_before, open_risk_after, allocated_shares, created_at
+               open_risk_before, open_risk_after, allocated_shares,
+               market_context_mode, context_multiplier,
+               context_adjusted_risk_ceiling, context_gate_reasons, details,
+               created_at
         FROM allocation_ledger
         ORDER BY created_at DESC
         LIMIT 10;

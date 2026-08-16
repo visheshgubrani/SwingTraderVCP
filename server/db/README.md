@@ -51,6 +51,9 @@ architecture and component-boundary source of truth.
 - `migrations/017_p10_review_hardening.sql` - upgrades already-migrated P10
   databases with correction intent types, conflict consumption, single-active
   policy enforcement, and complete geometry/renderer reuse identity.
+- `migrations/018_p9_market_context.sql` - adds immutable P9 policy, market and
+  sector snapshots, contextual screening/allocation audit links, metadata-driven
+  P9 indices, and execution-mode-isolated consecutive-stop breaker state/events.
 
 ## Domain Layout
 

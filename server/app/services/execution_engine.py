@@ -20,6 +20,7 @@ from app.domain.p10_sizing import apportion_staged_exits
 from app.domain.p10_geometry import floor_to_tick
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.services.journal_outbox import enqueue_journal_fill_event
+from app.services.risk_stop_streak import record_closed_position, synchronize_stop_streak
 from app.services.staged_exit_manager import (
     StagedPositionState,
     allocate_cumulative_target_fill,
@@ -1093,6 +1094,8 @@ async def complete_paper_exit(
             "complete_paper_exit requires EXECUTION_MODE=paper."
         )
 
+    await synchronize_stop_streak(db, "paper")
+
     intent_result = await db.execute(
         text(
             """
@@ -1408,6 +1411,8 @@ async def complete_paper_exit(
             "realized_pnl_delta": str(pnl_delta),
         },
     )
+    if new_state == "closed":
+        await record_closed_position(db, "paper", position_id, filled_at)
     return True
 
 

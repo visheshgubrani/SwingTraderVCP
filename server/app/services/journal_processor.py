@@ -177,6 +177,7 @@ async def _load_fill_context(db: AsyncSession, order_fill_id: UUID) -> dict | No
                 o.execution_mode,
                 o.position_id,
                 o.trade_instruction_id,
+                o.entry_leg_id,
                 p.instrument_id,
                 p.side AS position_side,
                 p.state AS position_state,
@@ -236,7 +237,40 @@ async def _load_position(db: AsyncSession, position_id: UUID) -> dict | None:
 
 async def _create_journal_on_first_entry(db: AsyncSession, fill: dict) -> None:
     snapshot = await _build_entry_snapshot(db, fill)
-    regime_id = await _capture_market_regime(db, fill["filled_at"])
+    allocation_context = None
+    if fill.get("entry_leg_id"):
+        allocation_context = (
+            await db.execute(
+                text(
+                    """
+                    SELECT market_regime_snapshot_id, sector_strength_result_id,
+                           market_context_policy_id, market_context_mode,
+                           context_multiplier, context_adjusted_risk_ceiling,
+                           context_gate_reasons
+                    FROM allocation_ledger
+                    WHERE leg_id = :leg_id AND event_type = 'sizing_allocated'
+                    ORDER BY created_at DESC LIMIT 1
+                    """
+                ),
+                {"leg_id": fill["entry_leg_id"]},
+            )
+        ).mappings().one_or_none()
+    if fill.get("entry_leg_id"):
+        # P10 must retain the allocation-time P9 fact, including an explicitly
+        # unavailable/null snapshot. The legacy Nifty 50 classifier is only a
+        # compatibility path for manual/non-P10 fills.
+        regime_id = (
+            allocation_context["market_regime_snapshot_id"]
+            if allocation_context
+            else None
+        )
+    else:
+        regime_id = await _capture_market_regime(db, fill["filled_at"])
+    if allocation_context:
+        snapshot["market_context_allocation"] = {
+            key: str(value) if value is not None else None
+            for key, value in dict(allocation_context).items()
+        }
     candles = await _load_chart_candles(db, fill["instrument_id"])
 
     journal_id = uuid4()

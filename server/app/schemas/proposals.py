@@ -147,6 +147,7 @@ class RiskPolicyResponse(BaseModel):
     daily_loss_limit_pct: Decimal
     max_open_positions: int
     deployable_capital_override: Decimal | None
+    consecutive_stop_limit: int
 
 
 class RiskPolicyUpdateRequest(BaseModel):
@@ -163,6 +164,7 @@ class RiskPolicyUpdateRequest(BaseModel):
     daily_loss_limit_pct: Decimal = Field(gt=0, le=Decimal("0.02"))
     max_open_positions: int = Field(ge=1, le=8)
     deployable_capital_override: Decimal = Field(gt=0)
+    consecutive_stop_limit: Literal[3] = 3
 
 
 class AutomationControlRequest(BaseModel):
@@ -170,3 +172,56 @@ class AutomationControlRequest(BaseModel):
 
     enabled: bool
     reason: str = Field(min_length=1, max_length=500)
+
+
+class MarketContextPolicyEnforceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    replay_report_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    replay_membership_mode: Literal[
+        "point_in_time", "current_membership_survivorship_biased"
+    ]
+    approved_by: str = Field(min_length=1, max_length=120)
+
+
+class StopStreakResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class MarketContextSectorResponse(BaseModel):
+    sector_code: str
+    sector_name: str
+    index_symbol: str
+    ordinal_rank: int | None
+    rs_rating: int | None
+    raw_tier: str
+    gate_tier: str
+    blended_score: Decimal | None
+
+
+class MarketContextLatestResponse(BaseModel):
+    policy_id: UUID
+    policy_version: str
+    mode: Literal["shadow", "enforced"]
+    replay_report_hash: str | None
+    reference_eod_date: dt.date | None
+    market_light: str
+    exposure_multiplier: Decimal
+    trend_state: str
+    breadth_state: str
+    distribution_state: str
+    source_hash: str | None
+    evidence: dict[str, Any]
+    data_quality: dict[str, Any]
+    sectors: list[MarketContextSectorResponse]
+
+
+class StopStreakResponse(BaseModel):
+    execution_mode: Literal["paper", "live"]
+    consecutive_count: int
+    limit: int
+    tripped: bool
+    tripped_at: dt.datetime | None
+    trip_position_id: UUID | None

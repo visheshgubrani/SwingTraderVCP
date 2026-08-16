@@ -8,6 +8,8 @@ and never become negative evidence.
 
 from __future__ import annotations
 
+import copy
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -15,7 +17,7 @@ CriterionStatus = Literal["positive", "negative", "mixed", "unknown", "not_appli
 LegacyVerdict = Literal["pass", "fail", "uncertain"]
 AssessmentGrade = Literal["A", "B", "C", "D", "insufficient"]
 
-RUBRIC_VERSION = "minervini_inspired_v2"
+RUBRIC_VERSION = "minervini_inspired_v3"
 FACTS_SCHEMA_VERSION = "fundamental_facts_v3"
 
 
@@ -108,6 +110,12 @@ def _metric_status(value: float | None, *, red_flag: bool = False, strong_at: fl
     if strong_at is not None and value >= strong_at:
         return "positive"
     return "mixed"
+
+
+def _grade_for_score(score: float | None) -> AssessmentGrade:
+    if score is None:
+        return "insufficient"
+    return "A" if score >= 80 else "B" if score >= 65 else "C" if score >= 50 else "D"
 
 
 def _ownership_observation(
@@ -334,7 +342,7 @@ def score_minervini_inspired(facts: dict[str, Any]) -> dict[str, Any]:
         score = None
     else:
         score = round((earned_points / available_weight) * 100, 2) if available_weight else None
-        grade = "A" if score is not None and score >= 80 else "B" if score is not None and score >= 65 else "C" if score is not None and score >= 50 else "D"
+        grade = _grade_for_score(score)
 
     criteria = _legacy_criteria(components, red_flags)
     scorecard = {
@@ -361,6 +369,72 @@ def score_minervini_inspired(facts: dict[str, Any]) -> dict[str, Any]:
             f"Scorecard cited evidence absent from normalized facts: {unresolved}"
         )
     return scorecard
+
+
+def apply_filing_risk_adjustments(
+    scorecard: dict[str, Any],
+    risk_checks: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Apply known NSE filing risks to the deterministic fundamental score.
+
+    Only explicit warning/red/severe results can lower a score. Unknown,
+    ambiguous, healthy, and not-applicable results remain visible without
+    being treated as either positive or negative evidence.
+    """
+
+    adjusted = copy.deepcopy(scorecard)
+    base_score = adjusted.get("score")
+    base_score = (
+        float(base_score)
+        if isinstance(base_score, (int, float))
+        and not isinstance(base_score, bool)
+        and math.isfinite(float(base_score))
+        else None
+    )
+    adjustments: list[dict[str, Any]] = []
+    total_impact = 0.0
+    checks = risk_checks if isinstance(risk_checks, dict) else {}
+    for key in ("promoter_pledge", "leverage"):
+        check = checks.get(key)
+        if not isinstance(check, dict):
+            continue
+        severity = check.get("status")
+        raw_impact = check.get("score_impact")
+        if severity not in {"warning", "red", "severe"}:
+            continue
+        if (
+            not isinstance(raw_impact, (int, float))
+            or isinstance(raw_impact, bool)
+            or not math.isfinite(float(raw_impact))
+            or float(raw_impact) >= 0
+        ):
+            continue
+        impact = float(raw_impact)
+        total_impact += impact
+        adjustments.append(
+            {
+                "key": key,
+                "severity": severity,
+                "score_impact": impact,
+                "source": check.get("source"),
+            }
+        )
+
+    adjusted["base_score"] = base_score
+    adjusted["risk_score_impact"] = round(total_impact, 2)
+    adjusted["risk_adjustments"] = adjustments
+    if base_score is not None:
+        adjusted_score = round(max(0.0, min(100.0, base_score + total_impact)), 2)
+        adjusted["score"] = adjusted_score
+        adjusted["grade"] = _grade_for_score(adjusted_score)
+
+    red_flags = list(adjusted.get("red_flags") or [])
+    red_flags.extend(
+        f"{item['key']}_{item['severity']}"
+        for item in adjustments
+    )
+    adjusted["red_flags"] = list(dict.fromkeys(red_flags))
+    return adjusted
 
 
 def unresolved_scorecard_evidence(
@@ -390,5 +464,5 @@ def score_balanced_sepa(facts: dict[str, Any]) -> dict[str, Any]:
     """
 
     scorecard = score_minervini_inspired(facts)
-    scorecard["rubric_version"] = "balanced_sepa_v2"
+    scorecard["rubric_version"] = "balanced_sepa_v3"
     return scorecard

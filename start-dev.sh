@@ -21,6 +21,8 @@ WORKER_PID_FILE="$RUNTIME_DIR/worker.pid"
 TICK_WORKER_PID_FILE="$RUNTIME_DIR/tick-worker.pid"
 ORDER_GATEWAY_PID_FILE="$RUNTIME_DIR/order-gateway.pid"
 POSITION_MONITOR_PID_FILE="$RUNTIME_DIR/position-monitor.pid"
+PROPOSAL_WORKER_PID_FILE="$RUNTIME_DIR/proposal-worker.pid"
+ENTRY_SUPERVISOR_PID_FILE="$RUNTIME_DIR/entry-supervisor.pid"
 UI_PID_FILE="$RUNTIME_DIR/ui.pid"
 
 API_LOG="$RUNTIME_DIR/api.log"
@@ -28,6 +30,8 @@ WORKER_LOG="$RUNTIME_DIR/worker.log"
 TICK_WORKER_LOG="$RUNTIME_DIR/tick-worker.log"
 ORDER_GATEWAY_LOG="$RUNTIME_DIR/order-gateway.log"
 POSITION_MONITOR_LOG="$RUNTIME_DIR/position-monitor.log"
+PROPOSAL_WORKER_LOG="$RUNTIME_DIR/proposal-worker.log"
+ENTRY_SUPERVISOR_LOG="$RUNTIME_DIR/entry-supervisor.log"
 UI_LOG="$RUNTIME_DIR/ui.log"
 
 declare -a PID_FILES=(
@@ -36,6 +40,8 @@ declare -a PID_FILES=(
   "$TICK_WORKER_PID_FILE"
   "$ORDER_GATEWAY_PID_FILE"
   "$POSITION_MONITOR_PID_FILE"
+  "$PROPOSAL_WORKER_PID_FILE"
+  "$ENTRY_SUPERVISOR_PID_FILE"
   "$UI_PID_FILE"
 )
 
@@ -120,6 +126,8 @@ stop_services() {
   stop_recorded_process "$UI_PID_FILE" "UI"
   stop_recorded_process "$ORDER_GATEWAY_PID_FILE" "order gateway"
   stop_recorded_process "$POSITION_MONITOR_PID_FILE" "position monitor"
+  stop_recorded_process "$ENTRY_SUPERVISOR_PID_FILE" "entry supervisor"
+  stop_recorded_process "$PROPOSAL_WORKER_PID_FILE" "proposal worker"
   stop_recorded_process "$TICK_WORKER_PID_FILE" "tick worker"
   stop_recorded_process "$WORKER_PID_FILE" "arq worker"
   stop_recorded_process "$API_PID_FILE" "API"
@@ -134,6 +142,8 @@ show_status() {
       "$TICK_WORKER_PID_FILE") label="tick worker" ;;
       "$ORDER_GATEWAY_PID_FILE") label="order gateway" ;;
       "$POSITION_MONITOR_PID_FILE") label="position monitor" ;;
+      "$PROPOSAL_WORKER_PID_FILE") label="proposal worker" ;;
+      "$ENTRY_SUPERVISOR_PID_FILE") label="entry supervisor" ;;
       "$UI_PID_FILE") label="UI" ;;
     esac
 
@@ -207,6 +217,10 @@ main() {
     bash -c 'cd "$1" && exec uv run python -m app.workers.tick_worker' _ "$SERVER_DIR"
   start_service "position monitor" "$POSITION_MONITOR_PID_FILE" "$POSITION_MONITOR_LOG" \
     bash -c 'cd "$1" && exec uv run python -m app.workers.position_monitor' _ "$SERVER_DIR"
+  start_service "proposal worker" "$PROPOSAL_WORKER_PID_FILE" "$PROPOSAL_WORKER_LOG" \
+    bash -c 'cd "$1" && exec uv run python -m app.workers.proposal_worker' _ "$SERVER_DIR"
+  start_service "entry supervisor" "$ENTRY_SUPERVISOR_PID_FILE" "$ENTRY_SUPERVISOR_LOG" \
+    bash -c 'cd "$1" && exec uv run python -m app.workers.entry_supervisor' _ "$SERVER_DIR"
   ORDER_GATEWAY_ENABLED="$(
     cd "$SERVER_DIR"
     uv run python -c \

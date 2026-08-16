@@ -33,6 +33,24 @@ architecture and component-boundary source of truth.
 - `migrations/011_saas_entitlements_and_strict.sql` - adds the Better Auth
   admin role, provider-neutral SaaS subscription state, and the paid Minervini
   Strict template. Runtime enforcement remains in the Swyingify Next.js BFF.
+- `migrations/012_scanner_v4_nse_risk.sql` - adds NSE pledge/leverage risk
+  enrichment tables and constraints used by the deterministic P7 scorecard
+  adjustments (promoter pledge / non-financial leverage).
+- `migrations/013_vcp_vision.sql` - adds the advisory chart-image VCP
+  validator: `vcp_visual_analyses` (frozen candle source, retained chart PNGs,
+  reuse key, sanitized AI result) and `vcp_visual_attempts` (one row per
+  provider call, sanitized request/response, usage, cost, error class).
+- `migrations/014_vcp_vision_hardening.sql` - upgrades databases that
+  already applied the original 013 migration with immutable `frozen_ohlcv`,
+  frozen reasoning/max-token settings, and the complete reuse identity.
+- `migrations/015_p10_automation.sql` - adds immutable proposals, entry legs,
+  trigger/capacity state, risk policies, allocation ledger, and 5-minute
+  profile storage.
+- `migrations/016_p10_safety_hardening.sql` - adds audited serial vision
+  attempts, approval immutability, reconciliation state, and P10 pause controls.
+- `migrations/017_p10_review_hardening.sql` - upgrades already-migrated P10
+  databases with correction intent types, conflict consumption, single-active
+  policy enforcement, and complete geometry/renderer reuse identity.
 
 ## Domain Layout
 
@@ -51,6 +69,7 @@ The schema is organized around five data domains:
    - `scan_runs`
    - `screening_results`
    - `fundamental_snapshots`
+   - `screening_result_fundamental_snapshots`
    - `watchlists`
    - `watchlist_items`
 
@@ -79,6 +98,12 @@ Keep table writes aligned with the component ownership from `AGENTS.md`:
 - `fundamental_snapshots` are written only by the P7 arq job after the
   technical shortlist has been persisted. Raw provider responses and
   deterministic normalized facts are retained for audit/replay.
+- Official NSE shareholding and integrated-filing XBRLs are immutable P7
+  enrichment snapshots. Known risks may adjust only the deterministic
+  fundamental score; their multi-source links are owned by
+  `screening_result_fundamental_snapshots`. NSE failures remain visible as
+  unknown diagnostics, receive no score penalty, and never invalidate the
+  primary Upstox snapshot.
 - Trading tables are written by the execution engine and position monitor.
 - Operational/audit tables are written by scheduler, reconciliation, and system
   services.
@@ -124,6 +149,7 @@ human instruction, order intent, fills, and position event trail.
 P7 annotations can be traced through:
 
 `screening_results.fundamental_snapshot_id -> fundamental_snapshots` and
+`screening_result_fundamental_snapshots -> fundamental_snapshots` and
 `fundamental_analysis_items -> fundamental_ai_attempts -> fundamental_annotations`
 
 The deterministic scorecard is authoritative. Each AI attempt retains its exact

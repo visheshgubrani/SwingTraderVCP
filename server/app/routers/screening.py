@@ -1,9 +1,9 @@
 import json
 import logging
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,7 @@ from app.schemas.screening import (
     FundamentalTraceResponse,
     ScanResultResponse,
     ScanRunResponse,
+    ScannerDiagnosticsResponse,
     ScanTriggerResponse,
 )
 from app.services.fundamental_controls import is_fundamental_control_paused
@@ -29,6 +30,7 @@ from app.services.fundamental_pass import p7_run_config
 from app.services.fundamental_rules import unresolved_scorecard_evidence
 from app.services.personal_scan import ensure_personal_scan
 from app.services.screening_config import TechnicalScreeningConfig
+from app.services.screening_diagnostics import build_scanner_diagnostics
 
 router = APIRouter(prefix="/screening", tags=["screening"])
 logger = logging.getLogger(__name__)
@@ -149,6 +151,8 @@ async def get_fundamental_detail(
                 "model": flags.get("model"),
             },
             "snapshot": snapshot,
+            "risk_checks": flags.get("risk_checks") or {},
+            "source_snapshots": flags.get("source_snapshots") or [],
         }
     )
 
@@ -331,7 +335,11 @@ async def trigger_scan(
 async def list_scan_runs(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[ScanRunResponse]:
-    """Return recent screening execution history."""
+    """Return recent personal screening execution history.
+
+    Historical technical-only version-comparison shadow runs are always
+    hidden from the UI; their persisted rows are retained for audit.
+    """
     query = text("""
         SELECT 
             r.id, 
@@ -348,6 +356,7 @@ async def list_scan_runs(
         FROM scan_runs r
         LEFT JOIN screening_results s ON r.id = s.scan_run_id
         WHERE r.visibility = 'personal'
+          AND r.triggered_by <> 'manual_shadow'
         GROUP BY r.id
         ORDER BY r.created_at DESC
         LIMIT 50
@@ -594,10 +603,24 @@ async def get_scan_results(
             f.latest_quarterly_period,
             i.symbol, 
             i.name, 
-            i.fyers_symbol
+            i.fyers_symbol,
+            v.id AS vcp_vision_id,
+            v.status AS vcp_vision_status,
+            v.ai_verdict AS vcp_vision_ai_verdict,
+            v.human_verdict AS vcp_vision_human_verdict,
+            v.created_at AS vcp_vision_created_at,
+            v.error_code AS vcp_vision_error_code
         FROM screening_results s
         JOIN instruments i ON s.instrument_id = i.id
         LEFT JOIN fundamental_snapshots f ON f.id = s.fundamental_snapshot_id
+        LEFT JOIN LATERAL (
+            SELECT v.id, v.status, v.ai_verdict, v.human_verdict,
+                   v.created_at, v.error_code
+            FROM vcp_visual_analyses v
+            WHERE v.screening_result_id = s.id
+            ORDER BY v.created_at DESC
+            LIMIT 1
+        ) v ON true
         WHERE s.scan_run_id = :run_id
         ORDER BY s.result_rank ASC NULLS LAST, s.pct_from_52w_high ASC
     """)
@@ -623,6 +646,7 @@ async def get_scan_results(
             "name": row.name,
             "fyers_symbol": row.fyers_symbol,
             "technical_score": technical_score,
+            "score_version": score_detail.get("version"),
             "score_grade": score_grade,
             "score_components": score_detail.get("components") or {},
             "eligibility": tech_metrics.get("eligibility") or {},
@@ -693,6 +717,12 @@ async def get_scan_results(
                     row.llm_status != "not_requested",
                 )
             ),
+            "fundamental_selection_rank": tech_metrics.get("fundamental_selection_rank"),
+            "industry": tech_metrics.get("industry"),
+            "industry_key": tech_metrics.get("industry_key"),
+            "fundamental_cap_exclusion_reason": tech_metrics.get("fundamental_cap_exclusion_reason"),
+            "risk_checks": (row.llm_flags or {}).get("risk_checks") or {},
+            "source_snapshots": (row.llm_flags or {}).get("source_snapshots") or [],
             "llm_status": row.llm_status,
             "llm_verdict": row.llm_verdict,
             "llm_flags": row.llm_flags or {},
@@ -719,6 +749,91 @@ async def get_scan_results(
                 else None
             ),
             "reviewer_status": row.reviewer_status,
+            "vcp_vision": (
+                {
+                    "id": row.vcp_vision_id,
+                    "status": row.vcp_vision_status,
+                    "ai_verdict": row.vcp_vision_ai_verdict,
+                    "human_verdict": row.vcp_vision_human_verdict,
+                    "created_at": row.vcp_vision_created_at,
+                    "error_code": row.vcp_vision_error_code,
+                }
+                if row.vcp_vision_id
+                else None
+            ),
         }))
 
     return results
+
+
+@router.get(
+    "/runs/{run_id}/diagnostics",
+    response_model=ScannerDiagnosticsResponse,
+)
+async def get_scan_diagnostics(
+    run_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ScannerDiagnosticsResponse:
+    """Return reproducible score, concentration, and XBRL diagnostics."""
+    run_result = await db.execute(
+        text(
+            """
+            SELECT id, as_of_date, technical_config
+            FROM scan_runs
+            WHERE id = :run_id AND visibility = 'personal' AND status = 'succeeded'
+            """
+        ),
+        {"run_id": run_id},
+    )
+    run = run_result.mappings().one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Succeeded personal scan run not found")
+    score_version = dict(run["technical_config"] or {}).get("pipeline_version")
+
+    rows_result = await db.execute(
+        text(
+            """
+            SELECT s.result_rank, s.technical_score, s.pct_from_52w_high,
+                   s.technical_metrics, i.symbol
+            FROM screening_results s
+            JOIN instruments i ON i.id = s.instrument_id
+            WHERE s.scan_run_id = :run_id
+            ORDER BY s.result_rank ASC NULLS LAST, i.symbol ASC
+            """
+        ),
+        {"run_id": run_id},
+    )
+    rows = [dict(row) for row in rows_result.mappings()]
+
+    coverage_result = await db.execute(
+        text(
+            """
+            SELECT
+                COUNT(link.snapshot_id)::int AS total,
+                COUNT(*) FILTER (WHERE f.fetch_status = 'ambiguous')::int AS ambiguous,
+                COUNT(link.snapshot_id) FILTER (
+                    WHERE f.taxonomy_version IS NULL
+                )::int AS unknown_taxonomy,
+                GREATEST(
+                    COUNT(DISTINCT s.id) * 2 - COUNT(link.snapshot_id), 0
+                )::int AS missing
+            FROM screening_results s
+            LEFT JOIN screening_result_fundamental_snapshots link
+              ON link.screening_result_id = s.id
+             AND link.role IN ('promoter_pledge', 'leverage')
+            LEFT JOIN fundamental_snapshots f ON f.id = link.snapshot_id
+            WHERE s.scan_run_id = :run_id
+              AND COALESCE((s.technical_metrics ->> 'fundamental_selected')::boolean, false)
+            """
+        ),
+        {"run_id": run_id},
+    )
+    coverage = dict(coverage_result.mappings().one())
+    return ScannerDiagnosticsResponse(
+        scan_run_id=run_id,
+        score_version=score_version,
+        diagnostics=build_scanner_diagnostics(
+            rows,
+            xbrl_counts=coverage,
+        ),
+    )

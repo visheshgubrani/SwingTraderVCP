@@ -24,7 +24,7 @@ This monorepo contains **two products**. Do not conflate them.
 | Frontend | `client/` (Vite + React) | `swyingify/` (Next.js) |
 | Agent source of truth | **This file** (`AGENTS.md`) | [`swyingify/AGENTS.md`](swyingify/AGENTS.md) |
 | Audience | Single user (owner) | Multi-user SaaS |
-| Core job | Screen → **confirm trade** → automate execution / SL / TP | Screen → study → watchlist; free + paid scanners |
+| Core job | Screen → AI pattern proposal → **approve/reject** → deterministic entry / SL / TP | Screen → study → watchlist; free + paid scanners |
 | Money path | Yes — Fyers orders, position monitor, kill switch | **Never** — no orders, no positions, no broker execution |
 | Auth | None / single-user | Better Auth + paywall |
 | Markets (current) | Indian equities (Nifty 500) | V1: Indian equities only |
@@ -33,16 +33,16 @@ This monorepo contains **two products**. Do not conflate them.
 candles, scan engine, workers). The server may serve both apps. Shared scan
 logic may be reused and expanded for Swyingify templates — but SaaS API
 surfaces must never expose or invoke the money path
-(`trade_instructions` confirm → execution, order gateway, position monitor,
-kill switch as an order blocker, reconciliation-as-trading-control, journal
-fills).
+(`trade_proposals` approval → entry supervisor → execution, order gateway,
+position monitor, kill switch as an order blocker,
+reconciliation-as-trading-control, journal fills).
 
 **Agent routing rules:**
 
 1. Task is Swyingify / SaaS / Better Auth / public scanners / paywall → follow
    [`swyingify/AGENTS.md`](swyingify/AGENTS.md). Do not add trade confirm,
    execution, or position features to Swyingify.
-2. Task is personal trading / Fyers money path / P0–P9 personal phases →
+2. Task is personal trading / Fyers money path / P0–P10 personal phases →
    follow **this** file. Do not turn the personal app into a multi-tenant SaaS.
 3. Task touches shared `server/` code used by both → state the impact on
    **both** products, keep API / table ownership boundaries clear, and do not
@@ -57,25 +57,28 @@ the Fyers API. It is built for a single user, not a multi-tenant product.
 
 The core principle governing every design choice below:
 
-> Screening is fully automated. The final trade decision (which stock, size,
-> entry, SL, target, trailing rule) is made by the human. Once instructed,
-> execution and trade management (SL / target / trailing) are fully
+> Screening and trade-plan generation are automated. Gemini reads only the
+> chart pattern and returns a strict structured opinion. Deterministic Python
+> owns every money and risk decision. A human must approve or reject the
+> resulting immutable proposal before any entry can become eligible. Once
+> approved, entry, scale-in, SL, targets, trailing, and reconciliation are
 > automated.
 
-That boundary — automated screening → **manual decision checkpoint** →
-automated execution/management — is the single most important invariant in
-this system. No component should blur it (e.g. auto-placing an entry order
-without an explicit human instruction, or requiring manual action to enforce
-an already-set stop loss).
+That boundary — automated proposal → **manual approval checkpoint** →
+deterministic execution/management — is the single most important invariant.
+The human does not hand-author or edit scanner-sourced live plans; approval
+accepts a versioned plan and maximum risk budget, not a stale quantity. Gemini
+never sizes, manages risk, confirms a proposal, or touches the execution path.
 
 Mental model:
 
 ```
-        AUTOMATED                         HUMAN                      AUTOMATED
-[EOD candles → Screener → LLM] → [Chart review → Confirm trade] → [Entry → Monitor → Exit]
-        no money                         checkpoint                    money path
-                                                                      + reconcile
-                                                                      + journal/AI (read-only)
+             AUTOMATED / NO MONEY                     HUMAN               AUTOMATED MONEY PATH
+[EOD → scanner → charts → Gemini pattern read → Python proposal] → [approve/reject] → [entry supervisor]
+                                                                                              │
+                                                                                              ▼
+                                                                                [execute → monitor → exit]
+                                                                                     + reconcile + journal
 ```
 
 ---
@@ -88,12 +91,14 @@ Do not substitute these without an explicit instruction from the user.
 | -------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Frontend             | Vite + React, TanStack Query, shadcn/ui, Tailwind | REST via TanStack Query; live data via WebSocket to **our own backend**, never directly to Fyers                                                    |
 | Charting             | lightweight-charts (TradingView OSS)              | Presentational only — no SL/target/screening math in the client                                                                                     |
+| Headless proposal charts | pinned `matplotlib` + `mplfinance` (Agg)      | Server-rendered, versioned 1280×720 PNGs; never browser screenshots for P10 proposal generation                                                     |
 | Backend              | FastAPI (Python)                                  | Async throughout for I/O-bound work (WS, HTTP calls to Fyers)                                                                                       |
 | Database             | PostgreSQL                                        | Chosen over SQLite specifically because multiple processes (API, ingestion, monitor, screener) read/write concurrently — do not fall back to SQLite |
 | Broker/queue         | Redis                                             | (1) pub/sub for LTP fan-out, (2) hot LTP cache, (3) backing store for async job queue (`arq`)                                                        |
 | Market data & orders | Fyers API (REST + WebSocket)                      | See §2.1 for which Fyers surfaces we use                                                                                                            |
-| Fundamentals         | Upstox Company Fundamentals API                   | Read-only Analytics Token; ISIN-keyed snapshots for technical survivors only; never prices, sockets, or orders                                     |
-| LLM inference        | OpenRouter (`openai/gpt-5.6-luna-pro`)            | Blind structured second opinion over normalized snapshots; Python's deterministic fit remains authoritative. No tools or money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
+| Fundamentals         | Upstox Company Fundamentals API + official NSE corporate filings | Upstox remains primary; official NSE shareholding and integrated-filing XBRL are read-only risk enrichment for technical survivors only; never prices, sockets, or orders |
+| Fundamental LLM inference | OpenRouter (`openai/gpt-5.6-luna-pro`)      | Blind structured second opinion over normalized snapshots; Python's deterministic fit remains authoritative. No tools or money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
+| VCP vision inference | OpenRouter (`google/gemini-3.6-flash`)            | Serial blind pattern interpretation over immutable OHLCV and standardized captures. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
 
 ### 2.1 Locked Fyers / trading product decisions
 
@@ -104,15 +109,17 @@ Do not substitute these without an explicit instruction from the user.
 | Default product type  | **CNC**                                        | Multi-day swing. Per-trade override may be added later; default CNC   |
 | Order placement API   | **Async** (`/api/v3/orders/async`)             | Correlate via **Order WebSocket** (`id_fyers` → exchange order id)    |
 | Order rate limit      | Internal ≤ **10 OPS** token bucket             | Align with Fyers; queue bursts inside the engine                      |
-| AI / LLM              | Annotation only                                | May never confirm trades or call the execution engine                 |
-| P7 fundamental source | **Upstox read-only fundamentals**              | Consolidated statements by default; never use Upstox for trading      |
+| AI / LLM              | **Pattern read only**                         | May return verdict, geometry, pivot, T1–T3, evidence, confidence, and an entry-template enum; never stop/quantity/risk/exposure/trailing arithmetic, confirmation, or execution |
+| P7 fundamental source | **Upstox primary + official NSE filings enrichment** | Consolidated Upstox statements by default; known NSE pledge/leverage risks transparently reduce only the deterministic fundamental score; neither source is used for trading |
 
 **Explicit non-goals (v1 unless user reopens):**
 
 - TBT 50-depth / protobuf incremental merge as the monitor feed
 - Exchange Cover Order / Bracket Order as the primary SL/TP mechanism
 - Frontend connecting to any Fyers endpoint or socket
-- Auto-entry from screener score or LLM confidence
+- Auto-entry without a versioned, unexpired human-approved proposal
+- LLM-authored stop, quantity, monetary risk, exposure, daily-loss, or
+  trailing calculations
 - Writing every raw tick to Postgres (sample/debug only if needed)
 - Upstox market quotes, WebSockets, portfolio APIs, or order APIs
 - Persisting or displaying model `reasoning_details`
@@ -125,27 +132,27 @@ Run as **separate processes** (same repo, different entrypoints). Do not fold
 money-path workers into the API process.
 
 ```
-┌─────────────┐     REST/WS      ┌──────────────────┐
-│  React SPA  │◄────────────────►│  FastAPI (API)   │  thin: auth, CRUD, browser WS
-└─────────────┘                  └────────┬─────────┘
-                                          │
-         ┌────────────────────────────────┼──────────────────────────────┐
-         ▼                                ▼                              ▼
-┌─────────────────┐              ┌─────────────────┐            ┌─────────────────┐
-│ arq worker      │              │ tick ingestion  │            │ order gateway   │
-│ EOD, scan, LLM, │              │ 1× Fyers market │            │ 1× Fyers order  │
-│ token refresh,  │              │ data WS (LTP)   │            │ WS + REST async │
-│ reconcile cron  │              │ → Redis pub/sub │            │ → intents/fills │
-└─────────────────┘              │ → LTP cache     │            └────────┬────────┘
-                                 └────────┬────────┘                     │
-                                          ▼                              │
-                                 ┌─────────────────┐                     │
-                                 │ position monitor│◄────────────────────┘
-                                 │ Redis LTP sub   │  calls execution engine
-                                 │ SL/TP/trailing  │  (never opens Fyers sockets)
-                                 └─────────────────┘
-                                          │
-                     Postgres (system of record)  +  Redis (queue, pub/sub, LTP cache)
+┌─────────────┐    REST/WS    ┌──────────────────┐
+│ React SPA   │◄─────────────►│ FastAPI (thin)   │
+└─────────────┘               └──────────────────┘
+
+┌─────────────────┐  top 20  ┌─────────────────┐  approved  ┌─────────────────┐
+│ core arq worker │──────────►│ proposal worker │───────────►│ entry supervisor│
+│ EOD/scan/P7/cron│           │ charts + Gemini │            │ bars + risk lock│
+└─────────────────┘           │ + Python plan   │            └────────┬────────┘
+                              └─────────────────┘                     │
+                                                                      ▼
+┌─────────────────┐  Redis LTP/5m bars  ┌─────────────────┐   ┌─────────────────┐
+│ tick ingestion  │────────────────────►│ position monitor│──►│ execution engine│
+│ 1× market WS    │────────────────────►│ SL/TP/trailing  │   │ Fyers async REST│
+└─────────────────┘  entry supervisor   └─────────────────┘   └────────┬────────┘
+                                                                       ▼
+                                                              ┌─────────────────┐
+                                                              │ order gateway   │
+                                                              │ 1× order WS     │
+                                                              └─────────────────┘
+
+        Postgres = system of record; Redis = queue/pub-sub/hot cache only
 ```
 
 ---
@@ -153,46 +160,72 @@ money-path workers into the API process.
 ## 4. Component map
 
 - **Frontend** — backend REST + backend WebSocket only. Never talks to Fyers.
-  Never contains trading logic (no SL/target math, no screening logic). Displays
-  state and sends human instructions/decisions. Charting is presentational
-  (daily candles from API + live LTP overlay from our WS).
+  Never contains trading logic. Displays proposal and position state and sends
+  immutable approve/reject decisions. Scanner-sourced live proposals cannot be
+  edited in the browser. Charting remains presentational.
 - **FastAPI backend (API layer)** — request/response only. Thin. Creates
-  explicit human instructions, reads state, owns **browser** WebSocket
-  connections. Delegates heavy work to workers. On confirmed trade
-  instruction, calls the execution engine (does not call Fyers order APIs
-  itself).
+  and reads proposal decisions, risk-policy versions, and controls; owns
+  **browser** WebSocket connections. It neither runs proposal/entry loops nor
+  calls Fyers order APIs. Approval arms the durable entry supervisor; an HTTP
+  request must not place an entry inline.
 - **Tick ingestion worker** — the _only_ component holding the Fyers
   **market data** WebSocket (LTP/quote). Publishes ticks to Redis pub/sub and
-  updates the hot LTP cache. Dynamic subscribe set = open positions ∪ active
-  watchlist ∪ open chart sessions ∪ **`NSE:NIFTY50-INDEX` benchmark** (P8
-  regime). No business/trading logic.
+  updates the hot LTP cache. It also aggregates/persists completed 5-minute
+  bars and publishes bar events; this is data ingestion, not trade logic.
+  Dynamic subscribe set = open positions ∪ armed proposal symbols ∪ active
+  watchlist ∪ open chart sessions ∪ **`NSE:NIFTY50-INDEX` benchmark**. It
+  periodically reconciles intraday bars with Fyers data. No entry/risk logic.
 - **Order gateway** — the _only_ component holding the Fyers **order**
   WebSocket. Receives async place/modify/cancel correlation (`id_fyers`,
   exchange ids, fills) and persists `order_events` / `order_fills`. Does not
   decide _when_ to trade.
 - **Execution engine** — the _only_ module allowed to place, modify, or
-  cancel orders with Fyers REST. Called by the API layer (entry, after
-  explicit human confirm) and by the position monitor (exits). Must:
+  cancel orders with Fyers REST. Called by the entry supervisor for approved
+  entries/adds/corrections and by the position monitor for exits. Must:
   - check global kill switch before any new order
   - insert `order_intent` with `idempotency_key` **before** calling Fyers
   - never blind-retry a live place; retry only with the same idempotency key
     when status is still unknown/created
   - enforce internal ≤10 OPS
 - **Position monitor worker** — subscribes to LTP via Redis. Evaluates SL /
-  target / trailing for every non-closed position, tick by tick. Runs whether
-  or not the UI is open. On trigger, requests an exit via the execution
-  engine. On restart, reloads all non-closed positions from Postgres and
-  re-arms with no manual step. Treat correctness as critical.
+  T1/T2/T3/runner/trailing for every non-closed position, tick by tick. Runs
+  whether or not the UI is open. On trigger, requests an idempotent exit via
+  the execution engine. On restart, reconstructs every non-closed position
+  from persisted intents/fills and re-arms with no manual step.
 - **Screening worker** — technical filter over Nifty 500 from historical
   candles; optional LLM fundamental pass **only on technical survivors**.
   Triggered via Redis job queue (`arq`), never inline in an API request.
-  P7 fetches read-only Upstox data by ISIN, persists a reproducible
-  fundamentals snapshot, computes numeric facts in Python, and sends one
+  Historical version-comparison shadow runs (now retired with the v4 score
+  engine) remain persisted as personal technical-only runs and never replace
+  the active production ranking.
+  P7 fetches read-only Upstox data by ISIN plus best-effort official NSE
+  shareholding/integrated-filing XBRL, persists reproducible snapshots,
+  computes numeric facts and deterministic pledge/leverage risk adjustments in Python, and sends one
   blind, strict structured OpenRouter second-opinion request per survivor.
   AI failures never invalidate the Upstox snapshot or Python score. **Never places an
   order.**
-- **Scheduler (arq cron)** — EOD candle sync, optional EOD screen, **Fyers
-  auth token refresh** (scheduled, not lazy-only), reconciliation cadence.
+- **Proposal / VCP vision worker** — a dedicated `arq` process with
+  concurrency `1`, separate from core cron/reconciliation work. For the
+  scanner's existing selected top 20 it freezes EOD OHLCV, renders a raw
+  252-session context chart and deterministically annotated 126-session detail
+  chart, calls Gemini serially with a strict schema, and lets deterministic
+  Python build or reject an immutable proposal. Every renderer, geometry,
+  prompt, input, provider attempt, and policy version is audited. The worker
+  has a **45-minute hard batch budget** from shortlist freeze, a 90-second
+  per-attempt timeout, at most one retry when budget remains, and must not
+  start an attempt after the deadline. Remaining candidates become
+  `timed_out`, not silently deferred. Live-eligible output must also exist by
+  **08:30 Asia/Kolkata** on the next NSE session; later output is review-only
+  and cannot be approved for live entry.
+- **Entry supervisor worker** — consumes completed 5-minute bars for approved
+  proposals. It owns trigger evaluation, proposal expiry, add-leg gates,
+  priority/capacity ordering, fresh broker-state preflight, and serialized
+  deterministic sizing. It has no LLM and no Fyers socket. It persists trigger
+  and allocation state before calling the execution engine and reconstructs
+  nonterminal legs on restart.
+- **Scheduler (core arq cron)** — EOD candle sync, optional EOD screen,
+  broker-auth readiness validation/alerts, and reconciliation cadence.
+  Proposal jobs never share this worker's single execution slot.
 - **Reconciliation job** — compares DB orders/positions/fills to Fyers.
   Manual trades placed in the Fyers app are detected and imported/flagged —
   never fought blindly.
@@ -206,7 +239,8 @@ money-path workers into the API process.
   AI coach runs async over filtered closed trades with strict structured
   OpenRouter output — **must not** expose tools that place or confirm orders.
 - **Database (Postgres)** — system of record for instruments, candles,
-  screening, watchlists, trade instructions, positions, order intents/events/
+  screening, proposal artifacts/decisions/legs, risk-policy and allocation
+  events, watchlists, trade instructions, positions, order intents/events/
   fills, jobs, reconciliation, broker tokens, system controls/events.
 
 ### 4.1 Suggested module ownership (server)
@@ -218,117 +252,369 @@ without updating this file.
 | ---------------------------- | --------------------------------------------------------------- |
 | `routers/*`                  | Thin HTTP; no Fyers orders; no screening loop                   |
 | Browser WS handler           | Fan-out of Redis LTP / position events to sessions              |
-| Tick ingestion worker        | Fyers market WS → Redis; optional sampled ticks                 |
+| Tick ingestion worker        | Fyers market WS → Redis/LTP cache; persisted completed 5m bars  |
 | Order gateway worker         | Fyers order WS → order_events / fills                           |
 | Execution engine service     | order_intents + Fyers async REST place/modify/cancel            |
 | Position monitor worker      | positions / position_events; calls execution engine for exits   |
 | Screener / LLM jobs          | scan_runs, screening_results                                    |
-| Reconcile / scheduler        | job_runs, reconciliation_*, broker token refresh, system_events |
+| Proposal worker              | frozen charts, vision attempts, immutable trade proposals       |
+| Entry supervisor             | triggers, legs, risk snapshots, allocation ledger; calls execution engine |
+| Reconcile / scheduler        | job_runs, reconciliation_*, broker-auth readiness, system_events |
 | Journal processor (arq)      | journal_entries, journal_fill_outbox, market_regime_snapshots     |
 | Journal router (API)         | journal review fields, actual_charges, chart artifact uploads   |
 | Journal AI coach (arq)       | journal_ai_runs (read-only analysis, no money path)             |
-| Domain pure modules          | trailing rules, position state transitions, tick-size snap      |
+| Domain pure modules          | geometry, triggers, risk/caps, rounding, trailing, state transitions |
 
-Frontend should be split by feature (`screener`, `chart`, `trade`,
-`positions`, `journal`, `admin`) rather than a single mega-page as features
-grow.
-
----
-
-## 5. Data flow — screening pipeline
-
-```
-Nifty 500 universe (historical candles from Fyers → market_candles)
-        │
-        ▼
-Technical filter (Stage-2 / VCP shortlist gates, volume, % from 52w high, etc.)
-        │  (only survivors proceed — do not run LLM pass on all 500)
-        ▼
-Upstox fundamentals → durable normalized snapshot
-        │
-        ▼
-LLM second opinion (blind pass/fail/uncertain + packet reference IDs)
-        │
-        ▼
-Shortlist stored in DB, surfaced to frontend for manual review + charting
-```
-
-This entire pipeline **never places an order and never touches money.** Its
-only output is data for the human to review.
-
-Reviewer statuses on results (conceptual): pending → watchlisted | rejected |
-trade_planned — driven by the human UI, not by the screener.
+Frontend should be split by feature (`screener`, `chart`, `proposals`,
+`trade`, `positions`, `journal`, `admin`) rather than a single mega-page as
+features grow.
 
 ---
 
-## 6. Data flow — execution & monitoring
+## 5. Data flow — scan to immutable proposal
 
 ```
-Human decision (stock, entry, size, SL, target, trailing rule, product=CNC default)
-        │  ← this is the only manual step in this half of the system
-        │     trade_instruction: draft → confirmed (manual_confirmed_at required)
-        ▼
-API creates position (pending_entry) and calls execution engine
+Nifty 500 → technical scan → existing selected top 20
+        │
+        ├── Upstox fundamentals + official NSE risk enrichment (P7)
         │
         ▼
-order_intent (idempotency_key) persisted FIRST
+freeze EOD OHLCV + deterministic Python geometry
         │
         ▼
-Fyers POST /orders/async → id_fyers
+raw 252-session chart + annotated 126-session chart
         │
         ▼
-Order gateway (Order WS) correlates → fyers order id, partials, fills
+Gemini strict pattern read (no broker/account/money context)
         │
         ▼
-Position: pending_entry → open (on fill); monitor arms SL/target/trail
+Python schema/date/price/R:R/risk-policy validation
         │
         ▼
-Position monitor (LTP via Redis, continuous)
-   watches live price vs SL / target / trailing rules
-        │
-        ▼
-Exit order_intent + async place when rule triggers → exit_pending → closed
+immutable proposal → human approve/reject
 ```
 
-### 6.1 Position state machine
+The proposal worker never places an order. Gemini output is one audited input;
+Python is authoritative for proposal validity and every monetary rule.
 
-Explicit states (must stay unambiguous):
+### 5.1 Standardized proposal charts and geometry
 
-`pending_entry → open → trailing_active → exit_pending → closed`
+- Freeze the selected candidate's EOD OHLCV and `source_hash` before rendering
+  or inference. Reuse is allowed only when source, geometry, renderer, prompt,
+  schema, model, and risk-policy version hashes all match.
+- Render two fixed 1280×720, log-price PNGs using pinned
+  `matplotlib`/`mplfinance` Agg versions: a raw 252-session context chart and an
+  annotated 126-session detail chart. Fix colors, fonts, DPI, candle/volume
+  layout, EMA21, SMA50/150/200, axes, margins, and encoding.
+- Python derives candidate contraction geometry using ATR14, dated extrema,
+  and a `0.5×ATR14` anchor-merge tolerance. Gemini may agree or contradict; it
+  may not rewrite the frozen OHLCV.
+- Missing/stale candles, unsnappable anchors, hash/render mismatch, invalid
+  schema, provider failure, or timeout produces an audited non-proposal state.
 
-Also: `cancelled` from pre-open paths as needed.
+### 5.2 Gemini contract
 
-Rules:
+Gemini must return strict JSON (`additionalProperties: false`) containing only:
 
-- Trailing behavior is defined per state; unknown `trailing_rule.type` → log,
-  do not trail.
-- Default exit order type for software stops/targets: **market** (reliability).
-  Limit exits are opt-in later.
-- On process restart, monitor reloads all positions where
-  `state NOT IN ('closed', 'cancelled')` and resumes without UI re-arming.
+- `verdict`: `valid | invalid | uncertain`
+- `contradicts_scanner`: boolean
+- bounded `confidence`
+- dated contraction/resistance geometry anchors
+- absolute `pivot_price` and exactly three absolute targets `t1`, `t2`, `t3`
+- `entry_template`:
+  `single | two_leg | three_leg_front | three_leg_balanced`
+- structured pattern evidence, including base tightness, dry-up quality, and
+  resistance room, plus concise evidence references
 
-### 6.2 Live LTP path (charts + monitor)
+The schema must not contain a stop, quantity, capital, monetary risk, position
+or sector exposure, daily-loss, add-size, target-size, or trailing field. Do not
+persist or display provider `reasoning_details`. Only `verdict=valid` with
+`contradicts_scanner=false` may proceed.
+
+### 5.3 Deterministic proposal construction
+
+- Initial structural stop = final-contraction low minus `0.25×ATR14`, snapped
+  to the instrument tick. Reject stop distance above 8%.
+- Planned entry = pivot. Maximum acceptable entry (chase ceiling) =
+  `pivot + min(2% of pivot, 0.5 × (pivot - initial_stop))`.
+- Validate T1/T2/T3 conservatively from the chase ceiling and stop: at least
+  1R/2R/3R respectively, strictly ordered, positive, and tick-valid. Python
+  never repairs an AI target; one invalid target means no proposal.
+- Gemini selects the template; Python maps it to maximum approved-risk shares:
+
+| Template | Risk by leg | Required relative volume |
+| --- | --- | --- |
+| `single` | 100% | 2.0× |
+| `three_leg_front` | 50% / 30% / 20% | 2.0× |
+| `two_leg` | 60% / 40% | 1.75× |
+| `three_leg_balanced` | 40% / 30% / 30% | 1.5× |
+
+These percentages divide the approved monetary risk budget, not raw shares or
+notional. The relative-volume ladder deliberately follows capital committed:
+template selection already prices pattern uncertainty, so raising the volume
+bar again for looser templates would double-count the same signal. The largest
+and earliest commitment therefore requires the strongest independent volume
+proof. No template may create more than three entry legs.
+
+### 5.4 Approval TTL and immutable decision
+
+- Proposal generation session = the EOD source session (`D0`).
+- A live-eligible proposal must have completed by 08:30 Asia/Kolkata on the
+  immediately following NSE trading session (`D1`).
+- Pending-approval deadline = **09:00 Asia/Kolkata on D1**. If no decision is
+  recorded by then, the proposal becomes `expired_unapproved` and can never be
+  reactivated. A new scan/analysis/proposal is required.
+- Approval before that deadline arms the initial leg for **D1 only**; this is
+  the separate entry-trigger window. If it does not trigger on D1, it becomes
+  `entry_expired`.
+- Approval locks the proposal hash, source and policy versions, pivot, targets,
+  stop/structure rules, template, risk budget, chase ceiling, add rules, exit
+  rules, and expiries. It locks a maximum monetary risk budget, not quantity.
+- Human action is approve or reject only. A changed proposal requires a new
+  immutable version and fresh approval. The active risk policy may tighten or
+  block an approved proposal at execution, but may never enlarge it without
+  reapproval.
+
+---
+
+## 6. Data flow — approved proposal to execution and monitoring
 
 ```
-Fyers market WS (single connection, tick ingestion worker)
-        → normalize Tick { symbol, ltp, ts, ... }
-        → Redis pub/sub + ltp:{symbol} cache
-        → position monitor (rules)
-        → API browser WS (only symbols each session cares about)
-        → chart last-price overlay / watchlist
+approved immutable proposal
+        ▼
+entry supervisor: completed 5m price + volume confirmation
+        ▼
+fresh Fyers state → Postgres allocation lock → deterministic quantity
+        ▼
+order_intent persisted first → execution engine → Fyers async order
+        ▼
+order gateway correlates ack / partial / fill / terminal state
+        ▼
+post-fill risk recheck → tighten stop and/or trim when required
+        ▼
+position monitor: SL + T1/T2/T3 + ATR runner → reconcile → journal
 ```
 
-Chart history: daily candles from Postgres via REST. Do **not** stream full
-history over WebSocket. Do **not** use TBT depth for the monitor feed.
+### 6.1 Intraday entry confirmation
 
-### 6.3 Trade traceability
+- The tick worker builds completed 5-minute bars from the single Fyers market
+  WebSocket and reconciles them against Fyers every 15 minutes. The entry
+  supervisor never creates another market-data connection.
+- Ignore the first 15 minutes of the session. There is no price-only fallback.
+- Relative volume = current cumulative volume divided by
+  `(robust ADV20 × expected cumulative-volume fraction)`.
+- Robust ADV20 excludes daily-volume outliers with a MAD-based filter.
+  Expected cumulative fraction is the median for that 5-minute bucket across
+  the prior 30 completed sessions. Fewer than 15 valid profile sessions,
+  stale/missing cumulative volume, or unresolved reconciliation drift blocks
+  the trigger.
+- A signal bar must close above its pivot/base-high trigger with the template's
+  required relative volume. The immediately following completed 5-minute bar
+  must remain above the trigger with relative volume still at or above the
+  threshold. Recheck trigger freshness and chase ceiling before submission.
+- A trigger that loses capacity is not held for a late entry. It needs a new
+  qualifying two-bar trigger while its leg remains eligible.
 
-Scanner-sourced trades:
+### 6.2 Add-leg eligibility
 
-`positions.screening_result_id → screening_results → scan_runs`
+Add eligibility begins only after the first fill and expires after 10 NSE
+trading sessions. `single` has no adds.
 
-Manual trades may leave `screening_result_id` null but still require a human
-instruction and full order/position event trail.
+- Leg reference = the preceding filled leg's trigger level.
+- `Hold(N)` = N consecutive daily closes at or above the reference. A close
+  below resets the count; an intraday breach that recovers by close does not.
+- Hold and Base are sequential gates.
+- `Base(M)` = M sessions where daily range is at most `1.5×ATR14`, the high is
+  no more than `0.25×ATR14` above the preceding-leg high, and volume is below
+  the 20-session average.
+- L2 for `three_leg_front`: Hold(1), then Base(2).
+- L2 for `two_leg` and `three_leg_balanced`: Hold(2), then Base(3).
+- Every L3: Hold(2), then Base(3).
+- Every add also requires `close > EMA21` and
+  `EMA21 today > EMA21 five sessions ago`.
+- After Base completes, its high becomes the add trigger and uses the same
+  two-bar price/volume confirmation. Python may ratchet the common position
+  stop to base low minus `0.25×ATR14`; it may never lower a stop.
+- A stop trigger or the first T1 trigger permanently expires every unfilled add
+  leg. Do not add after invalidation or after profit-taking has begun.
+
+### 6.3 Deterministic risk policy
+
+The initial **Balanced** policy is locked as:
+
+- 1% maximum risk per trade
+- 4% maximum total open risk
+- 15% maximum single-name notional
+- 30% maximum sector notional
+- 30% maximum correlation-cluster notional
+- 2% daily realized-loss stop
+- maximum 8 open positions
+- long-only CNC, maximum three entry legs
+
+Deployable capital is operator-configured but is bounded by a Fyers funds
+snapshot no older than 15 seconds at execution. Broker-reported available
+funds win when lower; do not optimistically recycle capital before Fyers
+reports it available.
+
+- Open risk uses remaining quantity and the current effective stop; risk is
+  zero, not negative, when a stop has ratcheted above entry.
+- Sector uses canonical Nifty metadata. Missing sectors share one conservative
+  `unknown` bucket.
+- Correlation uses 60-session daily returns. Instruments connected by Pearson
+  `rho >= 0.80` form one exposure cluster. Insufficient usable history blocks
+  automatic allocation instead of assuming zero correlation.
+- Daily loss is the sum of realized loss-making exits including charges against
+  that session's capital baseline. Profits may free broker-reported capital but
+  do not offset this counter. At 2%, block new initial legs and remaining adds
+  for the rest of the session; existing exits and reconciliation continue.
+
+### 6.4 Serialized capacity and priority
+
+Approval reserves neither cash nor shares. Immediately before **every** initial
+entry, add, or correction:
+
+1. Fetch fresh Fyers funds, positions, orders, and fills.
+2. Acquire the Postgres allocation advisory lock.
+3. Reject broker snapshots older than 15 seconds or superseded local allocation
+   generations.
+4. Recompute cash, per-trade and total open risk, position count, single-name,
+   sector, the complete `rho >= 0.80` correlation-cluster exposure, daily loss,
+   chase ceiling, and trigger validity.
+5. Persist the sizing decision and allocation generation/event, then invoke the
+   execution-engine service within the locked workflow so it persists the
+   idempotent order intent before any Fyers call.
+6. Recompute all constraints under the same lock from each actual fill.
+
+The execution-time correlation check is mandatory: two independently approved
+trades must not jointly breach a cluster cap when consuming recycled capital.
+
+When multiple valid signals compete:
+
+1. Remove invalid, contradictory, expired, stale, chase-blocked, or cap-blocked
+   candidates.
+2. Form descending scanner-score bands spanning two points from the current
+   highest remaining score.
+3. Within the band sort by Gemini confidence, conservative R:R, then trigger
+   timestamp.
+4. An exact remaining tie becomes `capacity_conflict`; never use symbol order
+   or another hidden fallback. Human may select one winner or skip all, without
+   editing either proposal. If unresolved before signal expiry, skip all.
+5. Fill the highest-ranked candidate first, then independently size down lower
+   candidates. Never pro-rate.
+
+A leg is viable only at 50% or more of its approved leg-risk allocation and
+when the resulting aggregate position contains at least four tradable shares/
+lots for staged exits.
+
+### 6.5 Whole-share/lot rounding
+
+- For entries and adds, floor the maximum allowed quantity to the instrument's
+  tradable whole-share/lot increment. Rounding may leave unused capacity; it
+  may never intentionally exceed any cap.
+- For a risk-reduction exit, compute the maximum allowed **remaining** quantity
+  and floor it to the tradable increment; equivalently, round the exit quantity
+  upward. This is always toward less remaining risk.
+- Price movement, partial execution, or broker lot granularity after submission
+  may still leave a residual overage no larger than one tradable lot's current
+  risk/notional quantum. Persist it as `rounding_residual` and treat the
+  correction as successful to prevent an order loop. Any larger residual
+  requires one new idempotent correction cycle or, if unresolved, pauses the
+  leg and emits a critical event. This tolerance is post-fill only and must
+  never be used to size a new order above a cap.
+
+### 6.6 MPP slippage and fill correction
+
+- Use market/MPP for entries. Refuse submission when the fresh reference price
+  is above the approved chase ceiling.
+- If actual entry VWAP exceeds the chase ceiling or makes the approved minimum
+  R:R invalid, send one idempotent full `invalid_fill_exit`. This is a thesis-
+  changing fill failure, not routine overshoot handling.
+- Otherwise calculate actual combined position risk and every notional cap.
+- First solve the common stop required to return risk to budget. For a long,
+  the approved structural tightening corridor runs from the current stop up to
+  one tick below the applicable contraction/base low. If the required stop is
+  higher than the current stop, within that corridor, and valid at the broker,
+  tighten the software stop without an order.
+- If tightening is structurally invalid or insufficient, send the minimum
+  whole-lot `risk_reduction_exit` required by §6.5. The correction solver must
+  satisfy the strictest of monetary-risk, cash, name, sector, and correlation
+  limits. Routine overshoot never causes a full exit when tighten/trim can
+  restore compliance.
+
+### 6.7 Exit policy
+
+- Software stop, target, invalid-fill, and risk-reduction exits default to
+  market/MPP for reliability. Limit exits remain opt-in and are not P10's
+  primary path.
+- T1 exits 25%; after its fill, move the stop to weighted-average entry.
+- T2 exits 25%; after its fill, activate a `2×ATR14` high-water trail using the
+  latest completed daily ATR.
+- T3 exits 25%.
+- The remaining 25% is the runner under the ATR trail.
+- Stops and trails only ratchet upward. A stop exits all remaining quantity.
+- Whole-share targets use deterministic largest-remainder apportionment.
+- If a price gap crosses multiple targets, create one idempotent cumulative
+  exit for the required shares, not duplicate target orders.
+- Unknown trailing-rule types log a critical event and do not silently invent
+  behavior. Exit enforcement never depends on the UI being open.
+
+### 6.8 Durable state and crash recovery
+
+Proposal decisions, triggers, legs, allocation events, order intents, broker
+events, and fills live in Postgres. Redis events are never authoritative.
+
+- Proposal decision states: `pending_approval`, `approved`, `rejected`, and
+  `expired_unapproved`.
+- Normal entry-leg progression: `planned → armed → trigger_observed →
+  intent_created → submitted → partially_filled → filled`, plus explicit
+  expired/cancelled/unknown terminal or recovery states.
+- Position: `pending_entry → open → trailing_active → exit_pending → closed`,
+  with `cancelled` only from pre-open paths.
+- Use stable idempotency keys per proposal/leg/exit purpose. Persist an intent
+  before every Fyers call. Never blind-retry a live place.
+- On startup, reload every nonterminal proposal, leg, intent, event, fill, and
+  position. Rebuild actual quantity, weighted price, stop, target allocations,
+  remaining risk, and add eligibility.
+- A persisted trigger without an intent may create its original intent under
+  the allocation lock. An existing created/submitted/acknowledged/partial/
+  unknown intent is never recreated.
+- A lost broker response becomes `submission_unknown`; freeze the leg until
+  the order gateway or reconciliation resolves it. Partial fills are managed
+  from actual quantity and are never blindly topped up.
+- Restart after a target, stop, or risk-correction trigger reconstructs the
+  outstanding action from its persisted intent/fills instead of firing again.
+
+### 6.9 Live data and traceability
+
+```
+Fyers market WS (tick worker only)
+  → normalized tick + Redis LTP cache/pub-sub
+  → completed/persisted 5m bars + Redis bar event
+  → entry supervisor (approved proposals only)
+  → position monitor (open positions only)
+  → API browser WS (display only)
+```
+
+Daily/5-minute history comes from Postgres via REST; do not stream history over
+WebSocket or use TBT depth for the monitor.
+
+Scanner-sourced traceability is:
+
+`positions → approved proposal → vision analysis → screening_results → scan_runs`
+
+The existing free-form manual instruction path remains paper/log-only during
+P10. Existing historical instructions and positions are not retroactively
+converted to proposals.
+
+### 6.10 Personal API/UI contract
+
+The thin API exposes proposal-run status, proposal list/detail, one immutable
+approve/reject decision endpoint with expected version/hash, capacity-conflict
+list/decision, versioned risk-policy read/update, and entry-supervisor health.
+The proposal UI shows both source charts, scanner rank, Gemini evidence,
+deterministic validation, pivot/T1–T3, stop/risk rules, template, TTL, and live
+leg/correction/recovery state. It must not offer quantity, stop, target, or
+template edits for a scanner-sourced live proposal.
 
 ---
 
@@ -345,46 +631,64 @@ Redis control pub for instant worker pickup).
 - Explicit human **panic flatten** (if implemented) is a separate, deliberate
   action — not implied by toggling kill.
 
-**When disengaged:** normal automated entry-on-confirm and monitor exits
-resume.
+**When disengaged:** normal approved-proposal entry supervision and monitor
+exits resume.
 
 UI copy must state clearly: kill switch = no automated orders, not a
 substitute for being flat.
+
+P10 also requires separate **proposal-processing pause** and **new-entry
+pause** controls. These may stop inference or new initial/add legs while the
+position monitor continues protecting existing positions. They do not replace
+or weaken the global kill switch.
 
 ---
 
 ## 8. Auth / token lifecycle
 
 - Fyers tokens are stored encrypted in Postgres (never in frontend or logs).
-- **Token refresh is a scheduled job** (arq cron). Do not rely only on
-  on-demand/lazy refresh.
-- All Fyers clients (historical REST, tick WS, order gateway) must obtain
-  tokens through one shared “valid access token” path.
+- All Fyers clients (historical REST, funds/broker reads, tick WS, execution,
+  order gateway) must obtain tokens through one shared “valid access token”
+  path.
+- The scheduler validates broker-auth readiness and alerts before the live
+  window. It must not pretend unattended refresh can create a new session when
+  Fyers requires daily operator 2FA. Order-API deployment must use the
+  registered static public IP required by the current Fyers retail-algo rules.
+- Missing current-session auth or a static-IP/readiness failure blocks new
+  entry/add orders and emits a critical event/banner. Existing positions remain
+  visible; any inability to enforce exits must be shown as a money-path
+  emergency, never hidden behind retries.
 - On auth failure: pause money-path components, emit `system_events`, surface
   UI banner. Do not silently retry orders with a bad token.
 - The Upstox Analytics Token is a separate read-only environment secret used
   only by P7. It is never sent to the frontend or stored in fundamentals
   snapshots. Upstox auth failure marks annotations failed but does not pause
   or alter the Fyers money path.
+- Official NSE corporate filing endpoints and archive XBRLs are public,
+  read-only P7 enrichment. Fetch or parse failures remain visible `unknown`
+  warnings and never pause or alter the Fyers money path.
 - The OpenRouter key is an environment secret. Store model request IDs,
   prompt/input hashes, usage, and concise evidence-backed output; never store
   or display `reasoning_details`.
 
 ---
 
-## 9. AI / LLM surfaces (three separate concerns)
+## 9. AI / LLM surfaces (four separate concerns)
 
 Do not build one “AI god service.” Split:
 
 | Surface            | Role                                              | Touches money? |
 | ------------------ | ------------------------------------------------- | -------------- |
 | Fundamental pass   | Python-authoritative fit plus blind AI pass/fail/uncertain second opinion | No          |
+| VCP proposal reader | Serial chart-pattern verdict, anchors, pivot, T1–T3, confidence, and template enum; Python validates and owns money rules | No |
 | Journal coach      | Post-trade patterns/mistakes from closed trades   | No             |
 | Nifty sentiment    | Optional regime tag / overlay                     | No             |
 
-Hard rule: **LLM/AI never confirms `trade_instructions` and never calls the
-execution engine.** Frontend AI SDK streaming is fine if the backend only
-assembles read-only context.
+Hard rule: **LLM/AI never confirms a proposal, reads broker funds/account
+state, computes money/risk/quantity/trailing rules, or calls the execution
+engine.** A Gemini `entry_template` is a pattern classification; deterministic
+Python owns the template's fixed risk allocation and all execution decisions.
+Frontend AI SDK streaming is fine only for read-only context.
 
 ---
 
@@ -395,10 +699,10 @@ assembles read-only context.
 2. **Single Fyers order WebSocket**, owned only by the order gateway.
    Nothing else connects to Fyers order WS.
 3. **Frontend never talks to Fyers directly** — always through our backend.
-4. **The manual decision checkpoint is not to be automated away.** No
-   component should auto-select a stock and auto-enter a trade without an
-   explicit human instruction (`trade_instruction` confirmed), regardless of
-   how confident a filter/LLM is.
+4. **The manual approval checkpoint is not to be automated away.** No
+   scanner-sourced live entry may be armed without one explicit, unexpired
+   human approval of the exact immutable proposal version, regardless of any
+   scanner score or LLM confidence.
 5. **Order placement is idempotent and only ever issued by the execution
    engine.** No other component calls Fyers order REST endpoints.
 6. **SL/target/trailing enforcement must not depend on the frontend being
@@ -406,8 +710,10 @@ assembles read-only context.
 7. **Global kill switch** per §7 — build before or with first live order path.
 8. **Reconciliation, not blind trust** — periodic verify against Fyers;
    external manual trades are imported/flagged, not fought.
-9. **Screening (and LLM funda) run as background jobs (Redis/`arq`), never
-   inline in an API request.**
+9. **Screening, LLM fundamentals, and VCP proposal inference run as background
+   jobs (Redis/`arq`), never inline in an API request.** Proposal inference has
+   its own concurrency-1 worker and the §4 deadline; it cannot block core cron,
+   token-readiness, or reconciliation jobs.
 10. **Software residual risk is accepted and mitigated**: process supervision,
     monitor heartbeats/`system_events`, reconciliation, kill switch, small
     size until proven. Do not pretend software SL equals exchange-held SL.
@@ -415,10 +721,30 @@ assembles read-only context.
     changes in `server/db/` explicitly; keep write ownership aligned with §4.
 12. **Do not add dependencies or new long-running services** not listed in §2–§4
     without asking.
-13. **Upstox is fundamentals-only and read-only.** P7 may call documented
-    fundamentals GET endpoints for persisted technical survivors. All market
-    data, sockets, account state, and orders remain exclusively on the locked
-    Fyers paths.
+13. **Fundamental sources are read-only.** P7 may call documented
+   fundamentals GET endpoints for persisted technical survivors. All market
+   data, sockets, account state, and orders remain exclusively on the locked
+   Fyers paths. Upstox is primary; official NSE shareholding and integrated
+   filing XBRLs are limited to promoter-pledge and leverage risk enrichment.
+   Known warning/red/severe results may reduce only the deterministic
+   fundamental score and grade; they never change technical rank, reject a
+   candidate automatically, confirm a trade, or invoke execution. Unknown or
+   ambiguous filing data is not scored as healthy and receives no penalty.
+14. **Deterministic Python owns money.** Stop placement/distance, targets'
+    acceptance, risk budgets, quantities, whole-lot rounding, cash/funds,
+    daily loss, position/name/sector/correlation caps, priority, add gates,
+    target sizing, trailing, and fill correction must be pure/versioned Python
+    rules. Prompt output is never authoritative for these fields.
+15. **Execution-time revalidation is mandatory.** Proposal-time compliance
+    does not reserve capacity. Every entry/add/correction rechecks fresh broker
+    state and all caps—including the `rho >= 0.80` cluster—under one Postgres
+    allocation lock, then rechecks actual fills.
+16. **Postgres is the recovery source.** An in-flight leg/order is rebuilt from
+    intents/events/fills; a Redis loss or worker restart must never cause a
+    duplicate place or require the UI to re-arm protection.
+17. **The live free-form trade form is retired for scanner trades.** Keep it
+    paper/log-only unless the user explicitly reopens a separate manual-live
+    architecture.
 
 ---
 
@@ -432,7 +758,7 @@ Do not reorder phases without asking. Status tags: `[done]`, `[next]`,
 | 1 | Fyers historical data fetch (auth, candle retrieval) | `[done]` |
 | 2 | Screening/scanner technical filter on top of (1) | `[done]` |
 | 3 | Shortlist storage + manual review surface (frontend) | `[partial]` — results table + chart workspace (sample data); real candle endpoint added |
-| **P0** | Token refresh job + shared valid-token path + auth failure signaling | `[done]` |
+| **P0** | Shared valid-token path + scheduled refresh/readiness + auth failure signaling | `[done]` — P10 must adapt readiness to current static-IP/daily-2FA requirements |
 | **P1** | Chart workspace on shortlist (daily candles from DB; no live required) | `[done]` — candle API endpoint live; chart component + workspace layout complete |
 | **P2** | Tick ingestion worker + Redis LTP + backend→frontend WS overlay | `[done]` — tick_worker.py, ws.py router, useMarketWS hook, live LTP price line on chart |
 | **P3** | Trade instruction API + confirm UI + execution engine in paper/log mode | `[done]` — draft/review/confirm API + UI, idempotent paper intents, pending positions, and kill switch control |
@@ -441,35 +767,85 @@ Do not reorder phases without asking. Status tags: `[done]`, `[next]`,
 | **P6** | Reconciliation cron | `[done]` |
 | **P7** | LLM fundamental pass on technical survivors | `[done]` — cached Upstox snapshots, deterministic normalization, strict OpenRouter verdicts, and manual-review UI |
 | **P8** | Journal + AI coach (read-only) | `[done]` — future-fill outbox, frozen entry snapshots, regime tag at first fill, CNC charge estimates, chart PNG capture, period summaries, tradebook from journal, async AI coach with input-hash reuse |
+| **VCP vision** | On-demand VCP validator (advisory screening/manual-review extension) | `[done]` — frozen EOD candle snapshot + reuse key, standardized 1280×720 capture, blind strict structured OpenRouter verdict with date-anchor validation, attempt audit trail, sheet UI with read-only overlay + source images, human review, and workstation overlay toggle |
 | **P9** | Nifty sentiment overlay (optional) | `[ ]` |
+| **P10** | Automated proposal generation → immutable approval → deterministic multi-leg entry/risk/exit automation | `[done]` — implementation and review hardening are complete; operational rollout remains gated and starts at Shadow |
 
 Notes:
 
-- P1 may ship before P2 so humans can review VCP on daily charts without live
-  data. Monitor/execution must still never depend on the browser being
-  connected (P5 is a worker).
-- **Do not start P4/P5 until P0 and order-intent idempotency are solid.**
-- Paper/log mode (P3) means full DB intent trail without live Fyers orders (or
-  behind an explicit safe flag). Live money starts at P4 with tiny size.
-- Kill switch implementation belongs with P3/P5 at latest — not as a late
-  afterthought after live exits exist.
+- P10 implementation is complete; its next operational step is the Shadow
+  gate in §12.2. P9 remains optional/deferred. No rollout stage may be skipped
+  or self-promote.
+- P10 must reuse the single market WS, single order WS, execution-engine-only
+  order mutation, reconciliation, journal, and kill-switch foundations. Do not
+  replace them with a parallel broker path.
+- P10 was implemented in this order: schema/migrations and pure domain rules →
+  headless chart/geometry pipeline → strict Gemini contract and proposal worker
+  → approval API/UI → 5-minute ingestion/profile → entry supervisor and
+  allocation lock → multi-leg/fill correction/exit evolution → recovery and
+  operational supervision. Staged rollout remains an operator-controlled
+  operational activity under §12.2.
+- The manual trade form stays paper/log-only. No scanner-sourced P10 order may
+  reach live Fyers until all rollout gates in §12 pass.
 
 Historical AGENTS list items 4–8 map onto P7, P3–P4, P5, P6, P2 respectively;
 the phase table above is authoritative going forward.
 
 ---
 
-## 12. Testing expectations (money path)
+## 12. Testing and P10 rollout expectations
 
-Before enabling live exits:
+### 12.1 Required automated coverage
 
-- Pure unit tests: trailing math, state transitions, tick-size/qty validation
-- Execution engine: mock Fyers — idempotency, kill switch, rate limit, no
-  double-place on retry
-- Monitor: replay recorded LTP sequences → expected exit intents
-- Order gateway: fixture order-WS payloads → intent/fill state machine
-- Ops drill: kill monitor mid-position → restart resumes; kill switch blocks
-  new orders
+- Golden charts/source hashes: identical frozen inputs and versions generate
+  identical packets; changed renderer/geometry versions cannot silently reuse.
+- Gemini schema: reject extra/missing fields, money fields, invalid anchors,
+  unsnappable dates, bad templates, unordered targets, and insufficient R:R.
+- Pure rules: geometry, ATR/tick snapping, chase ceiling, all template/relative-
+  volume mappings, Hold/Base/EMA21, add expiry, 25/25/25/25 apportionment, stop
+  ratchets, and daily-loss accounting.
+- Five-minute replay: first-15-minute exclusion, robust profile, two-bar
+  confirmation, stale volume, reconciliation drift, lost capacity, and fresh
+  re-trigger behavior.
+- Risk/allocation: fresh funds, every cap, priority bands, exact ties, minimum
+  viability, conservative rounding, post-fill one-lot residual tolerance, and
+  stricter active-policy versions.
+- Concurrency: two independently approved highly correlated trades consume the
+  same recycled capital; the allocation lock must resize/block the second and
+  prove no cluster double-spend.
+- MPP: valid stop tightening, tighten-plus-trim, trim fallback, name/sector/
+  correlation correction, and the distinct full exit for a chase/R:R-invalid
+  fill.
+- Execution/gateway: stable idempotency, ≤10 OPS, no double-place, partial and
+  out-of-order fills, unknown submission, cumulative multi-target gaps, and
+  external broker trades handled by reconciliation rather than fought.
+- Recovery: crash before intent, after intent, during unknown submission,
+  during partial entry/add, between exit trigger and fill, and during risk
+  correction. Restart must reconstruct state without a duplicate order.
+- Boundaries: Gemini cannot see broker state or call execution; API approval
+  never places inline; UI closure does not affect entry/exit supervision; all
+  kill/pause controls retain their documented semantics.
+
+### 12.2 Rollout gates
+
+1. **Shadow:** generate/audit proposals with no approvals or orders. Validate
+   batch deadline, schema reliability, target rejection, and human VCP
+   agreement.
+2. **Paper:** run the complete approval, trigger, allocation, multi-leg, exit,
+   reconciliation, and restart path for at least 50 triggered proposals with
+   zero duplicate orders, unexplained state transitions, or cap breaches beyond
+   the explicit one-lot post-fill tolerance.
+3. **Reduced live:** explicit operator enablement; size P10 against `0.25×`
+   deployable capital while retaining the same percentage policy. Use small CNC
+   positions and complete live auth, restart, reconciliation, pause, and kill-
+   switch drills.
+4. **Full live:** an explicit risk-policy version change to `1.0×` only after
+   reviewing reduced-live fills, slippage, correction, and recovery evidence.
+   No stage promotes itself.
+
+Scanner score stays primary. Gemini confidence is only a tiebreaker inside a
+two-point scanner band until at least 100–150 closed proposal-backed trades
+support a separately reviewed calibration change.
 
 Never “test” live exits with size you cannot afford to lose.
 

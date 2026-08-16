@@ -20,7 +20,7 @@ from app.services.indicators import (
 )
 from app.services.screening_config import TechnicalScreeningConfig
 from app.services.screening_ranker import (
-    fundamental_selection_status,
+    apply_fundamental_industry_cap,
     rank_and_cap_shortlist,
 )
 from app.services.scan_readiness import (
@@ -28,6 +28,7 @@ from app.services.scan_readiness import (
     scan_readiness_error,
 )
 from app.services.technical_scoring import evaluate_technical_setup
+from app.services.proposal_queue import enqueue_proposal_batch
 
 logger = logging.getLogger(__name__)
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
@@ -144,7 +145,8 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
         # 2. Fetch active universe members
         async with async_session() as session:
             instruments_query = text("""
-                SELECT i.id, i.symbol, i.fyers_symbol, i.name
+                SELECT i.id, i.symbol, i.fyers_symbol, i.name,
+                       i.metadata ->> 'industry' AS industry
                 FROM instruments i
                 JOIN universe_memberships m ON i.id = m.instrument_id
                 WHERE m.universe_code = 'NIFTY500' AND m.member_to IS NULL AND i.active = true
@@ -344,6 +346,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     "scan_run_id": scan_run_id,
                     "instrument_id": inst_id,
                     "symbol": inst.symbol,
+                    "industry": inst.industry,
                     "close_price": raw_inputs["close"],
                     "sma_50": raw_inputs["sma_50"],
                     "sma_200": raw_inputs["sma_200"],
@@ -428,19 +431,42 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
 
         # Step 4d: Score first, deterministic tie-breaks, and a broad top-50 cap.
         survivors = rank_and_cap_shortlist(survivors, config.shortlist_limit)
+        survivors = apply_fundamental_industry_cap(
+            survivors,
+            limit=config.fundamental_limit,
+            industry_cap=config.fundamental_industry_cap,
+            enabled=settings.p7_fundamental_pass_enabled,
+        )
+        missing_industries = [
+            {
+                "scan_run_id": scan_run_id,
+                "instrument_id": survivor["instrument_id"],
+                "symbol": survivor["symbol"],
+                "industry_key": survivor["industry_key"],
+            }
+            for survivor in survivors
+            if survivor["industry_key"].startswith("unknown:")
+        ]
         for survivor in survivors:
-            fundamental_selected, llm_status = fundamental_selection_status(
-                survivor["result_rank"],
-                limit=config.fundamental_limit,
-                enabled=settings.p7_fundamental_pass_enabled,
-            )
-            survivor["llm_status"] = llm_status
             survivor["technical_metrics"]["fundamental_selected"] = (
-                fundamental_selected
+                survivor["fundamental_selected"]
+            )
+            survivor["technical_metrics"]["industry"] = survivor["industry"]
+            survivor["technical_metrics"]["industry_key"] = survivor["industry_key"]
+            survivor["technical_metrics"]["fundamental_selection_rank"] = (
+                survivor["fundamental_selection_rank"]
+            )
+            survivor["technical_metrics"]["fundamental_cap_exclusion_reason"] = (
+                survivor["fundamental_cap_exclusion_reason"]
             )
             survivor["technical_metrics"] = json.dumps(survivor["technical_metrics"])
             survivor.pop("rs_rating")
             survivor.pop("symbol")
+            survivor.pop("industry")
+            survivor.pop("industry_key")
+            survivor.pop("fundamental_selected")
+            survivor.pop("fundamental_selection_rank")
+            survivor.pop("fundamental_cap_exclusion_reason")
 
         logger.info(
             "Technical score eligibility rejections=%s. Ranked setups retained=%s "
@@ -493,6 +519,26 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     )
                 """)
                 await session.execute(insert_query, survivors)
+            if missing_industries:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO system_events (
+                            component, severity, event_type, correlation_id,
+                            instrument_id, payload
+                        )
+                        VALUES (
+                            'screener', 'warning', 'missing_industry_metadata',
+                            :scan_run_id, :instrument_id,
+                            jsonb_build_object(
+                                'symbol', :symbol,
+                                'industry_key', :industry_key
+                            )
+                        )
+                        """
+                    ),
+                    missing_industries,
+                )
             success_query = text("""
                 UPDATE scan_runs
                 SET
@@ -506,7 +552,10 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                 {
                     "scan_run_id": scan_run_id,
                     "llm_config": json.dumps(
-                        p7_run_config(technical_rank_limit=config.fundamental_limit)
+                        p7_run_config(
+                            technical_rank_limit=config.fundamental_limit,
+                            industry_cap=config.fundamental_industry_cap,
+                        )
                     ),
                 },
             )
@@ -520,6 +569,9 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
         # P7 is intentionally a separate background job. Enqueue failures are
         # recorded on the annotations and never turn a valid technical scan
         # into a failed scan.
+        proposal_should_enqueue_now = not (
+            settings.p7_fundamental_pass_enabled and config.fundamental_limit > 0
+        )
         if (
             survivors
             and settings.p7_fundamental_pass_enabled
@@ -535,6 +587,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     _job_id=f"fundamental-pass:{scan_run_id}",
                 )
             except Exception as enqueue_error:
+                proposal_should_enqueue_now = True
                 logger.exception(
                     "Could not enqueue P7 for scan %s",
                     scan_run_id,
@@ -607,6 +660,16 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                         },
                     )
                     await session.commit()
+
+        if survivors and proposal_should_enqueue_now and settings.proposal_automation_enabled:
+            redis = ctx.get("redis")
+            if redis is None:
+                logger.error("P10 proposal batch was not queued: arq Redis context unavailable")
+            else:
+                try:
+                    await enqueue_proposal_batch(redis, str(scan_run_id))
+                except Exception:
+                    logger.exception("Could not enqueue P10 proposal batch for scan %s", scan_run_id)
 
         logger.info("Scan run %s completed successfully.", scan_run_id)
 

@@ -10,12 +10,14 @@ from app.config import settings
 from app.redis_pool import create_arq_pool
 from app.database import db_dep
 from app.routers.auth import router as auth_router
+from app.routers.automation import router as automation_router
 from app.routers.historical import router as historical_router
 from app.routers.journal import router as journal_router
 from app.routers.saas_scans import router as saas_scans_router
 from app.routers.screening import router as screening_router
 from app.routers.system_controls import router as system_controls_router
 from app.routers.trading import router as trading_router
+from app.routers.vcp_vision import router as vcp_vision_router
 from app.routers.ws import router as ws_router, manager as ws_manager
 
 # Module-level reference — set during lifespan, usable by background workers.
@@ -63,11 +65,13 @@ app.add_middleware(
 )
 
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(automation_router)
 app.include_router(historical_router, prefix="/api/v1")
 app.include_router(screening_router, prefix="/api/v1")
 app.include_router(trading_router, prefix="/api/v1")
 app.include_router(journal_router, prefix="/api/v1")
 app.include_router(system_controls_router, prefix="/api/v1")
+app.include_router(vcp_vision_router, prefix="/api/v1")
 app.include_router(saas_scans_router)
 app.include_router(ws_router)
 

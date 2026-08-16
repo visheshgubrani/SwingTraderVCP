@@ -245,12 +245,13 @@ class TechnicalScoringV3Tests(unittest.TestCase):
             config=self.config,
         )
 
-    def test_default_uses_v3(self) -> None:
+    def test_v3_preset_remains_reproducible(self) -> None:
         default = TechnicalScreeningConfig()
 
         self.assertEqual(default.pipeline_version, "vcp_score_v3")
-        self.assertEqual(default.stage2_weight, 20.0)
-        self.assertEqual(default.contraction_weight, 20.0)
+        self.assertEqual(self.config.pipeline_version, "vcp_score_v3")
+        self.assertEqual(self.config.stage2_weight, 20.0)
+        self.assertEqual(self.config.contraction_weight, 20.0)
 
     def test_saas_v2_template_remains_reproducible(self) -> None:
         self.assertEqual(
@@ -263,6 +264,8 @@ class TechnicalScoringV3Tests(unittest.TestCase):
         self.assertEqual(merged.pipeline_version, "vcp_score_v2")
         self.assertEqual(merged.stage2_weight, 25.0)
         self.assertEqual(merged.contraction_weight, 0.0)
+        with self.assertRaises(ValueError):
+            merge_template_config({"pipeline_version": "vcp_score_v4"})
 
     def test_perfect_setup_scores_100(self) -> None:
         result = self.evaluate(scoring_frame())

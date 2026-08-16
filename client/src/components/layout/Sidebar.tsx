@@ -10,6 +10,7 @@ import {
   ListOrderedIcon,
   ScanSearchIcon,
   SlidersHorizontalIcon,
+  SparklesIcon,
   TablePropertiesIcon,
 } from "lucide-react"
 import { NavLink } from "react-router"
@@ -38,6 +39,7 @@ const navGroups: ReadonlyArray<NavGroup> = [
     items: [
       { to: "/", label: "Workstation", icon: CandlestickChartIcon, end: true },
       { to: "/scanner", label: "Stock Screener", icon: TablePropertiesIcon, badge: "EOD" },
+      { to: "/proposals", label: "Trade Proposals", icon: SparklesIcon, badge: "AI" },
     ],
   },
   {

@@ -50,8 +50,17 @@ def parse_openrouter_structured_content(
     usage_hint = _usage_summary(usage)
     content = message.get("content")
 
+    def parse_text(text: str) -> Any:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "OpenRouter structured JSON is malformed: "
+                f"{exc} (finish_reason={finish_reason!r}, {usage_hint})"
+            ) from exc
+
     if isinstance(content, str):
-        parsed: Any = json.loads(content)
+        parsed: Any = parse_text(content)
     elif isinstance(content, Mapping):
         parsed = dict(content)
     elif isinstance(content, list):
@@ -61,7 +70,7 @@ def parse_openrouter_structured_content(
                 "OpenRouter message content is empty multipart "
                 f"(finish_reason={finish_reason!r}, {usage_hint})"
             )
-        parsed = json.loads(text)
+        parsed = parse_text(text)
     else:
         raise ValueError(
             "OpenRouter message content is missing or not structured JSON "

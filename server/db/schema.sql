@@ -293,9 +293,20 @@ CREATE TABLE fundamental_snapshots (
     raw_payload jsonb NOT NULL,
     normalized_facts jsonb NOT NULL,
     content_hash text NOT NULL,
+    source_url text,
+    filing_date timestamptz,
+    revision_date timestamptz,
+    reporting_period date,
+    taxonomy_version text,
+    parser_version text,
+    fetch_status text NOT NULL DEFAULT 'succeeded',
+    provider_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT fundamental_snapshots_statement_type_check CHECK (
-        statement_type IN ('consolidated', 'standalone')
+        statement_type IN ('consolidated', 'standalone', 'not_applicable')
+    ),
+    CONSTRAINT fundamental_snapshots_fetch_status_check CHECK (
+        fetch_status IN ('succeeded', 'ambiguous', 'failed')
     )
 );
 
@@ -304,6 +315,9 @@ ON fundamental_snapshots (instrument_id, provider, statement_type, fetched_at DE
 
 CREATE INDEX fundamental_snapshots_content_hash_idx
 ON fundamental_snapshots (content_hash);
+
+CREATE INDEX fundamental_snapshots_provider_period_idx
+ON fundamental_snapshots (instrument_id, provider, reporting_period DESC, filing_date DESC);
 
 CREATE TABLE screening_results (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -367,6 +381,20 @@ CREATE INDEX screening_results_fundamental_snapshot_idx
 ON screening_results (fundamental_snapshot_id)
 WHERE fundamental_snapshot_id IS NOT NULL;
 
+CREATE TABLE screening_result_fundamental_snapshots (
+    screening_result_id uuid NOT NULL REFERENCES screening_results(id) ON DELETE CASCADE,
+    snapshot_id uuid NOT NULL REFERENCES fundamental_snapshots(id),
+    role text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (screening_result_id, snapshot_id, role),
+    CONSTRAINT screening_result_fundamental_snapshots_role_check CHECK (
+        role IN ('primary', 'promoter_pledge', 'leverage')
+    )
+);
+
+CREATE INDEX screening_result_fundamental_snapshots_result_idx
+ON screening_result_fundamental_snapshots (screening_result_id, role);
+
 -- P7 durable, ordered processing state. See migration 006_p7_reliable_fundamentals.sql.
 CREATE TABLE fundamental_analysis_runs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scan_run_id uuid NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
@@ -393,7 +421,9 @@ CREATE TABLE fundamental_ai_attempts (
     attempt_number integer NOT NULL,
     status text NOT NULL DEFAULT 'started',
     model text NOT NULL,
-    reasoning_effort text NOT NULL,
+    reasoning_effort text NOT NULL CHECK (
+        reasoning_effort IN ('low', 'medium', 'high', 'xhigh')
+    ),
     prompt_version text NOT NULL,
     response_schema text NOT NULL,
     input_hash text NOT NULL,
@@ -629,7 +659,10 @@ CREATE TABLE order_intents (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT order_intents_intent_type_check CHECK (
-        intent_type IN ('entry', 'stop_loss_exit', 'target_exit', 'trailing_exit', 'manual_exit')
+        intent_type IN (
+            'entry', 'stop_loss_exit', 'target_exit', 'trailing_exit',
+            'manual_exit', 'risk_reduction_exit', 'invalid_fill_exit'
+        )
     ),
     CONSTRAINT order_intents_side_check CHECK (side IN ('buy', 'sell')),
     CONSTRAINT order_intents_order_type_check CHECK (
@@ -1030,6 +1063,110 @@ CREATE INDEX journal_fill_outbox_pending_idx
 ON journal_fill_outbox (status, created_at)
 WHERE status IN ('pending', 'processing');
 
+-- On-demand VCP vision validator (advisory, personal app only).
+-- See migrations 013_vcp_vision.sql and 014_vcp_vision_hardening.sql.
+CREATE TABLE vcp_visual_analyses (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    screening_result_id uuid NOT NULL REFERENCES screening_results(id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'awaiting_capture' CHECK (
+        status IN ('awaiting_capture', 'queued', 'running', 'succeeded', 'failed')
+    ),
+    chart_source jsonb NOT NULL DEFAULT '{}'::jsonb,
+    frozen_ohlcv jsonb NOT NULL,
+    context_image bytea,
+    context_image_hash text,
+    detail_image bytea,
+    detail_image_hash text,
+    source_hash text NOT NULL,
+    renderer_version text NOT NULL,
+    model text NOT NULL,
+    reasoning_effort text NOT NULL CHECK (
+        reasoning_effort IN ('low', 'medium', 'high', 'xhigh')
+    ),
+    max_tokens integer NOT NULL CHECK (max_tokens > 0),
+    prompt_version text NOT NULL,
+    schema_version text NOT NULL,
+    input_hash text,
+    result jsonb,
+    ai_verdict text CHECK (
+        ai_verdict IS NULL OR ai_verdict IN ('valid', 'invalid', 'uncertain')
+    ),
+    error_code text,
+    error_message text,
+    usage jsonb NOT NULL DEFAULT '{}'::jsonb,
+    cost numeric(18, 8) NOT NULL DEFAULT 0 CHECK (cost >= 0),
+    human_verdict text CHECK (
+        human_verdict IS NULL OR human_verdict IN ('valid', 'invalid', 'uncertain')
+    ),
+    human_note text,
+    human_reviewed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT vcp_visual_analyses_chart_source_check CHECK (
+        jsonb_typeof(chart_source) = 'object'
+    ),
+    CONSTRAINT vcp_visual_analyses_frozen_ohlcv_check CHECK (
+        jsonb_typeof(frozen_ohlcv) = 'array'
+    )
+);
+
+CREATE TRIGGER vcp_visual_analyses_set_updated_at
+BEFORE UPDATE ON vcp_visual_analyses
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE UNIQUE INDEX vcp_visual_analyses_reuse_uidx
+ON vcp_visual_analyses (
+    screening_result_id,
+    source_hash,
+    renderer_version,
+    model,
+    reasoning_effort,
+    max_tokens,
+    prompt_version,
+    schema_version
+)
+WHERE status IN ('awaiting_capture', 'queued', 'running', 'succeeded');
+
+CREATE INDEX vcp_visual_analyses_result_created_idx
+ON vcp_visual_analyses (screening_result_id, created_at DESC);
+
+CREATE TABLE vcp_visual_attempts (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    analysis_id uuid NOT NULL REFERENCES vcp_visual_analyses(id) ON DELETE CASCADE,
+    attempt_number integer NOT NULL CHECK (attempt_number > 0),
+    status text NOT NULL DEFAULT 'started' CHECK (
+        status IN ('started', 'succeeded', 'invalid_response', 'provider_error', 'transport_unknown')
+    ),
+    model text NOT NULL,
+    reasoning_effort text NOT NULL,
+    prompt_version text NOT NULL,
+    response_schema text NOT NULL,
+    input_hash text NOT NULL,
+    request_payload jsonb NOT NULL,
+    response_payload jsonb,
+    http_status integer CHECK (
+        http_status IS NULL OR (http_status >= 100 AND http_status <= 599)
+    ),
+    request_id text,
+    usage jsonb NOT NULL DEFAULT '{}'::jsonb,
+    cost numeric(18, 8) NOT NULL DEFAULT 0 CHECK (cost >= 0),
+    error_code text,
+    error_message text,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    UNIQUE (analysis_id, attempt_number)
+);
+
+CREATE INDEX vcp_visual_attempts_analysis_started_idx
+ON vcp_visual_attempts (analysis_id, started_at);
+
+COMMENT ON TABLE vcp_visual_analyses IS
+'Advisory chart-image VCP validation per screening result. The AI verdict never changes technical rank, vcp_detected, reviewer_status, watchlists, trade drafts, or execution state.';
+
+COMMENT ON TABLE vcp_visual_attempts IS
+'Every VCP vision provider attempt with sanitized request/response, usage, cost, and error classification for audit.';
+
 CREATE TABLE journal_ai_runs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     status text NOT NULL DEFAULT 'queued',
@@ -1055,3 +1192,415 @@ COMMENT ON TABLE journal_entries IS
 
 COMMENT ON TABLE journal_fill_outbox IS
 'Durable fill events for async journal processing. Future fills only — no backfill.';
+
+-- P10: System-Generated, Human-Approved Trade Automation
+CREATE TABLE automation_runs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    scan_run_id uuid NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'running' CHECK (
+        status IN ('running', 'completed', 'timed_out', 'failed')
+    ),
+    candidates_total integer NOT NULL DEFAULT 0,
+    candidates_processed integer NOT NULL DEFAULT 0,
+    proposals_generated integer NOT NULL DEFAULT 0,
+    proposals_rejected integer NOT NULL DEFAULT 0,
+    proposals_uncertain integer NOT NULL DEFAULT 0,
+    proposals_failed integer NOT NULL DEFAULT 0,
+    batch_deadline timestamptz NOT NULL,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    error_code text,
+    error_message text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER automation_runs_set_updated_at
+BEFORE UPDATE ON automation_runs
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE INDEX automation_runs_scan_run_idx ON automation_runs(scan_run_id);
+CREATE INDEX automation_runs_status_created_idx ON automation_runs(status, created_at DESC);
+
+CREATE TABLE trade_proposals (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    automation_run_id uuid REFERENCES automation_runs(id) ON DELETE SET NULL,
+    screening_result_id uuid NOT NULL REFERENCES screening_results(id) ON DELETE CASCADE,
+    instrument_id uuid NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    symbol text NOT NULL,
+    as_of_date date NOT NULL,
+    status text NOT NULL DEFAULT 'pending_approval' CHECK (
+        status IN ('pending_approval', 'approved', 'rejected', 'expired_unapproved')
+    ),
+    approval_deadline timestamptz NOT NULL,
+    entry_session_date date NOT NULL,
+    proposal_hash text NOT NULL,
+    source_hash text NOT NULL,
+    renderer_version text NOT NULL,
+    model text NOT NULL,
+    confidence numeric(5, 4) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    entry_template text NOT NULL CHECK (
+        entry_template IN ('single', 'two_leg', 'three_leg_front', 'three_leg_balanced')
+    ),
+    pivot_price numeric(18, 4) NOT NULL CHECK (pivot_price > 0),
+    initial_stop numeric(18, 4) NOT NULL CHECK (initial_stop > 0),
+    stop_distance_pct numeric(8, 4) NOT NULL CHECK (stop_distance_pct > 0 AND stop_distance_pct <= 8.0),
+    chase_ceiling numeric(18, 4) NOT NULL CHECK (chase_ceiling >= pivot_price),
+    t1 numeric(18, 4) NOT NULL CHECK (t1 > pivot_price),
+    t2 numeric(18, 4) NOT NULL CHECK (t2 > t1),
+    t3 numeric(18, 4) NOT NULL CHECK (t3 > t2),
+    risk_budget_pct numeric(8, 4) NOT NULL DEFAULT 1.0 CHECK (risk_budget_pct > 0),
+    leg_count integer NOT NULL CHECK (leg_count IN (1, 2, 3)),
+    leg_risk_allocations jsonb NOT NULL,
+    relative_volume_threshold numeric(6, 2) NOT NULL CHECK (relative_volume_threshold > 0),
+    gemini_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+    geometry jsonb NOT NULL DEFAULT '{}'::jsonb,
+    context_image_hash text,
+    detail_image_hash text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT trade_proposals_leg_allocations_check CHECK (jsonb_typeof(leg_risk_allocations) = 'array')
+);
+
+CREATE TRIGGER trade_proposals_set_updated_at
+BEFORE UPDATE ON trade_proposals
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE INDEX trade_proposals_status_deadline_idx ON trade_proposals(status, approval_deadline);
+CREATE INDEX trade_proposals_symbol_as_of_date_idx ON trade_proposals(symbol, as_of_date);
+CREATE INDEX trade_proposals_screening_result_idx ON trade_proposals(screening_result_id);
+
+CREATE TABLE proposal_decisions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    proposal_id uuid NOT NULL REFERENCES trade_proposals(id) ON DELETE CASCADE,
+    decision text NOT NULL CHECK (decision IN ('approved', 'rejected')),
+    expected_proposal_hash text NOT NULL,
+    notes text,
+    decided_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX proposal_decisions_proposal_idx ON proposal_decisions(proposal_id);
+
+CREATE TABLE entry_legs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    proposal_id uuid NOT NULL REFERENCES trade_proposals(id) ON DELETE CASCADE,
+    leg_index integer NOT NULL CHECK (leg_index >= 1 AND leg_index <= 3),
+    risk_allocation_pct numeric(6, 4) NOT NULL CHECK (risk_allocation_pct > 0 AND risk_allocation_pct <= 1.0),
+    status text NOT NULL DEFAULT 'planned' CHECK (
+        status IN (
+            'planned',
+            'armed',
+            'trigger_observed',
+            'intent_created',
+            'submitted',
+            'partially_filled',
+            'filled',
+            'expired',
+            'cancelled',
+            'submission_unknown'
+        )
+    ),
+    trigger_type text NOT NULL CHECK (trigger_type IN ('pivot', 'base_breakout')),
+    trigger_price numeric(18, 4) NOT NULL CHECK (trigger_price > 0),
+    chase_ceiling numeric(18, 4) NOT NULL CHECK (chase_ceiling >= trigger_price),
+    relative_volume_threshold numeric(6, 2) NOT NULL CHECK (relative_volume_threshold > 0),
+    hold_required integer NOT NULL DEFAULT 0,
+    base_required integer NOT NULL DEFAULT 0,
+    hold_count integer NOT NULL DEFAULT 0,
+    base_count integer NOT NULL DEFAULT 0,
+    base_low numeric(18, 4),
+    base_high numeric(18, 4),
+    eligible_session_start date NOT NULL,
+    eligible_session_end date NOT NULL,
+    filled_shares integer NOT NULL DEFAULT 0 CHECK (filled_shares >= 0),
+    filled_avg_price numeric(18, 4),
+    position_id uuid REFERENCES positions(id) ON DELETE SET NULL,
+    order_intent_id uuid REFERENCES order_intents(id) ON DELETE SET NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (proposal_id, leg_index)
+);
+
+CREATE TRIGGER entry_legs_set_updated_at
+BEFORE UPDATE ON entry_legs
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE INDEX entry_legs_status_idx ON entry_legs(status);
+CREATE INDEX entry_legs_position_idx ON entry_legs(position_id);
+
+CREATE TABLE trigger_events (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    leg_id uuid NOT NULL REFERENCES entry_legs(id) ON DELETE CASCADE,
+    bar_timestamp timestamptz NOT NULL,
+    bar_open numeric(18, 4) NOT NULL,
+    bar_high numeric(18, 4) NOT NULL,
+    bar_low numeric(18, 4) NOT NULL,
+    bar_close numeric(18, 4) NOT NULL,
+    bar_volume bigint NOT NULL,
+    cumulative_volume bigint NOT NULL,
+    expected_cumulative_volume bigint NOT NULL,
+    relative_volume numeric(8, 4) NOT NULL,
+    bar_type text NOT NULL CHECK (bar_type IN ('signal_bar', 'confirmation_bar')),
+    is_confirmed boolean NOT NULL DEFAULT false,
+    chase_valid boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX trigger_events_leg_idx ON trigger_events(leg_id, bar_timestamp);
+
+CREATE TABLE capacity_conflicts (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    bar_timestamp timestamptz NOT NULL,
+    competing_leg_ids jsonb NOT NULL,
+    scanner_score numeric(8, 4) NOT NULL,
+    status text NOT NULL DEFAULT 'open' CHECK (
+        status IN ('open', 'resolved', 'expired_skipped')
+    ),
+    chosen_leg_id uuid REFERENCES entry_legs(id) ON DELETE SET NULL,
+    resolution_type text CHECK (
+        resolution_type IS NULL OR resolution_type IN ('operator_selected', 'operator_skipped', 'auto_expired')
+    ),
+    decided_at timestamptz,
+    executed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT capacity_conflicts_competing_legs_check CHECK (jsonb_typeof(competing_leg_ids) = 'array')
+);
+
+CREATE TRIGGER capacity_conflicts_set_updated_at
+BEFORE UPDATE ON capacity_conflicts
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE INDEX capacity_conflicts_status_idx ON capacity_conflicts(status);
+
+CREATE TABLE risk_policies (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    version integer NOT NULL UNIQUE,
+    name text NOT NULL DEFAULT 'Balanced',
+    is_active boolean NOT NULL DEFAULT false,
+    risk_per_trade_pct numeric(6, 4) NOT NULL DEFAULT 0.0100 CHECK (risk_per_trade_pct > 0),
+    max_total_open_risk_pct numeric(6, 4) NOT NULL DEFAULT 0.0400 CHECK (max_total_open_risk_pct > 0),
+    max_single_name_notional_pct numeric(6, 4) NOT NULL DEFAULT 0.1500 CHECK (max_single_name_notional_pct > 0),
+    max_sector_notional_pct numeric(6, 4) NOT NULL DEFAULT 0.3000 CHECK (max_sector_notional_pct > 0),
+    max_cluster_notional_pct numeric(6, 4) NOT NULL DEFAULT 0.3000 CHECK (max_cluster_notional_pct > 0),
+    correlation_cluster_threshold numeric(4, 2) NOT NULL DEFAULT 0.80 CHECK (correlation_cluster_threshold >= 0 AND correlation_cluster_threshold <= 1.0),
+    correlation_lookback_sessions integer NOT NULL DEFAULT 60 CHECK (correlation_lookback_sessions > 0),
+    daily_loss_limit_pct numeric(6, 4) NOT NULL DEFAULT 0.0200 CHECK (daily_loss_limit_pct > 0),
+    max_open_positions integer NOT NULL DEFAULT 8 CHECK (max_open_positions > 0),
+    deployable_capital_override numeric(18, 4),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER risk_policies_set_updated_at
+BEFORE UPDATE ON risk_policies
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE UNIQUE INDEX risk_policies_single_active_uidx
+ON risk_policies ((true)) WHERE is_active = true;
+
+CREATE TABLE allocation_ledger (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    generation integer NOT NULL,
+    leg_id uuid REFERENCES entry_legs(id) ON DELETE SET NULL,
+    event_type text NOT NULL CHECK (
+        event_type IN (
+            'preflight_check',
+            'sizing_allocated',
+            'order_submitted',
+            'fill_recalculated',
+            'tightened_stop',
+            'risk_reduced_exit',
+            'full_invalid_exit',
+            'allocation_blocked'
+        )
+    ),
+    broker_funds_available numeric(18, 4) NOT NULL,
+    broker_snapshot_at timestamptz NOT NULL,
+    open_risk_before numeric(18, 4) NOT NULL,
+    open_risk_after numeric(18, 4) NOT NULL,
+    allocated_shares integer NOT NULL DEFAULT 0,
+    allocated_risk_amount numeric(18, 4) NOT NULL DEFAULT 0,
+    allocated_notional numeric(18, 4) NOT NULL DEFAULT 0,
+    rounding_residual numeric(18, 4) NOT NULL DEFAULT 0,
+    details jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX allocation_ledger_leg_idx ON allocation_ledger(leg_id);
+CREATE INDEX allocation_ledger_created_idx ON allocation_ledger(created_at DESC);
+
+CREATE TABLE five_minute_bars (
+    id bigserial PRIMARY KEY,
+    symbol text NOT NULL,
+    bar_time timestamptz NOT NULL,
+    open numeric(18, 4) NOT NULL,
+    high numeric(18, 4) NOT NULL,
+    low numeric(18, 4) NOT NULL,
+    close numeric(18, 4) NOT NULL,
+    volume bigint NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (symbol, bar_time)
+);
+
+CREATE INDEX five_minute_bars_symbol_time_idx ON five_minute_bars(symbol, bar_time DESC);
+
+CREATE TABLE volume_profiles (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    symbol text NOT NULL,
+    as_of_date date NOT NULL,
+    adv20_robust bigint NOT NULL,
+    bucket_medians jsonb NOT NULL,
+    sessions_used integer NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (symbol, as_of_date),
+    CONSTRAINT volume_profiles_bucket_medians_check CHECK (jsonb_typeof(bucket_medians) = 'array')
+);
+
+CREATE INDEX volume_profiles_symbol_date_idx ON volume_profiles(symbol, as_of_date DESC);
+
+-- P10 relationships are added after all referenced tables exist.
+ALTER TABLE positions
+    ADD COLUMN IF NOT EXISTS proposal_id uuid REFERENCES trade_proposals(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS entry_template text,
+    ADD COLUMN IF NOT EXISTS trailing_rule_type text,
+    ADD COLUMN IF NOT EXISTS high_water_mark numeric(18, 4),
+    ADD COLUMN IF NOT EXISTS trailing_stop numeric(18, 4),
+    ADD COLUMN IF NOT EXISTS t1_target numeric(18, 4),
+    ADD COLUMN IF NOT EXISTS t2_target numeric(18, 4),
+    ADD COLUMN IF NOT EXISTS t3_target numeric(18, 4),
+    ADD COLUMN IF NOT EXISTS t1_shares integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS t2_shares integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS t3_shares integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS runner_shares integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS t1_filled_shares integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS t2_filled_shares integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS t3_filled_shares integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS runner_filled_shares integer NOT NULL DEFAULT 0;
+
+ALTER TABLE order_intents
+    ADD COLUMN IF NOT EXISTS proposal_id uuid REFERENCES trade_proposals(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS entry_leg_id uuid REFERENCES entry_legs(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS exit_purpose text CHECK (
+        exit_purpose IS NULL OR exit_purpose IN (
+            'stop_loss', 'target_1', 'target_2', 'target_3', 'runner_trail',
+            'risk_reduction', 'invalid_fill', 'manual'
+        )
+    );
+
+ALTER TABLE order_fills
+    ADD COLUMN IF NOT EXISTS proposal_id uuid REFERENCES trade_proposals(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS entry_leg_id uuid REFERENCES entry_legs(id) ON DELETE SET NULL;
+
+ALTER TABLE trade_proposals
+    ADD COLUMN IF NOT EXISTS risk_policy_id uuid REFERENCES risk_policies(id),
+    ADD COLUMN IF NOT EXISTS risk_policy_version integer NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS approved_risk_budget_amount numeric(18, 4),
+    ADD COLUMN IF NOT EXISTS prompt_version text NOT NULL DEFAULT 'p10_vcp_proposal_v2',
+    ADD COLUMN IF NOT EXISTS schema_version text NOT NULL DEFAULT 'gemini_vcp_proposal_output_v2',
+    ADD COLUMN IF NOT EXISTS geometry_version text NOT NULL DEFAULT 'p10_geometry_three_windows_v2',
+    ADD COLUMN IF NOT EXISTS live_eligible boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS generated_at timestamptz NOT NULL DEFAULT now(),
+    ADD COLUMN IF NOT EXISTS context_image bytea,
+    ADD COLUMN IF NOT EXISTS detail_image bytea,
+    ADD COLUMN IF NOT EXISTS provider_request_id text,
+    ADD COLUMN IF NOT EXISTS provider_usage jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS provider_cost numeric(18, 8) NOT NULL DEFAULT 0;
+
+ALTER TABLE entry_legs
+    ALTER COLUMN trigger_price DROP NOT NULL,
+    ALTER COLUMN chase_ceiling DROP NOT NULL,
+    ALTER COLUMN eligible_session_start DROP NOT NULL,
+    ALTER COLUMN eligible_session_end DROP NOT NULL,
+    ADD COLUMN IF NOT EXISTS first_filled_at timestamptz,
+    ADD COLUMN IF NOT EXISTS signal_bar_timestamp timestamptz;
+
+ALTER TABLE five_minute_bars
+    ADD COLUMN IF NOT EXISTS cumulative_volume bigint NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS reconciliation_status text NOT NULL DEFAULT 'pending',
+    ADD COLUMN IF NOT EXISTS reconciled_at timestamptz,
+    ADD COLUMN IF NOT EXISTS reconciliation_details jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+CREATE TABLE proposal_attempts (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    automation_run_id uuid NOT NULL REFERENCES automation_runs(id) ON DELETE CASCADE,
+    screening_result_id uuid NOT NULL REFERENCES screening_results(id) ON DELETE CASCADE,
+    instrument_id uuid NOT NULL REFERENCES instruments(id),
+    symbol text NOT NULL,
+    attempt_number integer NOT NULL CHECK (attempt_number BETWEEN 1 AND 2),
+    status text NOT NULL CHECK (
+        status IN ('running', 'valid', 'invalid', 'uncertain', 'failed', 'timed_out')
+    ),
+    source_hash text NOT NULL,
+    renderer_version text NOT NULL,
+    prompt_version text NOT NULL,
+    schema_version text NOT NULL,
+    geometry_version text NOT NULL,
+    prompt_hash text NOT NULL,
+    input_hash text NOT NULL,
+    model text NOT NULL,
+    risk_policy_version integer NOT NULL,
+    context_image_hash text NOT NULL,
+    detail_image_hash text NOT NULL,
+    context_image bytea NOT NULL,
+    detail_image bytea NOT NULL,
+    provider_request_id text,
+    provider_usage jsonb NOT NULL DEFAULT '{}'::jsonb,
+    provider_cost numeric(18, 8) NOT NULL DEFAULT 0,
+    structured_output jsonb,
+    error_type text,
+    error_message text,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    UNIQUE (automation_run_id, screening_result_id, attempt_number)
+);
+
+CREATE UNIQUE INDEX trade_proposals_input_version_uidx
+ON trade_proposals (
+    screening_result_id, source_hash, model, prompt_version,
+    schema_version, renderer_version, geometry_version, risk_policy_version
+);
+CREATE UNIQUE INDEX proposal_decisions_one_per_proposal_uidx
+ON proposal_decisions (proposal_id);
+CREATE UNIQUE INDEX trigger_events_leg_bar_type_uidx
+ON trigger_events (leg_id, bar_timestamp, bar_type);
+CREATE INDEX proposal_attempts_run_status_idx
+ON proposal_attempts (automation_run_id, status, started_at);
+CREATE INDEX positions_proposal_idx ON positions(proposal_id);
+CREATE INDEX order_intents_proposal_idx ON order_intents(proposal_id);
+CREATE INDEX order_intents_leg_idx ON order_intents(entry_leg_id);
+
+ALTER TABLE five_minute_bars
+    ADD CONSTRAINT five_minute_bars_reconciliation_status_check CHECK (
+        reconciliation_status IN ('pending', 'verified', 'drifted', 'failed')
+    );
+
+CREATE OR REPLACE FUNCTION enforce_trade_proposal_immutability()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF (to_jsonb(NEW) - ARRAY['status', 'updated_at'])
+       IS DISTINCT FROM
+       (to_jsonb(OLD) - ARRAY['status', 'updated_at']) THEN
+        RAISE EXCEPTION 'approved trade proposal payload is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trade_proposals_immutable_payload
+BEFORE UPDATE ON trade_proposals
+FOR EACH ROW
+EXECUTE FUNCTION enforce_trade_proposal_immutability();
+
+INSERT INTO system_controls (control_key, enabled, reason, changed_by)
+VALUES
+    ('proposal_processing_paused', false, 'Default: proposal processing enabled when configured.', 'schema'),
+    ('new_entries_paused', false, 'Default: approved initial and add legs may execute.', 'schema')
+ON CONFLICT (control_key) DO NOTHING;

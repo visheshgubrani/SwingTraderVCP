@@ -92,6 +92,102 @@ services:
       retries: 1
       start_period: 10s
 
+  proposal-worker:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/server:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.proposal_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.prod}
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      APP_ENVIRONMENT: production
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "raise SystemExit(0)"]
+
+  tick-worker:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/server:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.tick_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.prod}
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      APP_ENVIRONMENT: production
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "raise SystemExit(0)"]
+
+  entry-supervisor:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/server:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.entry_supervisor"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.prod}
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      APP_ENVIRONMENT: production
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "raise SystemExit(0)"]
+
+  position-monitor:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/server:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.position_monitor"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.prod}
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      APP_ENVIRONMENT: production
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "raise SystemExit(0)"]
+
+  order-gateway:
+    profiles: ["live"]
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/server:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.order_gateway"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.prod}
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      APP_ENVIRONMENT: production
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "raise SystemExit(0)"]
+
   client:
     image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/client:${IMAGE_TAG:-latest}
     restart: unless-stopped

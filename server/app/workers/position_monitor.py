@@ -191,8 +191,6 @@ class PositionMonitorRuntime:
                                         "Failed submitting live exit for %s",
                                         exit_intent_id,
                                     )
-                        position.state = "closed"
-                        position.open_quantity = 0
                         logger.info(
                             "Exit triggered for %s (%s) at LTP %s",
                             position.symbol,

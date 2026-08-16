@@ -10,7 +10,7 @@ class TechnicalScreeningConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    # Live default is v3; v2 remains available for replaying persisted runs.
+    # The personal scanner runs v3; v2 remains only for the public SaaS template.
     pipeline_version: PipelineVersion = "vcp_score_v3"
 
     # Eligibility and indicator windows.
@@ -82,6 +82,7 @@ class TechnicalScreeningConfig(BaseModel):
     # Output policy and display grades.
     shortlist_limit: int = Field(default=500, ge=1, le=1000)
     fundamental_limit: int = Field(default=20, ge=0, le=100)
+    fundamental_industry_cap: int = Field(default=4, ge=1, le=100)
     grade_a_min: float = Field(default=90.0, ge=0, le=100)
     grade_b_min: float = Field(default=80.0, ge=0, le=100)
     grade_c_min: float = Field(default=70.0, ge=0, le=100)
@@ -217,6 +218,9 @@ def merge_template_config(raw: dict | None) -> TechnicalScreeningConfig:
         "pipeline_version",
         SAAS_MINERVINI_STANDARD_CONFIG.pipeline_version,
     )
+    if version == "vcp_score_v4":
+        # Defensive guard for persisted legacy templates; v4 scoring is retired.
+        raise ValueError("vcp_score_v4 is no longer a supported score engine")
     base = TechnicalScreeningConfig.for_version(version).model_copy(
         update={"shortlist_limit": 25, "fundamental_limit": 0}
     ).model_dump()

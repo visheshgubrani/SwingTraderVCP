@@ -53,6 +53,14 @@ export interface FundamentalComponent {
 export interface FundamentalAssessment {
   rubric_version: string
   score: number | null
+  base_score: number | null
+  risk_score_impact: number
+  risk_adjustments: Array<{
+    key: string
+    severity: "warning" | "red" | "severe"
+    score_impact: number
+    source?: string | null
+  }>
   grade: FundamentalFitGrade
   coverage_pct: number
   earned_points: number
@@ -77,6 +85,7 @@ export interface ScanResult {
   name: string | null
   fyers_symbol: string
   technical_score: number | null
+  score_version: string | null
   score_grade: TechnicalScoreGrade | null
   score_components: Record<string, TechnicalScoreComponent>
   eligibility: Record<string, boolean>
@@ -105,6 +114,12 @@ export interface ScanResult {
   rs_benchmark_source: string | null
   criteria_matches: Record<string, boolean>
   fundamental_selected: boolean
+  fundamental_selection_rank: number | null
+  industry: string | null
+  industry_key: string | null
+  fundamental_cap_exclusion_reason: string | null
+  risk_checks: Record<string, unknown>
+  source_snapshots: Array<Record<string, unknown>>
   llm_status:
     | "not_requested"
     | "queued"
@@ -145,6 +160,14 @@ export interface ScanResult {
     latest_quarterly_period: string | null
   } | null
   reviewer_status: "pending" | "watchlisted" | "rejected" | "trade_planned"
+  vcp_vision: {
+    id: string
+    status: "awaiting_capture" | "queued" | "running" | "succeeded" | "failed"
+    ai_verdict: "valid" | "invalid" | "uncertain" | null
+    human_verdict: "valid" | "invalid" | "uncertain" | null
+    created_at: string | null
+    error_code: string | null
+  } | null
 }
 
 export interface FundamentalHistoryPoint {
@@ -232,6 +255,21 @@ export interface FundamentalDetail {
     latest_quarterly_period: string | null
     normalized_facts: FundamentalNormalizedFacts
   } | null
+  risk_checks: Record<
+    string,
+    {
+      status?: "ok" | "warning" | "red" | "severe" | "unknown" | "not_applicable"
+      value?: number | null
+      debt_to_equity?: number | null
+      interest_service_coverage?: number | null
+      debt_service_coverage?: number | null
+      score_impact?: number
+      automatic_rejection?: boolean
+      source?: string
+      details?: Record<string, unknown>
+    }
+  >
+  source_snapshots: Array<Record<string, unknown>>
 }
 
 export interface FundamentalTrace {
@@ -282,7 +320,7 @@ export interface FundamentalTrace {
   pipeline_errors: Record<string, unknown>
 }
 
-interface ScanTriggerResponse {
+export interface ScanTriggerResponse {
   status: ScanRunStatus
   scan_run_id: string
   reused: boolean
@@ -326,23 +364,44 @@ export const screeningKeys = {
     [...screeningKeys.all, "fundamental-pass", { runId }] as const,
 }
 
-function hasActiveRun(runs?: ScanRun[]) {
-  return runs?.some(
-    (run) => run.status === "queued" || run.status === "running",
+export function productionScanRuns(runs?: ScanRun[]) {
+  return (runs ?? []).filter((run) => run.triggered_by !== "manual_shadow")
+}
+
+export function defaultScanRunId(runs?: ScanRun[]) {
+  const productionRuns = productionScanRuns(runs)
+  return (
+    productionRuns.find((run) => run.status === "succeeded")?.id ??
+    productionRuns[0]?.id ??
+    null
   )
+}
+
+export function latestActiveScanRun(runs?: ScanRun[]) {
+  const latestRun = productionScanRuns(runs)[0]
+  return latestRun?.status === "queued" || latestRun?.status === "running"
+    ? latestRun
+    : null
+}
+
+function hasActiveRun(runs?: ScanRun[]) {
+  return latestActiveScanRun(runs) !== null
 }
 
 function hasActiveAnnotations(results?: ScanResult[]) {
   return results?.some(
     (result) =>
-      result.llm_status === "queued" || result.llm_status === "running",
+      result.llm_status === "queued" ||
+      result.llm_status === "running" ||
+      result.vcp_vision?.status === "queued" ||
+      result.vcp_vision?.status === "running",
   )
 }
 
 export function useScanRuns() {
   return useQuery({
     queryKey: screeningKeys.runs(),
-    queryFn: () => apiRequest<ScanRun[]>("/screening/runs"),
+    queryFn: () => apiRequest<ScanRun[]>(`/screening/runs`),
     staleTime: 1_000,
     refetchInterval: (query) =>
       hasActiveRun(query.state.data) ? 1_500 : 5_000,

@@ -11,6 +11,8 @@ dependencies = [
     "fastapi[standard]>=0.139.0",
     "fyers-apiv3>=3.1.14",
     "httpx>=0.28.0",
+    "matplotlib==3.11.1",
+    "mplfinance==0.12.10b0",
     "pandas>=3.0.3",
     "pydantic-settings>=2.14.2",
     "redis>=8.0.1",

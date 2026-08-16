@@ -119,6 +119,7 @@ class OrderGatewayTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
             FakeResult(),
+            FakeResult({"quantity": 10, "average_price": Decimal("101.25")}),
             FakeResult(),
             FakeResult(),
             FakeResult(),
@@ -126,10 +127,10 @@ class OrderGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await process_trade_message(db, message))
         intent_update = db.execute.await_args_list[5].args[1]
         self.assertEqual(intent_update["status"], "filled")
-        position_update = db.execute.await_args_list[6].args[1]
+        position_update = db.execute.await_args_list[7].args[1]
         self.assertEqual(position_update["open_quantity"], 10)
         self.assertEqual(position_update["average_price"], Decimal("101.25"))
-        event_params = db.execute.await_args_list[7].args[1]
+        event_params = db.execute.await_args_list[8].args[1]
         self.assertEqual(event_params["event_type"], "entry_filled")
         self.assertEqual(event_params["from_state"], "pending_entry")
 
@@ -156,6 +157,7 @@ class OrderGatewayTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
             FakeResult(),
+            FakeResult({"quantity": 3, "average_price": Decimal("100.50")}),
             FakeResult(),
             FakeResult(),
             FakeResult(),
@@ -166,11 +168,11 @@ class OrderGatewayTests(unittest.IsolatedAsyncioTestCase):
             "partially_filled",
         )
         self.assertEqual(
-            db.execute.await_args_list[6].args[1]["open_quantity"],
+            db.execute.await_args_list[7].args[1]["open_quantity"],
             3,
         )
         self.assertEqual(
-            db.execute.await_args_list[7].args[1]["event_type"],
+            db.execute.await_args_list[8].args[1]["event_type"],
             "entry_partially_filled",
         )
 

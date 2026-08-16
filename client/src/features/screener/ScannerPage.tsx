@@ -5,6 +5,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Filter,
+  FlaskConical,
   LineChart,
   Play,
   Search,
@@ -28,12 +29,15 @@ import {
 import { Spinner } from "@/components/ui/spinner"
 import { useAuthStatus } from "@/features/auth/api"
 import {
+  defaultScanRunId,
+  productionScanRuns,
   type ScanResult,
   type ScanRun,
   type TechnicalScoreGrade,
   useScanResults,
   useScanRuns,
 } from "@/features/screener/api"
+import { VcpVisionSheet, VcpVisionStatusBadge } from "@/features/screener/VcpVisionSheet"
 import { useScanWorkflow } from "@/features/screener/useScanWorkflow"
 import { cn } from "@/lib/utils"
 
@@ -46,7 +50,10 @@ function formatRun(run: ScanRun) {
         dateStyle: "medium",
         timeStyle: "short",
       }).format(new Date(run.created_at))
-  return `EOD ${date} · ${run.status} · ${run.passing_count} eligible setups`
+  const version = run.technical_config.pipeline_version
+    ?.replace("vcp_score_", "")
+    .toUpperCase() ?? "LEGACY"
+  return `EOD ${date} · ${version} · ${run.status} · ${run.passing_count} eligible setups`
 }
 
 function gradeVariant(grade: TechnicalScoreGrade | null) {
@@ -68,15 +75,17 @@ export function ScannerPage() {
   const [pageSize, setPageSize] = useState<number>(25)
   const [currentPage, setCurrentPage] = useState<number>(1)
   const [selectedResultId, setSelectedResultId] = useState<string | null>(null)
+  const [visionResult, setVisionResult] = useState<ScanResult | null>(null)
 
-  // Default to latest successful run if not explicitly selected
+  const productionRuns = useMemo(
+    () => productionScanRuns(scanRuns.data),
+    [scanRuns.data],
+  )
+
   const activeRunId =
     selectedRunId ??
-    scanRuns.data?.find((r) => r.status === "queued" || r.status === "running")?.id ??
-    scanRuns.data?.find((r) => r.status === "succeeded")?.id ??
-    scanRuns.data?.[0]?.id ??
-    null
-  const activeRun = scanRuns.data?.find((r) => r.id === activeRunId)
+    defaultScanRunId(productionRuns)
+  const activeRun = productionRuns.find((r) => r.id === activeRunId)
   const scanResults = useScanResults(activeRunId, activeRun?.status)
 
   useEffect(() => {
@@ -172,17 +181,17 @@ export function ScannerPage() {
             <NativeSelect
               aria-label="Scanner run history"
               className="h-8 min-w-64 text-xs"
-              disabled={!scanRuns.data?.length}
+              disabled={!productionRuns.length}
               onChange={(e) => {
                 setSelectedRunId(e.target.value)
                 setCurrentPage(1)
               }}
               value={activeRunId ?? ""}
             >
-              {(!scanRuns.data || scanRuns.data.length === 0) && (
+              {productionRuns.length === 0 && (
                 <NativeSelectOption value="">No scanner runs found</NativeSelectOption>
               )}
-              {scanRuns.data?.map((run) => (
+              {productionRuns.map((run) => (
                 <NativeSelectOption key={run.id} value={run.id}>
                   {formatRun(run)}
                 </NativeSelectOption>
@@ -346,7 +355,8 @@ export function ScannerPage() {
                 <th className="px-3 py-2 text-center">RS Rating</th>
                 <th className="px-3 py-2 text-center">Setup</th>
                 <th className="px-3 py-2 text-center">Funda</th>
-                <th className="w-28 px-3 py-2 text-center">Action</th>
+                <th className="px-3 py-2 text-center">Vision</th>
+                <th className="w-36 px-3 py-2 text-center">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
@@ -407,7 +417,28 @@ export function ScannerPage() {
                       </Badge>
                     </td>
                     <td className="px-3 py-2.5 text-center">
+                      <VcpVisionStatusBadge
+                        aiVerdict={row.vcp_vision?.ai_verdict ?? null}
+                        compact
+                        status={row.vcp_vision?.status ?? null}
+                      />
+                    </td>
+                    <td className="px-3 py-2.5 text-center">
                       <div className="flex items-center justify-center gap-1">
+                        <Button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setVisionResult(row)
+                          }}
+                          size="sm"
+                          title="Run or review the VCP vision validation"
+                          type="button"
+                          variant={row.vcp_vision ? "secondary" : "outline"}
+                          className="h-7 gap-1 px-2 text-[11px]"
+                        >
+                          <FlaskConical className="size-3" />
+                          {row.vcp_vision ? "Review VCP" : "Analyze VCP"}
+                        </Button>
                         <Button
                           onClick={(e) => {
                             e.stopPropagation()
@@ -493,6 +524,17 @@ export function ScannerPage() {
           </div>
         )}
       </div>
+
+      {visionResult && (
+        <VcpVisionSheet
+          initialAnalysisId={visionResult.vcp_vision?.id ?? null}
+          onOpenChange={(next) => {
+            if (!next) setVisionResult(null)
+          }}
+          open
+          result={visionResult}
+        />
+      )}
     </div>
   )
 }

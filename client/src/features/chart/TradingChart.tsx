@@ -31,6 +31,10 @@ import React, { useEffect, useRef, useState } from "react"
 import { DrawingPropertiesBar } from "@/features/chart/DrawingPropertiesBar"
 import { ChartDrawingController } from "@/features/chart/plugins/drawing-controller"
 import type { DrawingRecord, DrawingStyle, DrawingTool } from "@/features/chart/plugins/types"
+import {
+  VisionOverlayPrimitive,
+  type VisionContractionBand,
+} from "@/features/chart/plugins/vision-overlay"
 import { cn } from "@/lib/utils"
 
 export interface CandleData {
@@ -48,6 +52,10 @@ interface TradingChartProps {
   stopLossPrice?: number
   targetPrice?: number
   liveLtp?: number
+  visionOverlay?: {
+    contractions: VisionContractionBand[]
+    pivotPrice?: number | null
+  } | null
 }
 
 const drawingTools: {
@@ -90,6 +98,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   stopLossPrice,
   targetPrice,
   liveLtp,
+  visionOverlay,
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -102,6 +111,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const dataRef = useRef(data)
   const chartTypeRef = useRef<"candlestick" | "line" | "area">("candlestick")
   const priceLinesRef = useRef<Record<"ltp" | "stop" | "target", IPriceLine | null>>({ ltp: null, stop: null, target: null })
+  const visionPrimitiveRef = useRef<VisionOverlayPrimitive | null>(null)
+  const visionPivotLineRef = useRef<IPriceLine | null>(null)
+  const visionSeriesRef = useRef<ISeriesApi<"Candlestick" | "Line" | "Area"> | null>(null)
   const hoverFrameRef = useRef<number | null>(null)
 
   const [activeTool, setActiveTool] = useState<DrawingTool>("cursor")
@@ -109,6 +121,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const [chartType, setChartType] = useState<"candlestick" | "line" | "area">("candlestick")
   const [isLogScale, setIsLogScale] = useState(false)
   const [isAutoScale, setIsAutoScale] = useState(true)
+  const [showVisionOverlay, setShowVisionOverlay] = useState(false)
 
   // OHLCV Legend Hover Overlay State
   const [hoverCandle, setHoverCandle] = useState<{
@@ -404,6 +417,49 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     syncLine("target", targetPrice, { color: "#089981", lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: "TARGET" })
   }, [chartType, stopLossPrice, targetPrice, liveLtp])
 
+  // Read-only AI VCP overlay (contraction bands + pivot), visually separate
+  // from user drawings. Re-attaches when the series is swapped on type change.
+  useEffect(() => {
+    if (visionPrimitiveRef.current && visionSeriesRef.current) {
+      try {
+        visionSeriesRef.current.detachPrimitive(visionPrimitiveRef.current)
+      } catch {
+        // The series was already removed from the chart; nothing to detach.
+      }
+      visionPrimitiveRef.current = null
+    }
+    if (visionPivotLineRef.current && visionSeriesRef.current) {
+      try {
+        visionSeriesRef.current.removePriceLine(visionPivotLineRef.current)
+      } catch {
+        // The series was already removed from the chart.
+      }
+      visionPivotLineRef.current = null
+    }
+    visionSeriesRef.current = null
+
+    const series = candleSeriesRef.current
+    const chart = chartRef.current
+    if (!showVisionOverlay || !visionOverlay || !chart || !series) return
+    const bands = visionOverlay.contractions
+    if (bands.length === 0) return
+
+    const primitive = new VisionOverlayPrimitive(chart, series, { bands })
+    series.attachPrimitive(primitive)
+    visionPrimitiveRef.current = primitive
+    visionSeriesRef.current = series
+    if (visionOverlay.pivotPrice != null && visionOverlay.pivotPrice > 0) {
+      visionPivotLineRef.current = series.createPriceLine({
+        price: visionOverlay.pivotPrice,
+        color: "#eab308",
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: "VCP PIVOT",
+      })
+    }
+  }, [chartType, showVisionOverlay, visionOverlay])
+
   // Chart Controls Callbacks
   const toggleLogScale = () => {
     if (!chartRef.current) return
@@ -556,6 +612,21 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
         {/* Right Side Controls */}
         <div className="flex items-center gap-2">
+          <button
+            className={cn(
+              "inline-flex h-6 px-2 items-center justify-center rounded border text-[11px] font-semibold transition-colors",
+              showVisionOverlay
+                ? "border-[#eab308] bg-[#eab308]/20 text-[#eab308]"
+                : "border-[#2a2e39] text-[#787b86] hover:bg-[#131722] hover:text-[#d1d5db]",
+              !visionOverlay && "opacity-40",
+            )}
+            disabled={!visionOverlay}
+            onClick={() => setShowVisionOverlay((value) => !value)}
+            title="Toggle the AI VCP vision overlay"
+            type="button"
+          >
+            VCP
+          </button>
           <button
             className={cn(
               "inline-flex h-6 px-2 items-center justify-center rounded border text-[11px] font-semibold transition-colors",

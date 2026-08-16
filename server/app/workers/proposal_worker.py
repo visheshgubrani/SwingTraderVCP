@@ -1,0 +1,648 @@
+"""Dedicated serial P10 proposal worker.
+
+This worker owns no broker/account context. It freezes scanner-selected EOD
+OHLCV, renders deterministic charts, audits each provider attempt, and hands a
+strict pattern read to deterministic proposal construction.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import hashlib
+import json
+import logging
+from decimal import Decimal
+from typing import Any, Literal
+from zoneinfo import ZoneInfo
+
+from arq import cron, run_worker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.database import async_session
+from app.domain.p10_geometry import CandleData, derive_chart_geometry
+from app.domain.p10_sizing import TEMPLATE_CONFIG, EntryTemplate
+from app.redis_pool import redis_settings_from_config, tune_arq_redis_pool
+from app.services.proposal_generator import (
+    GEOMETRY_VERSION,
+    PROMPT_VERSION,
+    SCHEMA_VERSION,
+    call_gemini_vision_for_proposal,
+    compute_frozen_source_hash,
+    generate_trade_proposal_from_analysis,
+    proposal_prompt_hash,
+)
+from app.services.proposal_renderer import render_proposal_charts
+
+
+logger = logging.getLogger("proposal_worker")
+IST_TZ = ZoneInfo("Asia/Kolkata")
+CandidateOutcome = Literal["generated", "rejected", "uncertain", "failed", "timed_out"]
+
+
+def _holiday_dates() -> set[dt.date]:
+    try:
+        return {dt.date.fromisoformat(value) for value in settings.nse_trading_holidays}
+    except ValueError as exc:
+        raise RuntimeError("NSE_TRADING_HOLIDAYS contains an invalid ISO date") from exc
+
+
+async def _control_is_paused(session: AsyncSession, control_key: str) -> bool:
+    result = await session.execute(
+        text("SELECT enabled FROM system_controls WHERE control_key = :key"),
+        {"key": control_key},
+    )
+    value = result.scalar_one_or_none()
+    return True if value is None else bool(value)
+
+
+async def expire_unapproved_proposals(session: AsyncSession) -> int:
+    result = await session.execute(
+        text(
+            """
+            UPDATE trade_proposals
+            SET status = 'expired_unapproved', updated_at = now()
+            WHERE status = 'pending_approval' AND approval_deadline <= now()
+            RETURNING id
+            """
+        )
+    )
+    rows = result.all()
+    await session.commit()
+    return len(rows)
+
+
+async def expire_unapproved_job(ctx: dict[str, Any]) -> int:
+    del ctx
+    async with async_session() as session:
+        return await expire_unapproved_proposals(session)
+
+
+async def _load_frozen_candles(
+    session: AsyncSession,
+    *,
+    instrument_id: str,
+    as_of_date: dt.date,
+) -> list[CandleData]:
+    result = await session.execute(
+        text(
+            """
+            SELECT open_price, high_price, low_price, close_price, volume,
+                   (candle_start AT TIME ZONE 'Asia/Kolkata')::date AS candle_date
+            FROM market_candles
+            WHERE instrument_id = :instrument_id
+              AND timeframe = '1d'
+              AND (candle_start AT TIME ZONE 'Asia/Kolkata')::date <= :as_of_date
+            ORDER BY candle_start DESC
+            LIMIT 252
+            """
+        ),
+        {"instrument_id": instrument_id, "as_of_date": as_of_date},
+    )
+    rows = list(reversed(result.mappings().all()))
+    if len(rows) != 252 or rows[-1]["candle_date"] != as_of_date:
+        raise ValueError(
+            f"Frozen EOD input requires exactly 252 sessions ending {as_of_date}; "
+            f"received {len(rows)}"
+        )
+    return [
+        CandleData(
+            open=float(row["open_price"]),
+            high=float(row["high_price"]),
+            low=float(row["low_price"]),
+            close=float(row["close_price"]),
+            volume=int(row["volume"]),
+            date=row["candle_date"].isoformat(),
+        )
+        for row in rows
+    ]
+
+
+async def _insert_attempt(
+    session: AsyncSession,
+    *,
+    automation_run_id: str,
+    candidate: Any,
+    attempt_number: int,
+    source_hash: str,
+    charts: Any,
+    policy_version: int,
+) -> str:
+    result = await session.execute(
+        text(
+            """
+            INSERT INTO proposal_attempts (
+                automation_run_id, screening_result_id, instrument_id, symbol,
+                attempt_number, status, source_hash, renderer_version,
+                prompt_version, schema_version, model, risk_policy_version,
+                geometry_version,
+                prompt_hash, input_hash,
+                context_image_hash, detail_image_hash, context_image, detail_image
+            ) VALUES (
+                :automation_run_id, :screening_result_id, :instrument_id, :symbol,
+                :attempt_number, 'running', :source_hash, :renderer_version,
+                :prompt_version, :schema_version, :model, :risk_policy_version,
+                :geometry_version,
+                :prompt_hash, :input_hash,
+                :context_image_hash, :detail_image_hash, :context_image, :detail_image
+            )
+            ON CONFLICT (automation_run_id, screening_result_id, attempt_number)
+            DO UPDATE SET status = 'running', started_at = now(), completed_at = NULL,
+                          error_type = NULL, error_message = NULL
+            RETURNING id
+            """
+        ),
+        {
+            "automation_run_id": automation_run_id,
+            "screening_result_id": candidate.screening_result_id,
+            "instrument_id": candidate.instrument_id,
+            "symbol": candidate.symbol,
+            "attempt_number": attempt_number,
+            "source_hash": source_hash,
+            "renderer_version": charts.renderer_version,
+            "prompt_version": PROMPT_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "model": settings.vcp_vision_model,
+            "risk_policy_version": policy_version,
+            "geometry_version": GEOMETRY_VERSION,
+            "prompt_hash": proposal_prompt_hash(
+                symbol=candidate.symbol,
+                tick_size=Decimal(str(candidate.tick_size)),
+            ),
+            "input_hash": hashlib.sha256(
+                json.dumps(
+                    {
+                        "source_hash": source_hash,
+                        "context_image_hash": charts.context_hash,
+                        "detail_image_hash": charts.detail_hash,
+                        "renderer_version": charts.renderer_version,
+                        "geometry_version": GEOMETRY_VERSION,
+                        "prompt_version": PROMPT_VERSION,
+                        "schema_version": SCHEMA_VERSION,
+                        "model": settings.vcp_vision_model,
+                        "risk_policy_version": policy_version,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "context_image_hash": charts.context_hash,
+            "detail_image_hash": charts.detail_hash,
+            "context_image": charts.context_png,
+            "detail_image": charts.detail_png,
+        },
+    )
+    attempt_id = str(result.scalar_one())
+    await session.commit()
+    return attempt_id
+
+
+async def _finish_attempt(
+    session: AsyncSession,
+    *,
+    attempt_id: str,
+    status: str,
+    output: dict[str, Any] | None = None,
+    usage: dict[str, Any] | None = None,
+    cost: float = 0,
+    request_id: str | None = None,
+    error: BaseException | None = None,
+) -> None:
+    await session.execute(
+        text(
+            """
+            UPDATE proposal_attempts
+            SET status = :status, structured_output = CAST(:output AS jsonb),
+                provider_usage = CAST(:usage AS jsonb), provider_cost = :cost,
+                provider_request_id = :request_id,
+                error_type = :error_type, error_message = :error_message,
+                completed_at = now()
+            WHERE id = :attempt_id
+            """
+        ),
+        {
+            "attempt_id": attempt_id,
+            "status": status,
+            "output": json.dumps(output) if output is not None else None,
+            "usage": json.dumps(usage or {}),
+            "cost": Decimal(str(cost)),
+            "request_id": request_id,
+            "error_type": type(error).__name__ if error else None,
+            "error_message": str(error)[:1000] if error else None,
+        },
+    )
+    await session.commit()
+
+
+async def _persist_proposal(
+    session: AsyncSession,
+    *,
+    automation_run_id: str,
+    proposal: dict[str, Any],
+    charts: Any,
+    request_id: str | None,
+    usage: dict[str, Any],
+    cost: float,
+) -> None:
+    result = await session.execute(
+        text(
+            """
+            INSERT INTO trade_proposals (
+                automation_run_id, screening_result_id, instrument_id, symbol, as_of_date,
+                status, approval_deadline, entry_session_date, proposal_hash, source_hash,
+                renderer_version, prompt_version, schema_version, model, confidence,
+                geometry_version,
+                entry_template, pivot_price, initial_stop, stop_distance_pct, chase_ceiling,
+                t1, t2, t3, risk_policy_id, risk_policy_version, risk_budget_pct,
+                approved_risk_budget_amount,
+                leg_count, leg_risk_allocations, relative_volume_threshold,
+                gemini_evidence, geometry, context_image_hash, detail_image_hash,
+                context_image, detail_image, live_eligible, generated_at,
+                provider_request_id, provider_usage, provider_cost
+            ) VALUES (
+                :automation_run_id, :screening_result_id, :instrument_id, :symbol, :as_of_date,
+                :status, :approval_deadline, :entry_session_date, :proposal_hash, :source_hash,
+                :renderer_version, :prompt_version, :schema_version, :model, :confidence,
+                :geometry_version,
+                :entry_template, :pivot_price, :initial_stop, :stop_distance_pct, :chase_ceiling,
+                :t1, :t2, :t3, :risk_policy_id, :risk_policy_version, :risk_budget_pct,
+                :approved_risk_budget_amount,
+                :leg_count, CAST(:leg_risk_allocations AS jsonb), :relative_volume_threshold,
+                CAST(:gemini_evidence AS jsonb), CAST(:geometry AS jsonb),
+                :context_image_hash, :detail_image_hash, :context_image, :detail_image,
+                :live_eligible, :generated_at, :provider_request_id,
+                CAST(:provider_usage AS jsonb), :provider_cost
+            )
+            ON CONFLICT (
+                screening_result_id, source_hash, model, prompt_version,
+                schema_version, renderer_version, geometry_version,
+                risk_policy_version
+            ) DO NOTHING
+            RETURNING id
+            """
+        ),
+        {
+            **proposal,
+            "automation_run_id": automation_run_id,
+            "leg_risk_allocations": json.dumps(proposal["leg_risk_allocations"]),
+            "gemini_evidence": json.dumps(proposal["gemini_evidence"]),
+            "geometry": json.dumps(proposal["geometry"]),
+            "context_image": charts.context_png,
+            "detail_image": charts.detail_png,
+            "provider_request_id": request_id,
+            "provider_usage": json.dumps(usage),
+            "provider_cost": Decimal(str(cost)),
+        },
+    )
+    proposal_id = result.scalar_one_or_none()
+    if proposal_id is None:
+        await session.rollback()
+        return
+
+    template = EntryTemplate(proposal["entry_template"])
+    allocations = TEMPLATE_CONFIG[template]["leg_allocations"]
+    for leg_index, allocation in enumerate(allocations, start=1):
+        initial = leg_index == 1
+        hold_required = 0
+        base_required = 0
+        if not initial:
+            hold_required = 1 if template == EntryTemplate.THREE_LEG_FRONT and leg_index == 2 else 2
+            base_required = 2 if template == EntryTemplate.THREE_LEG_FRONT and leg_index == 2 else 3
+        await session.execute(
+            text(
+                """
+                INSERT INTO entry_legs (
+                    proposal_id, leg_index, risk_allocation_pct, status, trigger_type,
+                    trigger_price, chase_ceiling, relative_volume_threshold,
+                    hold_required, base_required, eligible_session_start, eligible_session_end
+                ) VALUES (
+                    :proposal_id, :leg_index, :risk_allocation_pct, 'planned', :trigger_type,
+                    :trigger_price, :chase_ceiling, :relative_volume_threshold,
+                    :hold_required, :base_required, :eligible_start, :eligible_end
+                )
+                """
+            ),
+            {
+                "proposal_id": proposal_id,
+                "leg_index": leg_index,
+                "risk_allocation_pct": allocation,
+                "trigger_type": "pivot" if initial else "base_breakout",
+                "trigger_price": proposal["pivot_price"] if initial else None,
+                "chase_ceiling": proposal["chase_ceiling"] if initial else None,
+                "relative_volume_threshold": proposal["relative_volume_threshold"],
+                "hold_required": hold_required,
+                "base_required": base_required,
+                "eligible_start": proposal["entry_session_date"] if initial else None,
+                "eligible_end": proposal["entry_session_date"] if initial else None,
+            },
+        )
+    await session.commit()
+
+
+async def process_proposal_candidate(
+    *,
+    automation_run_id: str,
+    candidate: Any,
+    as_of_date: dt.date,
+    deadline: dt.datetime,
+) -> CandidateOutcome:
+    async with async_session() as session:
+        candles = await _load_frozen_candles(
+            session,
+            instrument_id=str(candidate.instrument_id),
+            as_of_date=as_of_date,
+        )
+        policy = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, version, risk_per_trade_pct, deployable_capital_override
+                    FROM risk_policies
+                    WHERE is_active = true
+                    ORDER BY version DESC
+                    LIMIT 1
+                    """
+                )
+            )
+        ).mappings().one_or_none()
+        if policy is None:
+            raise RuntimeError("No active risk policy; proposal generation fails closed")
+        if policy["deployable_capital_override"] is None:
+            raise RuntimeError(
+                "Active risk policy has no operator-configured deployable capital"
+            )
+
+    tick_size = Decimal(str(candidate.tick_size))
+    annotations = derive_chart_geometry(candles, tick_size=tick_size)
+    charts = render_proposal_charts(
+        candles=candles,
+        symbol=candidate.symbol,
+        pivot_price=float(annotations.resistance),
+        stop_price=float(annotations.initial_stop),
+        contraction_anchors=annotations.anchors,
+    )
+    source_hash = compute_frozen_source_hash(candles)
+
+    for attempt_number in range(1, settings.proposal_max_attempts + 1):
+        remaining = (deadline - dt.datetime.now(dt.timezone.utc)).total_seconds()
+        if remaining <= 0:
+            return "timed_out"
+        timeout = min(settings.proposal_attempt_timeout_seconds, remaining)
+        async with async_session() as session:
+            attempt_id = await _insert_attempt(
+                session,
+                automation_run_id=automation_run_id,
+                candidate=candidate,
+                attempt_number=attempt_number,
+                source_hash=source_hash,
+                charts=charts,
+                policy_version=int(policy["version"]),
+            )
+        try:
+            ai_output, usage, cost, request_id = await asyncio.wait_for(
+                call_gemini_vision_for_proposal(
+                    symbol=candidate.symbol,
+                    context_png=charts.context_png,
+                    detail_png=charts.detail_png,
+                    model=settings.vcp_vision_model,
+                    tick_size=tick_size,
+                ),
+                timeout=timeout,
+            )
+        except TimeoutError as exc:
+            async with async_session() as session:
+                await _finish_attempt(session, attempt_id=attempt_id, status="timed_out", error=exc)
+            if dt.datetime.now(dt.timezone.utc) >= deadline:
+                return "timed_out"
+            continue
+        except Exception as exc:
+            async with async_session() as session:
+                await _finish_attempt(session, attempt_id=attempt_id, status="failed", error=exc)
+            if attempt_number == settings.proposal_max_attempts:
+                return "failed"
+            continue
+
+        output_json = ai_output.model_dump(mode="json")
+        if ai_output.verdict != "valid" or ai_output.contradicts_scanner:
+            outcome: CandidateOutcome = "uncertain" if ai_output.verdict == "uncertain" else "rejected"
+            async with async_session() as session:
+                await _finish_attempt(
+                    session,
+                    attempt_id=attempt_id,
+                    status="uncertain" if outcome == "uncertain" else "invalid",
+                    output=output_json,
+                    usage=usage,
+                    cost=cost,
+                    request_id=request_id,
+                )
+            return outcome
+
+        proposal = generate_trade_proposal_from_analysis(
+            symbol=candidate.symbol,
+            as_of_date=as_of_date,
+            screening_result_id=str(candidate.screening_result_id),
+            instrument_id=str(candidate.instrument_id),
+            candles=candles,
+            ai_output=ai_output,
+            rendered_charts=charts,
+            model=settings.vcp_vision_model,
+            tick_size=tick_size,
+            risk_policy_id=str(policy["id"]),
+            risk_policy_version=int(policy["version"]),
+            risk_per_trade_pct=Decimal(str(policy["risk_per_trade_pct"])),
+            approved_risk_budget_amount=(
+                Decimal(str(policy["deployable_capital_override"]))
+                * Decimal(str(policy["risk_per_trade_pct"]))
+            ),
+            holidays=_holiday_dates(),
+        )
+        if proposal is None:
+            validation_error = ValueError("Deterministic proposal validation rejected the AI output")
+            async with async_session() as session:
+                await _finish_attempt(
+                    session,
+                    attempt_id=attempt_id,
+                    status="invalid",
+                    output=output_json,
+                    usage=usage,
+                    cost=cost,
+                    request_id=request_id,
+                    error=validation_error,
+                )
+            return "rejected"
+
+        async with async_session() as session:
+            await _persist_proposal(
+                session,
+                automation_run_id=automation_run_id,
+                proposal=proposal,
+                charts=charts,
+                request_id=request_id,
+                usage=usage,
+                cost=cost,
+            )
+            await _finish_attempt(
+                session,
+                attempt_id=attempt_id,
+                status="valid",
+                output=output_json,
+                usage=usage,
+                cost=cost,
+                request_id=request_id,
+            )
+        return "generated"
+
+    return "failed"
+
+
+async def run_eod_proposal_batch(
+    ctx: dict[str, Any],
+    scan_run_id: str,
+    limit: int = 20,
+) -> dict[str, Any]:
+    del ctx
+    if not settings.proposal_automation_enabled:
+        return {"status": "disabled", "scan_run_id": scan_run_id}
+
+    async with async_session() as session:
+        if await _control_is_paused(session, "proposal_processing_paused"):
+            return {"status": "paused", "scan_run_id": scan_run_id}
+        result = await session.execute(
+            text(
+                """
+                SELECT sr.id AS screening_result_id, sr.instrument_id,
+                       i.fyers_symbol AS symbol, i.tick_size, i.lot_size,
+                       sr.result_rank, sr.technical_score, r.as_of_date,
+                       r.completed_at AS scan_completed_at
+                FROM screening_results sr
+                JOIN instruments i ON i.id = sr.instrument_id
+                JOIN scan_runs r ON r.id = sr.scan_run_id
+                WHERE sr.scan_run_id = :scan_run_id
+                  AND sr.technical_passed = true
+                  AND sr.result_rank IS NOT NULL
+                  AND (
+                      :p7_enabled = false
+                      OR COALESCE(
+                          (sr.technical_metrics ->> 'fundamental_selected')::boolean,
+                          false
+                      ) = true
+                  )
+                ORDER BY sr.result_rank ASC
+                LIMIT :limit
+                """
+            ),
+            {
+                "scan_run_id": scan_run_id,
+                "limit": min(limit, 20),
+                "p7_enabled": settings.p7_fundamental_pass_enabled,
+            },
+        )
+        candidates = result.all()
+        if not candidates:
+            return {"status": "no_candidates", "scan_run_id": scan_run_id}
+        as_of_date = candidates[0].as_of_date
+        scan_completed_at = candidates[0].scan_completed_at
+        if scan_completed_at is None:
+            raise RuntimeError("Proposal shortlist has no durable scan completion time")
+        if scan_completed_at.tzinfo is None:
+            scan_completed_at = scan_completed_at.replace(tzinfo=dt.timezone.utc)
+        deadline = scan_completed_at + dt.timedelta(
+            minutes=settings.proposal_batch_budget_minutes,
+        )
+        run_result = await session.execute(
+            text(
+                """
+                INSERT INTO automation_runs (
+                    scan_run_id, status, candidates_total, batch_deadline
+                ) VALUES (:scan_run_id, 'running', :total, :deadline)
+                RETURNING id
+                """
+            ),
+            {"scan_run_id": scan_run_id, "total": len(candidates), "deadline": deadline},
+        )
+        automation_run_id = str(run_result.scalar_one())
+        await session.commit()
+
+    counts = {key: 0 for key in ("generated", "rejected", "uncertain", "failed", "timed_out")}
+    processed = 0
+    for index, candidate in enumerate(candidates):
+        if dt.datetime.now(dt.timezone.utc) >= deadline:
+            counts["timed_out"] += len(candidates) - index
+            break
+        try:
+            outcome = await process_proposal_candidate(
+                automation_run_id=automation_run_id,
+                candidate=candidate,
+                as_of_date=as_of_date,
+                deadline=deadline,
+            )
+        except Exception:
+            logger.exception("Proposal candidate %s failed", candidate.symbol)
+            outcome = "failed"
+        counts[outcome] += 1
+        processed += 1
+
+    terminal_status = "timed_out" if counts["timed_out"] else "completed"
+    async with async_session() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE automation_runs
+                SET status = :status, candidates_processed = :processed,
+                    proposals_generated = :generated,
+                    proposals_rejected = :rejected,
+                    proposals_uncertain = :uncertain,
+                    proposals_failed = :failed,
+                    completed_at = now(), updated_at = now()
+                WHERE id = :run_id
+                """
+            ),
+            {
+                "run_id": automation_run_id,
+                "status": terminal_status,
+                "processed": processed,
+                **counts,
+            },
+        )
+        await session.commit()
+    return {
+        "status": terminal_status,
+        "scan_run_id": scan_run_id,
+        "automation_run_id": automation_run_id,
+        "counts": counts,
+    }
+
+
+async def worker_on_startup(ctx: dict[str, Any]) -> None:
+    await tune_arq_redis_pool(ctx["redis"])
+
+
+class WorkerSettings:
+    functions = [run_eod_proposal_batch, expire_unapproved_job]
+    cron_jobs = [
+        cron(
+            expire_unapproved_job,
+            name="expire_unapproved_trade_proposals",
+            minute=set(range(60)),
+            second=5,
+            timeout=30,
+            max_tries=1,
+        )
+    ]
+    queue_name = settings.proposal_queue_name
+    max_jobs = 1
+    job_timeout = settings.proposal_batch_budget_minutes * 60 + 60
+    on_startup = worker_on_startup
+    timezone = IST_TZ
+    redis_settings = redis_settings_from_config()
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    run_worker(WorkerSettings)
+
+
+if __name__ == "__main__":
+    main()

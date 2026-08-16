@@ -13,7 +13,9 @@ from app.services.indicators import (
 )
 from app.services.screening_config import TechnicalScreeningConfig
 from app.services.screening_ranker import (
+    apply_fundamental_industry_cap,
     fundamental_selection_status,
+    normalize_industry_key,
     rank_and_cap_shortlist,
 )
 
@@ -143,6 +145,37 @@ class IndicatorTests(unittest.TestCase):
             fundamental_selection_status(1, limit=20, enabled=False),
             (False, "not_requested"),
         )
+
+    def test_industry_key_normalizes_case_unicode_spacing_and_separators(self) -> None:
+        self.assertEqual(
+            normalize_industry_key(
+                "  Capital  Goods - Electrical Equipment ", symbol="AAA"
+            ),
+            normalize_industry_key(
+                "capital goods-electrical equipment", symbol="BBB"
+            ),
+        )
+        self.assertNotEqual(
+            normalize_industry_key(None, symbol="AAA"),
+            normalize_industry_key(" ", symbol="BBB"),
+        )
+
+    def test_industry_cap_preserves_technical_rank_and_backfills_selection(self) -> None:
+        ranked = [
+            {"result_rank": index, "symbol": f"S{index}", "industry": "IT" if index <= 6 else "Industrials"}
+            for index in range(1, 11)
+        ]
+        selected = apply_fundamental_industry_cap(
+            ranked, limit=6, industry_cap=4, enabled=True
+        )
+
+        self.assertEqual([item["result_rank"] for item in selected], list(range(1, 11)))
+        self.assertEqual(
+            [item["symbol"] for item in selected if item["fundamental_selected"]],
+            ["S1", "S2", "S3", "S4", "S7", "S8"],
+        )
+        self.assertEqual(selected[4]["fundamental_cap_exclusion_reason"], "industry_cap_reached")
+        self.assertEqual(selected[7]["fundamental_selection_rank"], 6)
 
     def test_up_down_volume_ratio_trailing_window(self) -> None:
         latest = self.indicators.iloc[-1]

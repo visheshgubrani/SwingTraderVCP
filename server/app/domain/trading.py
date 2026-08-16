@@ -89,7 +89,11 @@ def validate_trade_plan(
 
 PositionSide = Literal["long", "short"]
 ExitIntentType = Literal[
-    "stop_loss_exit", "target_exit", "trailing_exit"
+    "stop_loss_exit",
+    "target_exit",
+    "trailing_exit",
+    "risk_reduction_exit",
+    "invalid_fill_exit",
 ]
 
 

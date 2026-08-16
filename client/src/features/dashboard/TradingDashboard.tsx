@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ConstructionIcon, DatabaseZapIcon, PanelBottomCloseIcon, PanelBottomOpenIcon } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 
@@ -9,7 +9,15 @@ import { historicalKeys, useCandles, useSyncStatus } from "@/features/historical
 import { OrderBookTable } from "@/features/orders/OrderBookTable"
 import { PositionsTable } from "@/features/positions/PositionsTable"
 import { ScannerTable } from "@/features/screener/ScannerTable"
-import { type ScanResult, useScanResults, useScanRuns } from "@/features/screener/api"
+import {
+  defaultScanRunId,
+  productionScanRuns,
+  type ScanResult,
+  useScanResults,
+  useScanRuns,
+} from "@/features/screener/api"
+import { VcpVisionSheet } from "@/features/screener/VcpVisionSheet"
+import { useVcpVisionAnalysis } from "@/features/screener/vcpVision"
 import { useScanWorkflow } from "@/features/screener/useScanWorkflow"
 import { TradeExecutionForm } from "@/features/trade/TradeExecutionForm"
 import { TradebookView } from "@/features/tradebook/TradebookView"
@@ -50,6 +58,7 @@ export function TradingDashboard() {
   const [bottomTab, setBottomTab] = useState<"scanner" | "positions" | "orders" | "tradebook">("scanner")
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [selectedResultId, setSelectedResultId] = useState<string | null>(null)
+  const [visionResult, setVisionResult] = useState<ScanResult | null>(null)
   const [stopLossPrice, setStopLossPrice] = useState(0)
   const [targetPrice, setTargetPrice] = useState(0)
   const [bottomRatio, setBottomRatio] = useState(loadBottomRatio)
@@ -66,13 +75,34 @@ export function TradingDashboard() {
   const scanRuns = useScanRuns()
   const scanWorkflow = useScanWorkflow(authStatus.data)
   const { ltpMap } = useMarketData()
-  const activeRun = scanRuns.data?.find((run) => run.id === selectedRunId)
+  const visibleRuns = useMemo(
+    () => productionScanRuns(scanRuns.data),
+    [scanRuns.data],
+  )
+  const activeRun = visibleRuns.find((run) => run.id === selectedRunId)
   const scanResults = useScanResults(selectedRunId, activeRun?.status)
   const selectedResult = scanResults.data?.find((result) => result.id === selectedResultId)
   const selectedSymbol = selectedResult?.fyers_symbol ?? ""
   const selectedTick = selectedSymbol ? ltpMap.get(selectedSymbol) : undefined
   const selectedLtp = selectedTick?.ltp ?? selectedResult?.close_price ?? 0
   const candlesQuery = useCandles(selectedSymbol, "1d", 300)
+  const visionAnalysis = useVcpVisionAnalysis(
+    selectedResult?.vcp_vision?.id ?? null,
+  )
+  const visionOverlay = useMemo(() => {
+    const analysis = visionAnalysis.data
+    if (!analysis || analysis.status !== "succeeded" || !analysis.result) return null
+    return {
+      contractions: analysis.result.derived.contractions.map((contraction) => ({
+        label: contraction.label,
+        start: contraction.start,
+        end: contraction.end,
+        high: contraction.high,
+        low: contraction.low,
+      })),
+      pivotPrice: analysis.result.derived.pivot_price ?? null,
+    }
+  }, [visionAnalysis.data])
 
   const clampBottomHeight = useCallback((height: number) => {
     const total = workspaceRef.current?.clientHeight ?? 0
@@ -105,11 +135,7 @@ export function TradingDashboard() {
   useEffect(() => {
     const runs = scanRuns.data
     if (!runs?.length || selectedRunId) return
-    setSelectedRunId(
-      runs.find((run) => run.status === "queued" || run.status === "running")?.id ??
-        runs.find((run) => run.status === "succeeded")?.id ??
-        runs[0].id,
-    )
+    setSelectedRunId(defaultScanRunId(runs))
   }, [scanRuns.data, selectedRunId])
 
   useEffect(() => {
@@ -153,12 +179,13 @@ export function TradingDashboard() {
   }
 
   return (
+    <>
     <div className="grid h-full min-h-0 w-full overflow-hidden" ref={workspaceRef} style={{ gridTemplateRows: collapsed ? `minmax(${MIN_CHART_HEIGHT}px, 1fr) ${SPLITTER_HEIGHT}px 0px` : `minmax(${MIN_CHART_HEIGHT}px, 1fr) ${SPLITTER_HEIGHT}px ${bottomHeight}px` }}>
       <section className="flex min-h-0 overflow-hidden">
         <div className="relative h-full min-w-0 flex-1 overflow-hidden">
           {!selectedResult ? <EmptyChartWorkspace /> : (
             <>
-              <TradingChart data={candlesQuery.data ?? []} liveLtp={selectedLtp} stopLossPrice={stopLossPrice} symbol={selectedSymbol} targetPrice={targetPrice} />
+              <TradingChart data={candlesQuery.data ?? []} liveLtp={selectedLtp} stopLossPrice={stopLossPrice} symbol={selectedSymbol} targetPrice={targetPrice} visionOverlay={visionOverlay} />
               {candlesQuery.isLoading && <div className="absolute inset-0 flex items-center justify-center bg-background/80 text-sm text-muted-foreground">Loading daily candles from Postgres…</div>}
               {candlesQuery.isError && <div className="absolute inset-0 flex items-center justify-center bg-background/90 p-6"><Alert className="max-w-lg" variant="destructive"><DatabaseZapIcon aria-hidden="true" /><AlertTitle>Could not load candles</AlertTitle><AlertDescription>{candlesQuery.error instanceof Error ? candlesQuery.error.message : "The candle API is unavailable."}</AlertDescription></Alert></div>}
               {candlesQuery.isSuccess && candlesQuery.data.length === 0 && <div className="absolute inset-0 flex items-center justify-center bg-background/90 p-6"><Alert className="max-w-lg"><DatabaseZapIcon aria-hidden="true" /><AlertTitle>No daily candles stored</AlertTitle><AlertDescription>Sync the latest EOD data, then retry this result.</AlertDescription></Alert></div>}
@@ -230,12 +257,23 @@ export function TradingDashboard() {
           </Button>
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
-          {bottomTab === "scanner" && <ScannerTable activeRun={activeRun} errorMessage={scanResults.error instanceof Error ? scanResults.error.message : null} isError={scanResults.isError} isLoading={scanResults.isLoading} isRunning={scanWorkflow.isBusy} items={scanResults.data ?? []} onPlanTrade={handleSelectResult} onRunScan={() => void scanWorkflow.start()} onRetry={() => void scanResults.refetch()} onSelectResult={handleSelectResult} onSelectRun={(runId) => { scanWorkflow.reset(); setSelectedRunId(runId); setSelectedResultId(null) }} runs={scanRuns.data ?? []} selectedResultId={selectedResultId} selectedRunId={selectedRunId} workflowError={scanWorkflow.phase === "failed"} workflowMessage={scanWorkflow.message} />}
+          {bottomTab === "scanner" && <ScannerTable activeRun={activeRun} errorMessage={scanResults.error instanceof Error ? scanResults.error.message : null} isError={scanResults.isError} isLoading={scanResults.isLoading} isRunning={scanWorkflow.isBusy} items={scanResults.data ?? []} onAnalyzeVcp={setVisionResult} onPlanTrade={handleSelectResult} onRunScan={() => void scanWorkflow.start()} onRetry={() => void scanResults.refetch()} onSelectResult={handleSelectResult} onSelectRun={(runId) => { setSelectedRunId(runId); setSelectedResultId(null) }} runs={visibleRuns} selectedResultId={selectedResultId} selectedRunId={selectedRunId} workflowError={scanWorkflow.phase === "failed"} workflowMessage={scanWorkflow.message} />}
           {bottomTab === "positions" && <PositionsTable positions={positions} />}
           {bottomTab === "orders" && <OrderBookTable orders={orderIntents} />}
           {bottomTab === "tradebook" && <TradebookView />}
         </div>
       </section>
     </div>
+    {visionResult && (
+      <VcpVisionSheet
+        initialAnalysisId={visionResult.vcp_vision?.id ?? null}
+        onOpenChange={(next) => {
+          if (!next) setVisionResult(null)
+        }}
+        open
+        result={visionResult}
+      />
+    )}
+    </>
   )
 }

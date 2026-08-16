@@ -16,6 +16,7 @@ import { JournalView } from "@/features/journal/JournalView"
 import { OrderBookTable, type OrderIntentItem } from "@/features/orders/OrderBookTable"
 import { DashboardOverview } from "@/features/overview/DashboardOverview"
 import { PositionsTable, type PositionItem } from "@/features/positions/PositionsTable"
+import { ProposalInbox } from "@/features/proposals/ProposalInbox"
 import { ScannerPage } from "@/features/screener/ScannerPage"
 import { TradebookView } from "@/features/tradebook/TradebookView"
 import { useOrderIntents, usePositions } from "@/features/trade/api"
@@ -155,6 +156,7 @@ const router = createBrowserRouter([
       children: [
         { index: true, Component: TradingDashboard },
         { path: "scanner", Component: ScannerPage },
+        { path: "proposals", Component: ProposalInbox },
         { path: "fundamentals", Component: FundamentalsView },
         { path: "positions", Component: PositionsRoute },
         { path: "orders", Component: OrdersRoute },

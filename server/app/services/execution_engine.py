@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import text
@@ -15,8 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.domain.trading import ExitIntentType, realized_pnl_on_exit
+from app.domain.p10_sizing import apportion_staged_exits
+from app.domain.p10_geometry import floor_to_tick
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.services.journal_outbox import enqueue_journal_fill_event
+from app.services.staged_exit_manager import (
+    StagedPositionState,
+    allocate_cumulative_target_fill,
+)
 
 REDIS_TICK_SUBS_CHANNEL = "tick_subs"
 
@@ -377,6 +384,202 @@ async def create_entry_intent(
     )
 
 
+async def create_proposal_entry_intent(
+    db: AsyncSession,
+    *,
+    proposal_id: UUID,
+    entry_leg_id: UUID,
+    quantity: int,
+    observed_price: Decimal,
+) -> tuple[OrderIntentRef, UUID]:
+    """Persist one approved P10 leg intent and its recoverable position state."""
+    ensure_execution_mode_armed()
+    await ensure_orders_allowed(db)
+    if quantity <= 0:
+        raise ExecutionSafetyError("Proposal entry quantity must be positive.")
+
+    pause_result = await db.execute(
+        text(
+            """
+            SELECT enabled
+            FROM system_controls
+            WHERE control_key = 'new_entries_paused'
+            FOR SHARE
+            """
+        )
+    )
+    paused = pause_result.scalar_one_or_none()
+    if paused is None or paused:
+        raise ExecutionBlockedError(
+            "New-entry control is unavailable or paused; execution fails closed."
+        )
+
+    result = await db.execute(
+        text(
+            """
+            SELECT tp.id AS proposal_id, tp.instrument_id, tp.screening_result_id,
+                   tp.status AS proposal_status, tp.proposal_hash, tp.live_eligible,
+                   tp.entry_session_date, tp.entry_template, tp.initial_stop,
+                   tp.t1, tp.t2, tp.t3, tp.geometry,
+                   el.id AS leg_id, el.leg_index, el.status AS leg_status,
+                   el.position_id, el.trigger_price,
+                   pd.expected_proposal_hash
+            FROM trade_proposals tp
+            JOIN entry_legs el ON el.proposal_id = tp.id
+            JOIN proposal_decisions pd ON pd.proposal_id = tp.id
+                                    AND pd.decision = 'approved'
+            WHERE tp.id = :proposal_id AND el.id = :entry_leg_id
+            FOR UPDATE OF tp, el
+            """
+        ),
+        {"proposal_id": proposal_id, "entry_leg_id": entry_leg_id},
+    )
+    plan = result.mappings().one_or_none()
+    if plan is None:
+        raise ExecutionSafetyError("Approved proposal leg was not found.")
+    if (
+        plan["proposal_status"] != "approved"
+        or not plan["live_eligible"]
+        or plan["expected_proposal_hash"] != plan["proposal_hash"]
+    ):
+        raise ExecutionSafetyError("Proposal approval/version is not live-eligible.")
+    if plan["leg_status"] not in {"trigger_observed", "intent_created"}:
+        raise ExecutionSafetyError(
+            f"Proposal leg is in unexpected state '{plan['leg_status']}'."
+        )
+
+    today_ist = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Kolkata")).date()
+    if int(plan["leg_index"]) == 1 and plan["entry_session_date"] != today_ist:
+        raise ExecutionSafetyError("Initial proposal leg is outside its D1 entry session.")
+
+    execution_mode = settings.execution_mode
+    idempotency_key = f"proposal:{proposal_id}:leg:{entry_leg_id}:entry:v1"
+    existing = await db.execute(
+        text(
+            """
+            SELECT id, idempotency_key, execution_mode, position_id
+            FROM order_intents
+            WHERE idempotency_key = :key
+            """
+        ),
+        {"key": idempotency_key},
+    )
+    existing_row = existing.mappings().one_or_none()
+    if existing_row is not None:
+        return (
+            OrderIntentRef(
+                id=existing_row["id"],
+                idempotency_key=existing_row["idempotency_key"],
+                execution_mode=existing_row["execution_mode"],
+            ),
+            existing_row["position_id"],
+        )
+
+    position_id = plan["position_id"]
+    if position_id is None:
+        if int(plan["leg_index"]) != 1:
+            raise ExecutionSafetyError("Add leg has no preceding app-managed position.")
+        position_id = uuid4()
+        await db.execute(
+            text(
+                """
+                INSERT INTO positions (
+                    id, instrument_id, screening_result_id, state, side,
+                    quantity, open_quantity, product_type, current_stop_loss,
+                    current_target, trailing_rule, proposal_id, entry_template,
+                    trailing_rule_type, t1_target, t2_target, t3_target
+                ) VALUES (
+                    :id, :instrument_id, :screening_result_id, 'pending_entry', 'long',
+                    :quantity, 0, 'CNC', :stop, NULL, CAST(:trailing_rule AS jsonb),
+                    :proposal_id, :entry_template, 'p10_staged_atr', :t1, :t2, :t3
+                )
+                """
+            ),
+            {
+                "id": position_id,
+                "instrument_id": plan["instrument_id"],
+                "screening_result_id": plan["screening_result_id"],
+                "quantity": quantity,
+                "stop": plan["initial_stop"],
+                "trailing_rule": json.dumps(
+                    {
+                        "type": "p10_staged_atr",
+                        "atr14": str(dict(plan["geometry"] or {}).get("atr14", "0")),
+                    }
+                ),
+                "proposal_id": proposal_id,
+                "entry_template": plan["entry_template"],
+                "t1": plan["t1"],
+                "t2": plan["t2"],
+                "t3": plan["t3"],
+            },
+        )
+    else:
+        # Reserve add quantity durably before submission. Rejected/unfilled add
+        # recovery removes this reservation in the gateway/reconciler.
+        await db.execute(
+            text(
+                """
+                UPDATE positions
+                SET quantity = quantity + :quantity
+                WHERE id = :position_id
+                  AND state IN ('open', 'trailing_active')
+                """
+            ),
+            {"position_id": position_id, "quantity": quantity},
+        )
+
+    intent_id = uuid4()
+    await db.execute(
+        text(
+            """
+            INSERT INTO order_intents (
+                id, idempotency_key, position_id, intent_type, side, quantity,
+                product_type, order_type, status, execution_mode,
+                requested_by_component, reason, proposal_id, entry_leg_id
+            ) VALUES (
+                :id, :key, :position_id, 'entry', 'buy', :quantity,
+                'CNC', 'market', 'created', :execution_mode,
+                'execution_engine', :reason, :proposal_id, :entry_leg_id
+            )
+            """
+        ),
+        {
+            "id": intent_id,
+            "key": idempotency_key,
+            "position_id": position_id,
+            "quantity": quantity,
+            "execution_mode": execution_mode,
+            "reason": f"Approved P10 leg at observed price {observed_price}",
+            "proposal_id": proposal_id,
+            "entry_leg_id": entry_leg_id,
+        },
+    )
+    await db.execute(
+        text(
+            """
+            UPDATE entry_legs
+            SET status = 'intent_created', position_id = :position_id,
+                order_intent_id = :intent_id, updated_at = now()
+            WHERE id = :entry_leg_id
+            """
+        ),
+        {
+            "position_id": position_id,
+            "intent_id": intent_id,
+            "entry_leg_id": entry_leg_id,
+        },
+    )
+    return (
+        OrderIntentRef(
+            id=intent_id,
+            idempotency_key=idempotency_key,
+            execution_mode=execution_mode,
+        ),
+        position_id,
+    )
+
+
 async def publish_tick_subscriptions(redis, symbols: list[str]) -> None:
     """Ask the tick worker to subscribe to symbols for open positions."""
     if not symbols:
@@ -392,7 +595,7 @@ async def complete_paper_entry_fill(
     *,
     order_intent_id: UUID,
     position_id: UUID,
-    trade_instruction_id: UUID,
+    trade_instruction_id: UUID | None = None,
     fill_price: Decimal,
     quantity: int,
 ) -> bool:
@@ -409,7 +612,7 @@ async def complete_paper_entry_fill(
     intent_result = await db.execute(
         text(
             """
-            SELECT id, status, quantity
+            SELECT id, status, quantity, proposal_id, entry_leg_id
             FROM order_intents
             WHERE id = :order_intent_id
               AND position_id = :position_id
@@ -432,6 +635,8 @@ async def complete_paper_entry_fill(
         raise ExecutionSafetyError(
             f"Paper entry intent is in unexpected status '{intent['status']}'."
         )
+    if int(intent["quantity"]) != quantity:
+        raise ExecutionSafetyError("Paper fill quantity differs from the durable intent.")
 
     filled_at = datetime.now(timezone.utc)
     paper_trade_id = f"paper:entry:{order_intent_id}"
@@ -445,7 +650,9 @@ async def complete_paper_entry_fill(
                 filled_at,
                 quantity,
                 price,
-                broker_payload
+                broker_payload,
+                proposal_id,
+                entry_leg_id
             )
             VALUES (
                 :id,
@@ -454,7 +661,9 @@ async def complete_paper_entry_fill(
                 :filled_at,
                 :quantity,
                 :price,
-                CAST(:broker_payload AS jsonb)
+                CAST(:broker_payload AS jsonb),
+                :proposal_id,
+                :entry_leg_id
             )
             ON CONFLICT (fyers_trade_id) DO NOTHING
             RETURNING id
@@ -470,6 +679,8 @@ async def complete_paper_entry_fill(
             "broker_payload": json.dumps(
                 {"source": "paper_entry_fill", "price": str(fill_price)}
             ),
+            "proposal_id": intent["proposal_id"],
+            "entry_leg_id": intent["entry_leg_id"],
         },
     )
     fill_row = fill_insert.mappings().one_or_none()
@@ -495,6 +706,28 @@ async def complete_paper_entry_fill(
         ),
         {"order_intent_id": order_intent_id, "filled_at": filled_at},
     )
+    previous_position = (
+        await db.execute(
+            text("SELECT state FROM positions WHERE id = :id FOR UPDATE"),
+            {"id": position_id},
+        )
+    ).mappings().one()
+    aggregate = (
+        await db.execute(
+            text(
+                """
+                SELECT SUM(f.quantity)::integer AS quantity,
+                       SUM(f.quantity * f.price) / SUM(f.quantity) AS average_price
+                FROM order_fills f
+                JOIN order_intents oi ON oi.id = f.order_intent_id
+                WHERE oi.position_id = :position_id AND oi.intent_type = 'entry'
+                """
+            ),
+            {"position_id": position_id},
+        )
+    ).mappings().one()
+    total_quantity = int(aggregate["quantity"])
+    staged = apportion_staged_exits(total_quantity)
     position_update = await db.execute(
         text(
             """
@@ -502,17 +735,25 @@ async def complete_paper_entry_fill(
             SET
                 state = 'open',
                 open_quantity = :quantity,
-                average_entry_price = :fill_price,
+                average_entry_price = :average_price,
+                t1_shares = :t1_shares,
+                t2_shares = :t2_shares,
+                t3_shares = :t3_shares,
+                runner_shares = :runner_shares,
                 opened_at = COALESCE(opened_at, :filled_at)
             WHERE id = :position_id
-              AND state = 'pending_entry'
+              AND state IN ('pending_entry', 'open', 'trailing_active')
             RETURNING id
             """
         ),
         {
             "position_id": position_id,
-            "quantity": quantity,
-            "fill_price": fill_price,
+            "quantity": total_quantity,
+            "average_price": aggregate["average_price"],
+            "t1_shares": staged.t1_shares,
+            "t2_shares": staged.t2_shares,
+            "t3_shares": staged.t3_shares,
+            "runner_shares": staged.runner_shares,
             "filled_at": filled_at,
         },
     )
@@ -537,7 +778,7 @@ async def complete_paper_entry_fill(
                 :position_id,
                 :event_ts,
                 'entry_filled',
-                'pending_entry',
+                :from_state,
                 'open',
                 'execution_engine',
                 :observed_price,
@@ -549,6 +790,7 @@ async def complete_paper_entry_fill(
             "position_id": position_id,
             "event_ts": filled_at,
             "observed_price": fill_price,
+            "from_state": previous_position["state"],
             "details": json.dumps(
                 {
                     "execution_mode": "paper",
@@ -558,11 +800,30 @@ async def complete_paper_entry_fill(
             ),
         },
     )
+    if intent["entry_leg_id"] is not None:
+        await db.execute(
+            text(
+                """
+                UPDATE entry_legs
+                SET status = 'filled', filled_shares = :quantity,
+                    filled_avg_price = :fill_price,
+                    first_filled_at = COALESCE(first_filled_at, :filled_at),
+                    updated_at = now()
+                WHERE id = :entry_leg_id
+                """
+            ),
+            {
+                "entry_leg_id": intent["entry_leg_id"],
+                "quantity": quantity,
+                "fill_price": fill_price,
+                "filled_at": filled_at,
+            },
+        )
     await _emit_system_event(
         db,
         severity="info",
         event_type="paper_entry_filled",
-        correlation_id=trade_instruction_id,
+        correlation_id=trade_instruction_id or intent["proposal_id"] or position_id,
         position_id=position_id,
         order_intent_id=order_intent_id,
         payload={
@@ -583,6 +844,9 @@ async def create_exit_intent(
     product_type: str,
     observed_price: Decimal,
     reason: str,
+    idempotency_suffix: str | None = None,
+    exit_purpose: str | None = None,
+    is_partial: bool = False,
 ) -> OrderIntentRef | None:
     """
     Persist a deterministic exit intent and move the position to exit_pending.
@@ -593,7 +857,8 @@ async def create_exit_intent(
     await ensure_orders_allowed(db)
 
     execution_mode = settings.execution_mode
-    idempotency_key = f"position:{position_id}:{intent_type}:v1"
+    suffix = idempotency_suffix or str(intent_type)
+    idempotency_key = f"position:{position_id}:{suffix}:v1"
     intent_id = uuid4()
 
     position_result = await db.execute(
@@ -603,10 +868,11 @@ async def create_exit_intent(
                 id,
                 state,
                 side,
-                open_quantity
+                open_quantity,
+                proposal_id
             FROM positions
-            WHERE id = :position_id
-            FOR UPDATE
+            WHERE positions.id = :position_id
+            FOR UPDATE OF positions
             """
         ),
         {"position_id": position_id},
@@ -614,7 +880,49 @@ async def create_exit_intent(
     position = position_result.mappings().one_or_none()
     if position is None:
         raise ExecutionSafetyError("Position was not found.")
-    if position["state"] in {"closed", "cancelled", "exit_pending"}:
+
+    prior_result = await db.execute(
+        text(
+            """
+            SELECT id, idempotency_key, execution_mode, status
+            FROM order_intents
+            WHERE idempotency_key = :idempotency_key
+            """
+        ),
+        {"idempotency_key": idempotency_key},
+    )
+    prior = prior_result.mappings().one_or_none()
+    if prior is not None and prior["status"] in {"cancelled", "rejected"}:
+        retry_number = int(
+            (
+                await db.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM order_intents
+                        WHERE position_id = :position_id
+                          AND idempotency_key LIKE :prefix
+                          AND status IN ('cancelled', 'rejected')
+                        """
+                    ),
+                    {
+                        "position_id": position_id,
+                        "prefix": f"position:{position_id}:{suffix}%",
+                    },
+                )
+            ).scalar_one()
+        )
+        idempotency_key = f"position:{position_id}:{suffix}:retry:{retry_number}:v1"
+        prior = None
+    if prior is not None:
+        return OrderIntentRef(
+            id=prior["id"],
+            idempotency_key=prior["idempotency_key"],
+            execution_mode=prior["execution_mode"],
+        )
+    if position["state"] in {"closed", "cancelled"} or (
+        position["state"] == "exit_pending" and not is_partial
+    ):
         existing = await db.execute(
             text(
                 """
@@ -639,17 +947,19 @@ async def create_exit_intent(
         return None
 
     from_state = position["state"]
-    await db.execute(
-        text(
-            """
-            UPDATE positions
-            SET state = 'exit_pending'
-            WHERE id = :position_id
-              AND state IN ('open', 'trailing_active')
-            """
-        ),
-        {"position_id": position_id},
-    )
+    to_state = from_state if is_partial else "exit_pending"
+    if not is_partial:
+        await db.execute(
+            text(
+                """
+                UPDATE positions
+                SET state = 'exit_pending'
+                WHERE id = :position_id
+                  AND state IN ('open', 'trailing_active')
+                """
+            ),
+            {"position_id": position_id},
+        )
 
     result = await db.execute(
         text(
@@ -666,7 +976,9 @@ async def create_exit_intent(
                 status,
                 execution_mode,
                 requested_by_component,
-                reason
+                reason,
+                exit_purpose,
+                proposal_id
             )
             VALUES (
                 :id,
@@ -680,7 +992,9 @@ async def create_exit_intent(
                 'created',
                 :execution_mode,
                 'execution_engine',
-                :reason
+                :reason,
+                :exit_purpose,
+                :proposal_id
             )
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING id, idempotency_key, execution_mode
@@ -696,6 +1010,8 @@ async def create_exit_intent(
             "product_type": product_type,
             "execution_mode": execution_mode,
             "reason": reason,
+            "exit_purpose": exit_purpose,
+            "proposal_id": position["proposal_id"],
         },
     )
     created = result.mappings().one_or_none()
@@ -733,7 +1049,7 @@ async def create_exit_intent(
                 :position_id,
                 :event_type,
                 :from_state,
-                'exit_pending',
+                :to_state,
                 'position_monitor',
                 :observed_price,
                 CAST(:details AS jsonb)
@@ -744,12 +1060,15 @@ async def create_exit_intent(
             "position_id": position_id,
             "event_type": f"{intent_type}_triggered",
             "from_state": from_state,
+            "to_state": to_state,
             "observed_price": observed_price,
             "details": json.dumps(
                 {
                     "intent_type": intent_type,
                     "order_intent_id": str(created["id"]),
                     "execution_mode": execution_mode,
+                    "exit_purpose": exit_purpose,
+                    "partial": is_partial,
                 }
             ),
         },
@@ -777,7 +1096,7 @@ async def complete_paper_exit(
     intent_result = await db.execute(
         text(
             """
-            SELECT id, status, quantity, intent_type
+            SELECT id, status, quantity, intent_type, exit_purpose
             FROM order_intents
             WHERE id = :order_intent_id
               AND position_id = :position_id
@@ -785,7 +1104,9 @@ async def complete_paper_exit(
                     'stop_loss_exit',
                     'target_exit',
                     'trailing_exit',
-                    'manual_exit'
+                    'manual_exit',
+                    'risk_reduction_exit',
+                    'invalid_fill_exit'
               )
               AND execution_mode = 'paper'
             FOR UPDATE
@@ -814,10 +1135,29 @@ async def complete_paper_exit(
                 side,
                 open_quantity,
                 average_entry_price,
-                realized_pnl
+                realized_pnl,
+                current_stop_loss,
+                trailing_rule_type,
+                trailing_rule,
+                high_water_mark,
+                trailing_stop,
+                t1_target,
+                t2_target,
+                t3_target,
+                t1_shares,
+                t2_shares,
+                t3_shares,
+                runner_shares,
+                t1_filled_shares,
+                t2_filled_shares,
+                t3_filled_shares,
+                runner_filled_shares,
+                i.tick_size,
+                i.fyers_symbol AS symbol
             FROM positions
-            WHERE id = :position_id
-            FOR UPDATE
+            JOIN instruments i ON i.id = positions.instrument_id
+            WHERE positions.id = :position_id
+            FOR UPDATE OF positions
             """
         ),
         {"position_id": position_id},
@@ -831,7 +1171,9 @@ async def complete_paper_exit(
         )
 
     filled_at = datetime.now(timezone.utc)
-    quantity = int(intent["quantity"])
+    quantity = min(int(intent["quantity"]), int(position["open_quantity"]))
+    if quantity <= 0:
+        raise ExecutionSafetyError("Paper exit has no remaining position quantity.")
     pnl_delta = realized_pnl_on_exit(
         side=position["side"],
         average_entry_price=Decimal(position["average_entry_price"]),
@@ -905,23 +1247,104 @@ async def complete_paper_exit(
         {"order_intent_id": order_intent_id, "filled_at": filled_at},
     )
     previous_state = position["state"]
+    remaining_open = max(int(position["open_quantity"]) - quantity, 0)
+    t1_delta = t2_delta = t3_delta = 0
+    new_stop = Decimal(position["current_stop_loss"])
+    new_hwm = (
+        Decimal(position["high_water_mark"])
+        if position["high_water_mark"] is not None
+        else None
+    )
+    new_trailing_stop = (
+        Decimal(position["trailing_stop"])
+        if position["trailing_stop"] is not None
+        else None
+    )
+    new_state = "closed" if remaining_open == 0 else previous_state
+    if (
+        intent["intent_type"] == "target_exit"
+        and position["trailing_rule_type"] == "p10_staged_atr"
+    ):
+        rule = dict(position["trailing_rule"] or {})
+        atr14 = Decimal(str(rule.get("atr14", "0")))
+        staged = StagedPositionState(
+            id=position_id,
+            symbol=position["symbol"],
+            side=position["side"],
+            state=position["state"],
+            open_quantity=int(position["open_quantity"]),
+            weighted_entry_price=Decimal(position["average_entry_price"]),
+            current_stop=new_stop,
+            t1_target=Decimal(position["t1_target"]) if position["t1_target"] is not None else None,
+            t2_target=Decimal(position["t2_target"]) if position["t2_target"] is not None else None,
+            t3_target=Decimal(position["t3_target"]) if position["t3_target"] is not None else None,
+            t1_shares=int(position["t1_shares"]),
+            t2_shares=int(position["t2_shares"]),
+            t3_shares=int(position["t3_shares"]),
+            runner_shares=int(position["runner_shares"]),
+            t1_filled_shares=int(position["t1_filled_shares"]),
+            t2_filled_shares=int(position["t2_filled_shares"]),
+            t3_filled_shares=int(position["t3_filled_shares"]),
+            runner_filled_shares=int(position["runner_filled_shares"]),
+            high_water_mark=new_hwm,
+            trailing_stop=new_trailing_stop,
+            atr14=atr14,
+            tick_size=Decimal(position["tick_size"]),
+        )
+        allocation = allocate_cumulative_target_fill(
+            staged,
+            exit_purpose=str(intent["exit_purpose"]),
+            fill_quantity=quantity,
+        )
+        t1_delta, t2_delta, t3_delta = allocation.t1, allocation.t2, allocation.t3
+        t1_complete = staged.t1_filled_shares + t1_delta >= staged.t1_shares > 0
+        t2_complete = staged.t2_filled_shares + t2_delta >= staged.t2_shares > 0
+        if t1_complete:
+            new_stop = max(new_stop, staged.weighted_entry_price)
+        if t2_complete and remaining_open > 0:
+            if atr14 <= 0:
+                raise ExecutionSafetyError("P10 T2 fill cannot activate a non-positive ATR trail.")
+            new_state = "trailing_active"
+            new_hwm = max(new_hwm or exit_price, exit_price)
+            candidate = floor_to_tick(
+                new_hwm - (Decimal("2") * atr14),
+                staged.tick_size,
+            )
+            new_trailing_stop = max(new_stop, new_trailing_stop or Decimal("0"), candidate)
     await db.execute(
         text(
             """
             UPDATE positions
             SET
-                state = 'closed',
-                open_quantity = 0,
+                state = :new_state,
+                open_quantity = :open_quantity,
                 realized_pnl = realized_pnl + :pnl_delta,
-                closed_at = COALESCE(closed_at, :filled_at)
+                current_stop_loss = :current_stop_loss,
+                high_water_mark = :high_water_mark,
+                trailing_stop = :trailing_stop,
+                t1_filled_shares = t1_filled_shares + :t1_delta,
+                t2_filled_shares = t2_filled_shares + :t2_delta,
+                t3_filled_shares = t3_filled_shares + :t3_delta,
+                closed_at = CASE
+                    WHEN :new_state = 'closed' THEN COALESCE(closed_at, :filled_at)
+                    ELSE closed_at
+                END
             WHERE id = :position_id
               AND state IN ('open', 'trailing_active', 'exit_pending')
             """
         ),
         {
             "position_id": position_id,
+            "new_state": new_state,
+            "open_quantity": remaining_open,
             "pnl_delta": pnl_delta,
             "filled_at": filled_at,
+            "current_stop_loss": new_stop,
+            "high_water_mark": new_hwm,
+            "trailing_stop": new_trailing_stop,
+            "t1_delta": t1_delta,
+            "t2_delta": t2_delta,
+            "t3_delta": t3_delta,
         },
     )
     await db.execute(
@@ -942,7 +1365,7 @@ async def complete_paper_exit(
                 :event_ts,
                 :event_type,
                 :from_state,
-                'closed',
+                :to_state,
                 'execution_engine',
                 :observed_price,
                 CAST(:details AS jsonb)
@@ -954,12 +1377,20 @@ async def complete_paper_exit(
             "event_ts": filled_at,
             "event_type": f"{intent['intent_type']}_filled",
             "from_state": previous_state,
+            "to_state": new_state,
             "observed_price": exit_price,
             "details": json.dumps(
                 {
                     "execution_mode": "paper",
                     "realized_pnl_delta": str(pnl_delta),
                     "fill_quantity": quantity,
+                    "remaining_open_quantity": remaining_open,
+                    "exit_purpose": intent["exit_purpose"],
+                    "target_fill_allocation": {
+                        "t1": t1_delta,
+                        "t2": t2_delta,
+                        "t3": t3_delta,
+                    },
                 }
             ),
         },
@@ -1357,7 +1788,7 @@ async def submit_live_entry_intent(
         db,
         severity="info",
         event_type="live_entry_submitted",
-        correlation_id=snapshot["trade_instruction_id"],
+        correlation_id=snapshot["trade_instruction_id"] or snapshot["proposal_id"],
         position_id=snapshot["position_id"],
         order_intent_id=order_intent_id,
         payload={"fyers_async_id": acceptance.fyers_async_id},
@@ -1381,6 +1812,8 @@ async def _load_live_intent_for_submission(
                 oi.id,
                 oi.idempotency_key,
                 oi.trade_instruction_id,
+                oi.proposal_id,
+                oi.entry_leg_id,
                 oi.position_id,
                 oi.intent_type,
                 oi.side,
@@ -1393,6 +1826,15 @@ async def _load_live_intent_for_submission(
                 oi.execution_mode,
                 i.fyers_symbol AS symbol,
                 ti.manual_confirmed_at,
+                tp.status AS proposal_status,
+                tp.proposal_hash,
+                tp.live_eligible,
+                tp.entry_session_date,
+                pd.expected_proposal_hash,
+                    el.status AS entry_leg_status,
+                    el.leg_index AS entry_leg_index,
+                    el.eligible_session_start,
+                    el.eligible_session_end,
                 p.state AS position_state,
                 p.open_quantity,
                 p.side AS position_side
@@ -1400,6 +1842,10 @@ async def _load_live_intent_for_submission(
             JOIN positions p ON p.id = oi.position_id
             JOIN instruments i ON i.id = p.instrument_id
             LEFT JOIN trade_instructions ti ON ti.id = oi.trade_instruction_id
+            LEFT JOIN trade_proposals tp ON tp.id = oi.proposal_id
+            LEFT JOIN proposal_decisions pd ON pd.proposal_id = tp.id
+                                             AND pd.decision = 'approved'
+            LEFT JOIN entry_legs el ON el.id = oi.entry_leg_id
             WHERE oi.id = :order_intent_id
             """
         ),
@@ -1416,10 +1862,33 @@ async def _load_live_intent_for_submission(
 
     intent_type = snapshot["intent_type"]
     if intent_type == "entry":
-        if snapshot["manual_confirmed_at"] is None:
+        manual_approved = snapshot["manual_confirmed_at"] is not None
+        proposal_approved = (
+            snapshot.get("proposal_id") is not None
+            and snapshot.get("proposal_status") == "approved"
+            and snapshot.get("live_eligible") is True
+            and snapshot.get("expected_proposal_hash") == snapshot.get("proposal_hash")
+            and snapshot.get("entry_leg_status")
+            in {"intent_created", "submitted", "partially_filled"}
+        )
+        if not manual_approved and not proposal_approved:
             raise ExecutionSafetyError(
-                "Live entry requires an explicitly confirmed trade instruction."
+                "Live entry requires an exact approved proposal or confirmed manual instruction."
             )
+        if proposal_approved:
+            today_ist = datetime.now(timezone.utc).astimezone(
+                ZoneInfo("Asia/Kolkata")
+            ).date()
+            if int(snapshot.get("entry_leg_index") or 0) == 1:
+                if snapshot["entry_session_date"] != today_ist:
+                    raise ExecutionSafetyError("Approved initial proposal entry is outside D1.")
+            elif not (
+                snapshot.get("eligible_session_start")
+                and snapshot.get("eligible_session_end")
+                and snapshot["eligible_session_start"] <= today_ist
+                <= snapshot["eligible_session_end"]
+            ):
+                raise ExecutionSafetyError("Approved add leg is outside its eligibility window.")
         if snapshot["side"] != "buy":
             raise ExecutionSafetyError(
                 "P4 live CNC entry supports buy orders only. CNC short entry is "
@@ -1430,6 +1899,8 @@ async def _load_live_intent_for_submission(
         "target_exit",
         "trailing_exit",
         "manual_exit",
+        "risk_reduction_exit",
+        "invalid_fill_exit",
     }:
         if snapshot["order_type"] != "market":
             raise ExecutionSafetyError("P5 live exits require market orders.")
@@ -1469,7 +1940,16 @@ def _build_fyers_order_payload(intent: dict[str, Any]) -> dict[str, Any]:
             if intent["trigger_price"] is not None
             else 0
         ),
-        "validity": "DAY",
+        # P10 market/MPP orders may not leave a live remainder that races a
+        # correction or later signal. IOC preserves actual partial fills and
+        # lets the order gateway terminalize the unfilled balance.
+        "validity": (
+            "IOC"
+            if intent.get("proposal_id") is not None
+            and intent["intent_type"] == "entry"
+            and intent["order_type"] == "market"
+            else "DAY"
+        ),
         "disclosedQty": 0,
         "offlineOrder": False,
         "isSliceOrder": False,

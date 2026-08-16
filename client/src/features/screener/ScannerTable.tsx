@@ -1,4 +1,5 @@
 import {
+  FlaskConical,
   LineChart,
   Play,
   XCircle,
@@ -22,6 +23,7 @@ import type {
   ScanRun,
   TechnicalScoreGrade,
 } from "@/features/screener/api"
+import { VcpVisionStatusBadge } from "@/features/screener/VcpVisionSheet"
 import { cn } from "@/lib/utils"
 
 interface ScannerTableProps {
@@ -39,6 +41,7 @@ interface ScannerTableProps {
   onSelectRun: (runId: string) => void
   onSelectResult: (result: ScanResult) => void
   onPlanTrade?: (result: ScanResult) => void
+  onAnalyzeVcp?: (result: ScanResult) => void
   onRunScan: () => void
   onRetry: () => void
 }
@@ -77,6 +80,7 @@ export function ScannerTable({
   onSelectRun,
   onSelectResult,
   onPlanTrade,
+  onAnalyzeVcp,
   onRunScan,
   onRetry,
 }: ScannerTableProps) {
@@ -206,7 +210,8 @@ export function ScannerTable({
                 <th className="px-3 py-1.5 text-center">RS</th>
                 <th className="px-3 py-1.5 text-center">Setup</th>
                 <th className="px-3 py-1.5 text-center">Funda</th>
-                <th className="w-28 px-3 py-1.5 text-center">Action</th>
+                <th className="px-3 py-1.5 text-center">Vision</th>
+                <th className="w-36 px-3 py-1.5 text-center">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -264,6 +269,13 @@ export function ScannerTable({
                       </Badge>
                     </td>
                     <td className="px-3 py-2 text-center">
+                      <VcpVisionStatusBadge
+                        aiVerdict={row.vcp_vision?.ai_verdict ?? null}
+                        compact
+                        status={row.vcp_vision?.status ?? null}
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-center">
                       <div className="flex items-center justify-center gap-1">
                         <Button
                           onClick={(event) => {
@@ -276,6 +288,19 @@ export function ScannerTable({
                           variant="ghost"
                         >
                           <LineChart data-icon="inline-start" />
+                        </Button>
+                        <Button
+                          disabled={!onAnalyzeVcp}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onAnalyzeVcp?.(row)
+                          }}
+                          size="icon-sm"
+                          title={row.vcp_vision ? "Review VCP vision analysis" : "Analyze VCP with vision"}
+                          type="button"
+                          variant={row.vcp_vision ? "secondary" : "ghost"}
+                        >
+                          <FlaskConical data-icon="inline-start" />
                         </Button>
                         <Button
                           onClick={(event) => {

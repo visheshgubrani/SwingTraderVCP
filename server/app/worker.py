@@ -13,6 +13,8 @@ from app.services.reconciliation import run_reconciliation
 from app.services.saas_scan import run_saas_global_standard_scan
 from app.services.screener import run_technical_scan
 from app.services.token_refresh import run_token_refresh
+from app.services.vcp_vision import run_vcp_vision_analysis
+from app.services.intraday_bar_reconciliation import reconcile_intraday_bars
 
 
 async def worker_on_startup(ctx: dict[str, Any]) -> None:
@@ -30,6 +32,8 @@ class WorkerSettings:
         run_journal_dispatcher,
         run_journal_ai_coach,
         run_saas_global_standard_scan,
+        run_vcp_vision_analysis,
+        reconcile_intraday_bars,
     ]
 
     # arq evaluates cron expressions in this explicit timezone.
@@ -89,6 +93,18 @@ class WorkerSettings:
                 minute={0, 15, 30, 45},
                 second=0,
                 timeout=120,
+                max_tries=1,
+            )
+        )
+        cron_jobs.append(
+            cron(
+                reconcile_intraday_bars,
+                name="fyers_intraday_bar_reconciliation",
+                weekday={0, 1, 2, 3, 4},
+                hour={9, 10, 11, 12, 13, 14, 15},
+                minute={0, 15, 30, 45},
+                second=20,
+                timeout=180,
                 max_tries=1,
             )
         )

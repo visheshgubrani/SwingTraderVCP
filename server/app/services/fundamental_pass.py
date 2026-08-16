@@ -29,7 +29,17 @@ from app.services.fundamental_llm import (
     OpenRouterFundamentalClient,
     PreparedFundamentalRequest,
 )
-from app.services.fundamental_rules import FACTS_SCHEMA_VERSION, RUBRIC_VERSION, score_minervini_inspired
+from app.services.fundamental_rules import (
+    FACTS_SCHEMA_VERSION,
+    RUBRIC_VERSION,
+    apply_filing_risk_adjustments,
+    score_minervini_inspired,
+)
+from app.services.nse_fundamental_risk import (
+    NseCorporateFilingsClient,
+    NseEnrichment,
+)
+from app.services.proposal_queue import enqueue_proposal_batch
 
 logger = logging.getLogger(__name__)
 GLOBAL_P7_LOCK = 7_000_007
@@ -43,6 +53,8 @@ class Survivor:
     isin: str | None
     symbol: str
     company_name: str | None
+    industry: str | None = None
+    as_of_date: datetime.date = datetime.date.min
     rank: int = 9999
 
 
@@ -56,10 +68,16 @@ class Snapshot:
     cache_hit: bool
 
 
-def p7_run_config(*, technical_rank_limit: int = 20) -> dict[str, Any]:
+def p7_run_config(
+    *,
+    technical_rank_limit: int = 20,
+    industry_cap: int = 4,
+) -> dict[str, Any]:
     return {
         "enabled": settings.p7_fundamental_pass_enabled,
         "fundamentals_provider": "upstox",
+        "risk_enrichment_provider": "nse_corporate_filings",
+        "risk_enrichment_enabled": settings.nse_fundamental_risk_enabled,
         "statement_type": "consolidated",
         "snapshot_ttl_hours": settings.fundamentals_snapshot_ttl_hours,
         "model_provider": "openrouter",
@@ -71,7 +89,11 @@ def p7_run_config(*, technical_rank_limit: int = 20) -> dict[str, Any]:
         "response_schema": "fundamental_second_opinion_v1",
         "rubric_version": RUBRIC_VERSION,
         "token_budget": settings.fundamental_run_token_budget,
-        "selection": {"source": "technical_score_rank", "rank_limit": technical_rank_limit},
+        "selection": {
+            "source": "industry_capped_technical_score_rank",
+            "rank_limit": technical_rank_limit,
+            "max_per_industry": industry_cap,
+        },
     }
 
 
@@ -81,14 +103,20 @@ async def _load_survivors(scan_run_id: str) -> list[Survivor]:
             text(
                 """
                 SELECT s.id AS result_id, s.scan_run_id, s.instrument_id, i.isin,
-                       i.symbol, i.name AS company_name, s.result_rank
+                       i.symbol, i.name AS company_name,
+                       i.metadata ->> 'industry' AS industry,
+                       r.as_of_date, s.result_rank,
+                       NULLIF(s.technical_metrics ->> 'fundamental_selection_rank', '')::int
+                           AS fundamental_selection_rank
                 FROM screening_results s
                 JOIN instruments i ON i.id = s.instrument_id
+                JOIN scan_runs r ON r.id = s.scan_run_id
                 WHERE s.scan_run_id = :scan_run_id
                   AND s.technical_passed = true
                   AND COALESCE((s.technical_metrics ->> 'fundamental_selected')::boolean, false) = true
                   AND s.llm_status IN ('queued', 'failed', 'skipped')
-                ORDER BY s.result_rank ASC NULLS LAST, s.created_at ASC
+                ORDER BY fundamental_selection_rank ASC NULLS LAST,
+                         s.result_rank ASC NULLS LAST, s.created_at ASC
                 LIMIT 20
                 """
             ),
@@ -102,7 +130,9 @@ async def _load_survivors(scan_run_id: str) -> list[Survivor]:
                 isin=row.isin,
                 symbol=row.symbol,
                 company_name=row.company_name,
-                rank=int(row.result_rank or 9999),
+                industry=row.industry,
+                as_of_date=row.as_of_date,
+                rank=int(row.fundamental_selection_rank or row.result_rank or 9999),
             )
             for row in result.all()
         ]
@@ -552,7 +582,8 @@ async def _update_fundamental_result(
             text("""UPDATE screening_results
                     SET fundamental_status = :fundamental_status, fundamental_verdict = NULL,
                         fundamental_scorecard = CAST(:scorecard AS jsonb),
-                        llm_flags = CAST(:flags AS jsonb),
+                        llm_flags = COALESCE(llm_flags, '{}'::jsonb)
+                            || CAST(:flags AS jsonb),
                         fundamental_snapshot_id = COALESCE(:snapshot_id, fundamental_snapshot_id)
                     WHERE id = :result_id"""),
             {
@@ -561,6 +592,118 @@ async def _update_fundamental_result(
                 "scorecard": json.dumps(scorecard),
                 "flags": json.dumps(flags, separators=(",", ":")),
                 "snapshot_id": snapshot.snapshot_id if snapshot else None,
+            },
+        )
+        if snapshot is not None:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO screening_result_fundamental_snapshots (
+                        screening_result_id, snapshot_id, role
+                    ) VALUES (:result_id, :snapshot_id, 'primary')
+                    ON CONFLICT DO NOTHING
+                    """
+                ),
+                {
+                    "result_id": survivor.result_id,
+                    "snapshot_id": snapshot.snapshot_id,
+                },
+            )
+        await db.commit()
+
+
+async def _store_nse_enrichment(
+    survivor: Survivor,
+    enrichment: NseEnrichment,
+) -> None:
+    """Persist official NSE snapshots and deterministic risk checks atomically."""
+    source_refs: list[dict[str, Any]] = []
+    async with async_session() as db:
+        for snapshot in enrichment.snapshots:
+            inserted = await db.execute(
+                text(
+                    """
+                    INSERT INTO fundamental_snapshots (
+                        instrument_id, provider, statement_type, fetched_at,
+                        latest_annual_period, latest_quarterly_period,
+                        raw_payload, normalized_facts, content_hash, source_url,
+                        filing_date, revision_date, reporting_period,
+                        taxonomy_version, parser_version, fetch_status,
+                        provider_metadata
+                    ) VALUES (
+                        :instrument_id, :provider, :statement_type, now(),
+                        NULL, NULL, CAST(:raw_payload AS jsonb),
+                        CAST(:normalized_facts AS jsonb), :content_hash,
+                        :source_url, :filing_date, :revision_date,
+                        :reporting_period, :taxonomy_version, :parser_version,
+                        :fetch_status, CAST(:provider_metadata AS jsonb)
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "instrument_id": survivor.instrument_id,
+                    "provider": snapshot.provider,
+                    "statement_type": snapshot.statement_type,
+                    "raw_payload": json.dumps(snapshot.raw_payload, separators=(",", ":")),
+                    "normalized_facts": json.dumps(snapshot.normalized_facts, separators=(",", ":")),
+                    "content_hash": snapshot.content_hash,
+                    "source_url": snapshot.source_url,
+                    "filing_date": snapshot.filing_date,
+                    "revision_date": snapshot.revision_date,
+                    "reporting_period": snapshot.reporting_period,
+                    "taxonomy_version": snapshot.taxonomy_version,
+                    "parser_version": "nse_fundamental_risk_v1",
+                    "fetch_status": snapshot.fetch_status,
+                    "provider_metadata": json.dumps(snapshot.provider_metadata, separators=(",", ":")),
+                },
+            )
+            snapshot_id = inserted.scalar_one()
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO screening_result_fundamental_snapshots (
+                        screening_result_id, snapshot_id, role
+                    ) VALUES (:result_id, :snapshot_id, :role)
+                    ON CONFLICT DO NOTHING
+                    """
+                ),
+                {
+                    "result_id": survivor.result_id,
+                    "snapshot_id": snapshot_id,
+                    "role": snapshot.role,
+                },
+            )
+            source_refs.append(
+                {
+                    "snapshot_id": str(snapshot_id),
+                    "provider": snapshot.provider,
+                    "role": snapshot.role,
+                    "reporting_period": snapshot.reporting_period.isoformat(),
+                    "source_url": snapshot.source_url,
+                    "taxonomy_version": snapshot.taxonomy_version,
+                    "parser_version": "nse_fundamental_risk_v1",
+                    "fetch_status": snapshot.fetch_status,
+                }
+            )
+        await db.execute(
+            text(
+                """
+                UPDATE screening_results
+                SET llm_flags = COALESCE(llm_flags, '{}'::jsonb)
+                    || CAST(:risk_payload AS jsonb)
+                WHERE id = :result_id
+                """
+            ),
+            {
+                "result_id": survivor.result_id,
+                "risk_payload": json.dumps(
+                    {
+                        "risk_checks": enrichment.risk_checks,
+                        "source_snapshots": source_refs,
+                        "nse_diagnostics": list(enrichment.diagnostics),
+                    },
+                    separators=(",", ":"),
+                ),
             },
         )
         await db.commit()
@@ -675,6 +818,7 @@ async def _process_survivor(
     analysis_run_id: UUID,
     survivor: Survivor,
     fundamentals_client: UpstoxFundamentalsClient,
+    nse_client: NseCorporateFilingsClient | None,
     llm_client: OpenRouterFundamentalClient,
     *,
     force_refresh: bool = False,
@@ -687,9 +831,29 @@ async def _process_survivor(
     await _set_fundamental_running(survivor)
     snapshot: Snapshot | None = None
     scorecard: dict[str, Any] | None = None
+    enrichment: NseEnrichment | None = None
+    if nse_client is not None:
+        try:
+            fetched_enrichment = await nse_client.fetch(
+                symbol=survivor.symbol,
+                as_of_date=survivor.as_of_date,
+                industry=survivor.industry,
+            )
+            await _store_nse_enrichment(survivor, fetched_enrichment)
+            enrichment = fetched_enrichment
+        except Exception as exc:  # NSE is strictly best-effort enrichment.
+            logger.warning(
+                "NSE risk enrichment failed for %s without affecting P7: %s",
+                survivor.symbol,
+                exc,
+            )
     try:
         snapshot = await _get_snapshot(survivor, fundamentals_client, force_refresh=force_refresh)
         scorecard = score_minervini_inspired(snapshot.facts)
+        scorecard = apply_filing_risk_adjustments(
+            scorecard,
+            enrichment.risk_checks if enrichment is not None else None,
+        )
         await _set_item(analysis_run_id, survivor, status="scoring", snapshot_id=snapshot.snapshot_id, provider_requests=0 if snapshot.cache_hit else 8)
         await _update_fundamental_result(
             survivor,
@@ -891,6 +1055,9 @@ def _empty_scorecard() -> dict[str, Any]:
     return {
         "rubric_version": RUBRIC_VERSION,
         "score": None,
+        "base_score": None,
+        "risk_score_impact": 0.0,
+        "risk_adjustments": [],
         "grade": "insufficient",
         "coverage_pct": 0.0,
         "earned_points": 0.0,
@@ -947,17 +1114,28 @@ async def run_fundamental_pass(
             )
             outcomes: list[str] = []
             async with UpstoxFundamentalsClient(analytics_token=settings.upstox_analytics_token, base_url=settings.upstox_fundamentals_base_url, timeout_seconds=settings.fundamentals_http_timeout_seconds, max_attempts=settings.fundamentals_http_max_attempts) as client:
-                for survivor in survivors:
-                    outcome = await _process_survivor(
-                        analysis_run_id,
-                        survivor,
-                        client,
-                        llm_client,
-                        force_refresh=mode == "refresh_stale",
-                    )
-                    outcomes.append(outcome)
-                    if outcome == "cancelled" or await _processing_paused():
-                        break
+                if settings.nse_fundamental_risk_enabled:
+                    async with NseCorporateFilingsClient(
+                        base_url=settings.nse_corporate_filings_base_url,
+                        timeout_seconds=settings.fundamentals_http_timeout_seconds,
+                    ) as nse_client:
+                        for survivor in survivors:
+                            outcome = await _process_survivor(
+                                analysis_run_id, survivor, client, nse_client,
+                                llm_client, force_refresh=mode == "refresh_stale",
+                            )
+                            outcomes.append(outcome)
+                            if outcome == "cancelled" or await _processing_paused():
+                                break
+                else:
+                    for survivor in survivors:
+                        outcome = await _process_survivor(
+                            analysis_run_id, survivor, client, None,
+                            llm_client, force_refresh=mode == "refresh_stale",
+                        )
+                        outcomes.append(outcome)
+                        if outcome == "cancelled" or await _processing_paused():
+                            break
             final_status = "cancelled" if await _processing_paused() else ("partial" if any(item not in {"succeeded", "cached", "rules_only"} for item in outcomes) else "succeeded")
             if final_status == "cancelled":
                 await _finish_unprocessed_results(
@@ -979,4 +1157,12 @@ async def run_fundamental_pass(
             await _set_run(analysis_run_id, status="failed", completed=True, error=str(exc)[:500])
             return {"status": "failed", "scan_run_id": scan_run_id, "error": str(exc)[:500]}
         finally:
+            if settings.proposal_automation_enabled and ctx.get("redis") is not None:
+                try:
+                    await enqueue_proposal_batch(ctx["redis"], str(scan_run_id))
+                except Exception:
+                    logger.exception(
+                        "Could not enqueue P10 proposal batch after P7 for scan %s",
+                        scan_run_id,
+                    )
             await lock_db.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": GLOBAL_P7_LOCK})

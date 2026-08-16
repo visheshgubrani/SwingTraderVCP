@@ -88,7 +88,7 @@ async def _load_universe_and_candles(window_start: dt.date):
             await session.execute(
                 text(
                     """
-                    SELECT c.candle_start, c.close_price
+                    SELECT c.candle_start, c.high_price, c.low_price, c.close_price
                     FROM market_candles c
                     JOIN instruments i ON i.id = c.instrument_id
                     WHERE i.fyers_symbol = 'NSE:NIFTY500-INDEX'
@@ -134,8 +134,28 @@ def _as_trading_date(value) -> dt.date:
 
 
 def _truncate_to_date(df: pd.DataFrame, as_of: dt.date) -> pd.DataFrame:
-    mask = [_as_trading_date(value) <= as_of for value in df["date"]]
+    dates = pd.to_datetime(df["date"], utc=True).dt.tz_convert("Asia/Kolkata").dt.date
+    mask = dates <= as_of
     return df.loc[mask].reset_index(drop=True)
+
+
+def _indicator_cache_key(config: TechnicalScreeningConfig, instrument_id: Any) -> tuple[Any, ...]:
+    """Only indicator-window inputs belong here; score weights do not."""
+    return (
+        instrument_id,
+        config.atr_short_days,
+        config.atr_long_days,
+        config.atr_low_lookback_days,
+        config.bb_window_days,
+        config.bb_std_deviations,
+        config.bb_percentile_lookback_days,
+        config.bb_reference_percentile,
+        config.volume_short_days,
+        config.volume_long_days,
+        config.up_down_volume_lookback_days,
+        config.pocket_pivot_lookback_days,
+        config.pocket_pivot_max_extension_pct,
+    )
 
 
 def _score_universe(
@@ -145,19 +165,27 @@ def _score_universe(
     index_rows,
     as_of: dt.date,
     config: TechnicalScreeningConfig,
+    indicator_cache: dict[tuple[Any, ...], pd.DataFrame] | None = None,
 ) -> list[dict[str, Any]]:
     prepared = []
     for inst in instruments:
         candles_list = candles_by_inst.get(inst.id) or []
         if not candles_list:
             continue
-        df = _truncate_to_date(_frame_from_candles(candles_list), as_of)
-        if len(df) < config.minimum_history_days:
-            continue
-        if _as_trading_date(df.iloc[-1]["date"]) != as_of:
-            continue
         try:
-            df_ind = compute_technical_indicators(df, config)
+            cache_key = _indicator_cache_key(config, inst.id)
+            if indicator_cache is not None and cache_key in indicator_cache:
+                full_indicators = indicator_cache[cache_key]
+            else:
+                full_frame = _frame_from_candles(candles_list)
+                full_indicators = compute_technical_indicators(full_frame, config)
+                if indicator_cache is not None:
+                    indicator_cache[cache_key] = full_indicators
+            df_ind = _truncate_to_date(full_indicators, as_of)
+            if len(df_ind) < config.minimum_history_days:
+                continue
+            if _as_trading_date(df_ind.iloc[-1]["date"]) != as_of:
+                continue
             perf = compute_weighted_performance_score(df_ind)
             prepared.append(
                 {

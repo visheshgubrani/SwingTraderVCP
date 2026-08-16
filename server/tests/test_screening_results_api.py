@@ -77,6 +77,12 @@ def result_row(*, legacy: bool = False) -> SimpleNamespace:
         name="Example Limited",
         fyers_symbol="NSE:EXAMPLE-EQ",
         created_at=now,
+        vcp_vision_id=None,
+        vcp_vision_status=None,
+        vcp_vision_ai_verdict=None,
+        vcp_vision_human_verdict=None,
+        vcp_vision_created_at=None,
+        vcp_vision_error_code=None,
     )
 
 
@@ -130,6 +136,27 @@ class ScreeningResultsApiTests(unittest.IsolatedAsyncioTestCase):
 
         statement = str(db.execute.await_args.args[0])
         self.assertIn("WHERE r.visibility = 'personal'", statement)
+        # Historical manual_shadow rows are always hidden defensively.
+        self.assertIn("r.triggered_by <> 'manual_shadow'", statement)
+        self.assertEqual(len(db.execute.await_args.args), 1)
+
+    async def test_vcp_vision_summary_is_embedded(self) -> None:
+        row = result_row()
+        row.vcp_vision_id = uuid4()
+        row.vcp_vision_status = "succeeded"
+        row.vcp_vision_ai_verdict = "valid"
+        row.vcp_vision_human_verdict = None
+        row.vcp_vision_created_at = datetime.datetime.now(
+            datetime.timezone.utc
+        )
+        row.vcp_vision_error_code = None
+
+        response = await self.load(row)
+
+        self.assertIsNotNone(response.vcp_vision)
+        self.assertEqual(response.vcp_vision.id, row.vcp_vision_id)
+        self.assertEqual(response.vcp_vision.status, "succeeded")
+        self.assertEqual(response.vcp_vision.ai_verdict, "valid")
 
 
 if __name__ == "__main__":

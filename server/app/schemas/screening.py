@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.vcp_vision import VcpVisionSummary
+
 
 class FundamentalErrorResponse(BaseModel):
     type: str | None = None
@@ -48,6 +50,9 @@ class FundamentalComponentResponse(BaseModel):
 class FundamentalAssessmentResponse(BaseModel):
     rubric_version: str
     score: float | None = None
+    base_score: float | None = None
+    risk_score_impact: float = 0
+    risk_adjustments: list[dict[str, Any]] = Field(default_factory=list)
     grade: Literal["A", "B", "C", "D", "insufficient"]
     coverage_pct: float
     earned_points: float = 0
@@ -117,6 +122,8 @@ class FundamentalDetailResponse(BaseModel):
     fundamental: FundamentalSourceResponse
     ai_opinion: FundamentalAIOpinionResponse
     snapshot: FundamentalSnapshotResponse | None = None
+    risk_checks: dict[str, Any] = Field(default_factory=dict)
+    source_snapshots: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class FundamentalTraceSourceResponse(BaseModel):
@@ -236,6 +243,7 @@ class ScanResultResponse(BaseModel):
     technical_score: float | None = None
     score_grade: Literal["A", "B", "C", "D"] | None = None
     score_components: dict[str, Any] = Field(default_factory=dict)
+    score_version: str | None = None
     eligibility: dict[str, bool] = Field(default_factory=dict)
     core_checks: dict[str, bool] = Field(default_factory=dict)
     close_price: float
@@ -271,6 +279,12 @@ class ScanResultResponse(BaseModel):
     rs_benchmark_source: str | None = None
     criteria_matches: dict[str, bool] = Field(default_factory=dict)
     fundamental_selected: bool
+    fundamental_selection_rank: int | None = None
+    industry: str | None = None
+    industry_key: str | None = None
+    fundamental_cap_exclusion_reason: str | None = None
+    risk_checks: dict[str, Any] = Field(default_factory=dict)
+    source_snapshots: list[dict[str, Any]] = Field(default_factory=list)
     llm_status: Literal[
         "not_requested",
         "queued",
@@ -295,3 +309,10 @@ class ScanResultResponse(BaseModel):
         "rejected",
         "trade_planned",
     ]
+    vcp_vision: VcpVisionSummary | None = None
+
+
+class ScannerDiagnosticsResponse(BaseModel):
+    scan_run_id: uuid.UUID
+    score_version: str | None = None
+    diagnostics: dict[str, Any]

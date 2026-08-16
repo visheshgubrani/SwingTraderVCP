@@ -10,6 +10,7 @@ import {
   useTriggerSync,
 } from "@/features/historical/api"
 import {
+  latestActiveScanRun,
   screeningKeys,
   useScanRuns,
   useTriggerScan,
@@ -220,9 +221,10 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
       return
     }
 
-    const activeRun = scanRuns.data?.find(
-      (run) => run.status === "queued" || run.status === "running",
-    )
+    // Runs are newest-first. Only the newest production run can represent
+    // work that should be recovered; older queued rows are superseded and may
+    // be orphaned legacy jobs.
+    const activeRun = latestActiveScanRun(scanRuns.data)
     if (!activeRun) return
     setState({
       phase: activeRun.status === "running" ? "scanning" : "queued",

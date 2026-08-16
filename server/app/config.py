@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     p7_fundamental_pass_enabled: bool = False
     upstox_analytics_token: str = ""
     upstox_fundamentals_base_url: str = "https://api.upstox.com/v2"
+    nse_fundamental_risk_enabled: bool = True
+    nse_corporate_filings_base_url: str = "https://www.nseindia.com"
     openrouter_api_key: str = ""
     openrouter_api_url: str = "https://openrouter.ai/api/v1/chat/completions"
     # These stay runtime-configurable through server/.env. The defaults are
@@ -121,6 +123,48 @@ class Settings(BaseSettings):
     # this opt-in for model overrides that do support it.
     openrouter_temperature: float | None = Field(default=None, ge=0, le=1)
 
+    # On-demand VCP vision validator: advisory chart-image second opinion,
+    # disabled by default. Enabling requires the OpenRouter key above; the
+    # model is independently configurable and must support image input plus
+    # strict structured output.
+    vcp_vision_enabled: bool = False
+    vcp_vision_model: str = "google/gemini-3.6-flash"
+    vcp_vision_reasoning_effort: Literal[
+        "low", "medium", "high", "xhigh"
+    ] = "medium"
+    vcp_vision_prompt_version: Literal["vcp_visual_validator_v1"] = (
+        "vcp_visual_validator_v1"
+    )
+    vcp_vision_schema_version: Literal["vcp_visual_validator_result_v1"] = (
+        "vcp_visual_validator_result_v1"
+    )
+    vcp_vision_renderer_version: Literal[
+        "lightweight_charts_v5_log_1280x720_v1"
+    ] = "lightweight_charts_v5_log_1280x720_v1"
+    vcp_vision_context_sessions: int = Field(default=252, ge=126, le=504)
+    vcp_vision_detail_sessions: int = Field(default=126, ge=63, le=252)
+    vcp_vision_max_image_bytes: int = Field(
+        default=3 * 1024 * 1024,
+        ge=1024,
+        le=8 * 1024 * 1024,
+    )
+    # Gemini 3 thinking tokens count against OpenRouter's completion budget
+    # (medium effort routinely uses ~4k reasoning tokens). The cap must leave
+    # room for the strict JSON verdict after thinking finishes; 4096 was too
+    # tight and truncated the structured response with finish_reason=length.
+    vcp_vision_max_tokens: int = Field(default=16384, ge=512, le=32768)
+
+    # P10 proposal worker. It deliberately reuses the locked VCP vision model
+    # setting but owns a separate serial queue and operational budget.
+    proposal_automation_enabled: bool = False
+    proposal_queue_name: str = "arq:queue:p10-proposals"
+    proposal_batch_budget_minutes: int = Field(default=45, ge=5, le=120)
+    proposal_attempt_timeout_seconds: float = Field(default=90.0, ge=10, le=120)
+    proposal_max_attempts: int = Field(default=2, ge=1, le=2)
+    # Populate exchange holidays as JSON in the environment, for example
+    # ["2026-01-26","2026-03-03"]. Weekends are always excluded.
+    nse_trading_holidays: list[str] = Field(default_factory=list)
+
     @field_validator("database_url", mode="before")
     @classmethod
     def convert_postgres_scheme(cls, v: str) -> str:
@@ -130,6 +174,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def assemble_database_url_from_parts(self) -> Self:
+        if self.vcp_vision_detail_sessions > self.vcp_vision_context_sessions:
+            raise ValueError(
+                "VCP_VISION_DETAIL_SESSIONS cannot exceed "
+                "VCP_VISION_CONTEXT_SESSIONS"
+            )
         if self.postgres_host:
             if self.postgres_password is None:
                 raise ValueError(

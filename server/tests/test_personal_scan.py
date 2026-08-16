@@ -167,6 +167,32 @@ class PersonalScanTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.reused)
         self.assertEqual(redis.accepted_jobs, 0)
 
+    async def test_explicit_as_of_date_does_not_resolve_latest_date(self):
+        database = FakeDatabase()
+        redis = FakeRedis()
+        replay_date = datetime.date(2026, 7, 31)
+
+        with (
+            patch("app.services.personal_scan.async_session", database.session),
+            patch("app.services.personal_scan._job_status", fake_job_status),
+            patch(
+                "app.services.personal_scan.resolve_reference_eod_date",
+                side_effect=AssertionError("latest date should not be resolved"),
+            ),
+        ):
+            result = await ensure_personal_scan(
+                redis,
+                config=TechnicalScreeningConfig.for_version("vcp_score_v3").model_copy(
+                    update={"fundamental_limit": 0}
+                ),
+                triggered_by="manual",
+                as_of_date=replay_date,
+            )
+
+        self.assertEqual(result.as_of_date, replay_date)
+        self.assertEqual(database.rows[0].as_of_date, replay_date)
+        self.assertEqual(redis.accepted_jobs, 1)
+
     async def test_duplicate_worker_delivery_is_a_no_op(self):
         class UnclaimedSession:
             calls = 0

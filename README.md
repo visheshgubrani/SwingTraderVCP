@@ -217,6 +217,7 @@ LIVE_ORDER_PLACEMENT_ENABLED=false
 
 P7_FUNDAMENTAL_PASS_ENABLED=false
 UPSTOX_ANALYTICS_TOKEN=
+NSE_FUNDAMENTAL_RISK_ENABLED=true
 OPENROUTER_API_KEY=
 OPENROUTER_MODEL=openai/gpt-5.6-luna-pro
 OPENROUTER_REASONING_EFFORT=medium
@@ -293,6 +294,14 @@ uv run python -m app.workers.tick_worker
 # Software SL/target/trailing enforcement
 cd server
 uv run python -m app.workers.position_monitor
+
+# Serial P10 chart/Gemini proposal queue
+cd server
+uv run python -m app.workers.proposal_worker
+
+# Approved-proposal 5-minute triggers, adds, allocation, and correction
+cd server
+uv run python -m app.workers.entry_supervisor
 
 # Live mode only: Fyers order WebSocket -> order/fill ledger
 cd server

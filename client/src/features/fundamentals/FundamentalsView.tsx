@@ -323,6 +323,18 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
   const assessment = detail.fundamental.assessment
   const facts = detail.snapshot?.normalized_facts
   const holdings = Object.entries(facts?.histories?.shareholding ?? {})
+  const pledgeRisk = detail.risk_checks.promoter_pledge
+  const leverageRisk = detail.risk_checks.leverage
+  const filingScoreImpact = assessment?.risk_score_impact ?? 0
+
+  const riskLabel = (status?: string) =>
+    status === "not_applicable" ? "Not applicable" : prettyKey(status ?? "unknown")
+
+  const riskBadgeVariant = (status?: string) =>
+    status === "red" || status === "severe" ? "destructive" as const : "outline" as const
+
+  const riskAlertVariant = (status?: string) =>
+    status === "red" || status === "severe" ? "destructive" as const : "default" as const
 
   const verdictMeta = {
     pass: {
@@ -362,7 +374,7 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
                 <Badge className={verdictMeta.badgeClass}>{verdictMeta.label}</Badge>
                 {assessment && (
                   <Badge className={cn(assessment.grade === "A" ? "bg-emerald-700 text-white" : assessment.grade === "B" ? "bg-blue-700 text-white" : "bg-muted text-muted-foreground")}>
-                    Python Grade {assessment.grade} ({assessment.score?.toFixed(0)}/100)
+                    Python Grade {assessment.grade} ({scoreLabel(assessment)})
                   </Badge>
                 )}
               </div>
@@ -386,6 +398,56 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
             {detail.ai_opinion.summary ??
               "Deterministic Python fit score is available. Independent AI qualitative summary is currently pending or skipped."}
           </p>
+        </div>
+      </section>
+
+      {/* Deterministic India-specific filing checks adjust only the fundamental fit. */}
+      <section className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Filing risk checks
+            </p>
+            <p className="text-sm text-muted-foreground">
+              Official NSE filings · fundamental score impact {filingScoreImpact.toFixed(0)} · never auto-rejects
+            </p>
+          </div>
+          <Badge variant="secondary">{detail.source_snapshots.length} source snapshots</Badge>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <Alert variant={riskAlertVariant(pledgeRisk?.status)}>
+            <ShieldAlertIcon />
+            <AlertTitle className="flex items-center justify-between gap-2">
+              <span>Promoter pledge</span>
+              <Badge variant={riskBadgeVariant(pledgeRisk?.status)}>
+                {riskLabel(pledgeRisk?.status)}
+              </Badge>
+            </AlertTitle>
+            <AlertDescription>
+              {typeof pledgeRisk?.value === "number"
+                ? `${pledgeRisk.value.toFixed(2)}% of promoter-group holdings are pledged · ${pledgeRisk.score_impact ?? 0} points.`
+                : "The current filing is missing or ambiguous; do not interpret this as zero pledge."}
+            </AlertDescription>
+          </Alert>
+
+          <Alert variant={riskAlertVariant(leverageRisk?.status)}>
+            <AlertTriangleIcon />
+            <AlertTitle className="flex items-center justify-between gap-2">
+              <span>Balance-sheet leverage</span>
+              <Badge variant={riskBadgeVariant(leverageRisk?.status)}>
+                {riskLabel(leverageRisk?.status)}
+              </Badge>
+            </AlertTitle>
+            <AlertDescription>
+              {leverageRisk?.status === "not_applicable"
+                ? "Industrial leverage thresholds are not applied to financial businesses."
+                : typeof leverageRisk?.debt_to_equity === "number" ||
+                    typeof leverageRisk?.interest_service_coverage === "number"
+                  ? `D/E ${leverageRisk.debt_to_equity?.toFixed(2) ?? "—"} · ISCR ${leverageRisk.interest_service_coverage?.toFixed(2) ?? "—"} · ${leverageRisk.score_impact ?? 0} points.`
+                  : "The current filing is missing or ambiguous; leverage remains unknown."}
+            </AlertDescription>
+          </Alert>
         </div>
       </section>
 

@@ -1085,7 +1085,7 @@ class FundamentalPassOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             fundamentals_bundle(), isin="INE000000010", symbol="RULES", company_name="Rules"
         )
         scorecard = score_balanced_sepa(facts)
-        self.assertEqual(scorecard["rubric_version"], "balanced_sepa_v2")
+        self.assertEqual(scorecard["rubric_version"], "balanced_sepa_v3")
         self.assertIn("debt_to_equity", scorecard["provider_limitations"])
         self.assertNotIn("leverage", scorecard["red_flags"])
 

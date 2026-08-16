@@ -1,6 +1,8 @@
 """Read-only Fyers broker book fetches for reconciliation."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -18,6 +20,13 @@ class BrokerBooks:
     trades: list[dict[str, Any]]
     positions: list[dict[str, Any]]
     holdings: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class BrokerPreflightSnapshot:
+    books: BrokerBooks
+    available_funds: Decimal
+    fetched_at: datetime
 
 
 class FyersBrokerReadClient:
@@ -75,6 +84,52 @@ class FyersBrokerReadClient:
             trades=[normalize_trade(row) for row in trades],
             positions=[normalize_position(row) for row in positions],
             holdings=[normalize_holding(row) for row in holdings],
+        )
+
+    async def fetch_preflight(self, *, access_token: str) -> BrokerPreflightSnapshot:
+        """Fetch funds plus every broker book needed before allocation."""
+        headers = {
+            "Authorization": f"{self._app_id}:{access_token}",
+            "Content-Type": "application/json",
+            "version": "3",
+        }
+        async with httpx.AsyncClient(
+            timeout=self._timeout,
+            transport=self._transport,
+        ) as client:
+            orders = await self._fetch_list(client, headers=headers, path="/orders", list_key="orderBook")
+            trades = await self._fetch_list(client, headers=headers, path="/tradebook", list_key="tradeBook")
+            positions = await self._fetch_list(client, headers=headers, path="/positions", list_key="netPositions")
+            holdings = await self._fetch_list(client, headers=headers, path="/holdings", list_key="holdings")
+            response = await client.get(f"{self._base_url}/funds", headers=headers)
+            try:
+                funds_payload = response.json()
+            except ValueError as exc:
+                raise FyersBrokerReadError(
+                    f"Fyers /funds returned non-JSON (HTTP {response.status_code})."
+                ) from exc
+            if (
+                not isinstance(funds_payload, dict)
+                or funds_payload.get("s") == "error"
+                or response.is_error
+            ):
+                raise FyersBrokerReadError(
+                    str(
+                        funds_payload.get("message", "Fyers /funds request failed.")
+                        if isinstance(funds_payload, dict)
+                        else "Fyers /funds returned an unexpected payload."
+                    )
+                )
+            available_funds = parse_available_funds(funds_payload)
+        return BrokerPreflightSnapshot(
+            books=BrokerBooks(
+                orders=[normalize_order(row) for row in orders],
+                trades=[normalize_trade(row) for row in trades],
+                positions=[normalize_position(row) for row in positions],
+                holdings=[normalize_holding(row) for row in holdings],
+            ),
+            available_funds=available_funds,
+            fetched_at=datetime.now(timezone.utc),
         )
 
     async def _fetch_list(
@@ -159,3 +214,26 @@ def normalize_holding(row: dict[str, Any]) -> dict[str, Any]:
         **row,
         "remainingQuantity": remaining,
     }
+
+
+def parse_available_funds(payload: dict[str, Any]) -> Decimal:
+    """Extract FYERS' explicit Available Balance row; never infer from totals."""
+    rows = payload.get("fund_limit")
+    if not isinstance(rows, list):
+        raise FyersBrokerReadError("Fyers /funds omitted fund_limit.")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip().casefold()
+        if title == "available balance" or row.get("id") == 10:
+            raw = row.get("equityAmount")
+            if raw is None:
+                raise FyersBrokerReadError("Available Balance omitted equityAmount.")
+            try:
+                value = Decimal(str(raw))
+            except Exception as exc:
+                raise FyersBrokerReadError("Available Balance is not numeric.") from exc
+            if value < 0:
+                raise FyersBrokerReadError("Available Balance cannot be negative.")
+            return value
+    raise FyersBrokerReadError("Fyers /funds did not include Available Balance.")

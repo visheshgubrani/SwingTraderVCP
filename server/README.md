@@ -10,7 +10,10 @@ by Next from Better Auth sessions; FastAPI should remain BFF-only.
 
 P7 runs as a separate arq job after a technical scan has persisted its
 shortlist. It queries only those `screening_results` rows, fetches read-only
-Upstox fundamentals by ISIN, stores a normalized snapshot, computes the
+Upstox fundamentals by ISIN, stores a normalized primary snapshot, enriches
+technical survivors with best-effort official NSE shareholding and integrated
+filing XBRLs for promoter-pledge/leverage checks that transparently adjust
+only the deterministic fundamental score, computes the
 authoritative Python fit, and may request a blind strict OpenRouter second
 opinion. AI failure never changes a valid source/rules result. P7 never imports
 or calls the execution engine, and any provider/model failure leaves chart
@@ -25,12 +28,25 @@ docker exec -i algo-trading-postgres \
 ```
 
 Existing databases also require the additive reliability and trace migrations
-in numeric order, ending with:
+in numeric order, including the NSE risk enrichment migration (whose historical
+filename contains `scanner_v4`) and VCP vision hardening:
 
 ```bash
 docker exec -i algo-trading-postgres \
   psql -v ON_ERROR_STOP=1 -U algo -d algo_trading \
   < server/db/migrations/008_p7_ai_trace.sql
+
+docker exec -i algo-trading-postgres \
+  psql -v ON_ERROR_STOP=1 -U algo -d algo_trading \
+  < server/db/migrations/012_scanner_v4_nse_risk.sql
+
+docker exec -i algo-trading-postgres \
+  psql -v ON_ERROR_STOP=1 -U algo -d algo_trading \
+  < server/db/migrations/013_vcp_vision.sql
+
+docker exec -i algo-trading-postgres \
+  psql -v ON_ERROR_STOP=1 -U algo -d algo_trading \
+  < server/db/migrations/014_vcp_vision_hardening.sql
 ```
 
 Configure the worker without committing credentials:
@@ -38,6 +54,7 @@ Configure the worker without committing credentials:
 ```env
 P7_FUNDAMENTAL_PASS_ENABLED=true
 UPSTOX_ANALYTICS_TOKEN=<one-year-read-only-analytics-token>
+NSE_FUNDAMENTAL_RISK_ENABLED=true
 OPENROUTER_API_KEY=<openrouter-key>
 OPENROUTER_MODEL=deepseek/deepseek-v4-flash
 OPENROUTER_REASONING_EFFORT=xhigh  # low | medium | high | xhigh
@@ -46,6 +63,11 @@ FUNDAMENTAL_PROMPT_MAX_CHARS=12000
 ```
 
 Defaults lock the provider/model behavior:
+
+- Known promoter-pledge warning/red/severe results adjust the deterministic
+  fundamental score by `-3/-8/-15`; known non-financial leverage results use
+  `-2/-5/-10`. Unknown, ambiguous, healthy, and not-applicable results have no
+  score impact. These adjustments never alter technical rank or auto-reject.
 
 - consolidated Upstox Company Fundamentals statements
 - a 24-hour snapshot cache for new work; retry-incomplete reuses the exact
@@ -62,6 +84,50 @@ If P7 is disabled, existing scans retain `llm_status=not_requested`. Source and
 AI state are independent: Upstox/normalization errors fail `fundamental_status`,
 while OpenRouter errors affect only `ai_status`. Legacy `llm_status` remains a
 compatibility mirror for journal readers.
+
+## On-demand VCP vision validator (advisory)
+
+This is a per-result, human-triggered chart-image second opinion. It never
+changes technical rank, `vcp_detected`, `reviewer_status`, watchlists, trade
+drafts, or execution state.
+
+Flow:
+
+1. The API persists the last 252 EOD sessions through the scan `as_of_date`
+   (`vcp_visual_analyses.frozen_ohlcv` + `source_hash`) and creates an
+   `awaiting_capture` analysis. Identical frozen source + renderer + model +
+   reasoning/max-token settings + prompt/schema reuse the same analysis.
+2. The frontend captures two standardized 1280×720 charts (252-session
+   context, 126-session detail, log scale) with a fixed renderer version and
+   uploads them as raw PNGs. When both are present the analysis is queued and
+   the `run_vcp_vision_analysis` arq job starts.
+3. The worker reads the immutable packet, verifies its source hash, and sends
+   one blind OpenRouter request (prompt text + compact OHLCV table + both
+   images, strict JSON schema, reasoning excluded, provider data collection
+   denied). Every attempt is persisted in `vcp_visual_attempts`.
+4. All returned dates must snap within 3 calendar days to frozen trading bars;
+   contraction ranges/depth/sessions and pivot price are derived
+   deterministically in Python. Two contraction-start peaks plus a later pivot
+   close two windows. A response that invents dates is rejected and the
+   analysis fails for audit; an underspecified `valid` verdict is stored as
+   `uncertain` instead of failing.
+5. Only explicit 429/5xx errors are retried once. `transport_unknown` and
+   `invalid_response` outcomes are never auto-retried; the human can retry a
+   failed analysis with the same stored charts.
+
+Configure without committing credentials:
+
+```env
+VCP_VISION_ENABLED=true
+OPENROUTER_API_KEY=<openrouter-key>
+VCP_VISION_MODEL=google/gemini-3.6-flash
+VCP_VISION_REASONING_EFFORT=medium  # low | medium | high | xhigh
+VCP_VISION_MAX_TOKENS=16384  # includes hidden reasoning + structured JSON
+```
+
+The API refuses new analyses while disabled. If configuration is disabled after
+an analysis was queued, the worker marks that row failed with `VisionDisabled`
+so it never remains stuck in `queued`.
 
 ## P4 execution modes
 
@@ -137,6 +203,20 @@ The monitor:
 
 When the global kill switch is engaged, the monitor **does not** create new exit
 intents or trailing-stop writes.
+
+## P10 proposal and entry workers
+
+Run the P10 processes separately from the core arq worker:
+
+```bash
+uv run python -m app.workers.proposal_worker
+uv run python -m app.workers.entry_supervisor
+```
+
+The proposal worker is serial and uses its dedicated Redis queue. The entry
+supervisor reconstructs verified 5-minute triggers and add/correction state
+from Postgres; approval requests never place orders inline. Apply migrations
+`015`, `016`, and `017` in order on an existing database before starting them.
 
 ### Live submission safety
 

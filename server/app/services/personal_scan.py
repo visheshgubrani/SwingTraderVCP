@@ -116,12 +116,13 @@ async def ensure_personal_scan(
     *,
     config: TechnicalScreeningConfig | None = None,
     triggered_by: str = "manual",
+    as_of_date: datetime.date | None = None,
 ) -> PersonalScanRun:
     """Create, reuse, and durably enqueue one personal run per EOD/config pair."""
     effective_config = config or TechnicalScreeningConfig()
     config_json, config_hash = canonical_config_payload(effective_config)
-    as_of_date = await resolve_reference_eod_date()
-    lock_key = f"personal-scan:{as_of_date.isoformat()}:{config_hash}"
+    reference_date = as_of_date or await resolve_reference_eod_date()
+    lock_key = f"personal-scan:{reference_date.isoformat()}:{config_hash}"
 
     reused = False
     selected_id: UUID | None = None
@@ -155,7 +156,7 @@ async def ensure_personal_scan(
                     """
                 ),
                 {
-                    "as_of_date": as_of_date,
+                    "as_of_date": reference_date,
                     "technical_config": config_json,
                 },
             )
@@ -238,7 +239,7 @@ async def ensure_personal_scan(
                 {
                     "triggered_by": triggered_by,
                     "technical_config": config_json,
-                    "as_of_date": as_of_date,
+                    "as_of_date": reference_date,
                 },
             )
             selected_id = inserted.scalar_one()
@@ -267,5 +268,5 @@ async def ensure_personal_scan(
         scan_run_id=selected_id,
         status=selected_status,
         reused=reused,
-        as_of_date=as_of_date,
+        as_of_date=reference_date,
     )

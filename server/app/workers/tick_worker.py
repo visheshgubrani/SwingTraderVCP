@@ -114,6 +114,9 @@ def _on_close_factory():
     return on_close
 
 
+from app.services.bar_aggregator import FiveMinuteBarAggregator
+
+
 async def _load_subscription_symbols(db: AsyncSession) -> list[str]:
     result = await db.execute(
         text("""
@@ -128,6 +131,11 @@ async def _load_subscription_symbols(db: AsyncSession) -> list[str]:
                 SELECT wi.instrument_id FROM watchlist_items wi
                 JOIN watchlists w ON w.id = wi.watchlist_id
                 WHERE w.is_active = true AND wi.removed_at IS NULL
+                UNION
+                -- armed entry legs / approved trade proposals
+                SELECT tp.instrument_id FROM trade_proposals tp
+                JOIN entry_legs el ON el.proposal_id = tp.id
+                WHERE el.status = 'armed'
             )
             AND i.fyers_symbol IS NOT NULL
         """)
@@ -176,7 +184,9 @@ async def _publish_loop(
     publish_queue: asyncio.Queue,
     redis: aioredis.Redis,
 ):
-    """Consume ticks from the sync queue and publish to Redis."""
+    """Consume ticks from the sync queue, update LTP cache, aggregate 5m bars, and publish to Redis."""
+    bar_aggregator = FiveMinuteBarAggregator(redis)
+
     while not _shutdown.is_set():
         try:
             tick = await asyncio.wait_for(publish_queue.get(), timeout=1.0)
@@ -201,6 +211,12 @@ async def _publish_loop(
             await redis.publish(REDIS_CHANNEL_TICKS, json.dumps(tick))
         except Exception as e:
             logger.error("Redis publish error: %s", e)
+
+        # 3. Process tick through 5-minute bar aggregator
+        try:
+            await bar_aggregator.process_tick(tick)
+        except Exception as e:
+            logger.error("Bar aggregator error: %s", e)
 
 
 async def _subscription_listener(

@@ -12,7 +12,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.trading import realized_pnl_on_exit
+from app.domain.p10_geometry import floor_to_tick
+from app.domain.p10_sizing import apportion_staged_exits
 from app.services.journal_outbox import enqueue_journal_fill_event
+from app.services.staged_exit_manager import (
+    StagedPositionState,
+    allocate_cumulative_target_fill,
+)
 
 
 class OrderGatewayError(RuntimeError):
@@ -158,7 +164,8 @@ async def process_order_message(
             "reason": _string(payload.get("message")),
         },
     )
-    await _mark_instruction_submitted(db, intent["trade_instruction_id"])
+    if intent.get("trade_instruction_id") is not None:
+        await _mark_instruction_submitted(db, intent["trade_instruction_id"])
 
     if effective_status in {"rejected", "cancelled"}:
         await _close_unfilled_entry(
@@ -217,7 +224,9 @@ async def process_trade_message(
                 filled_at,
                 quantity,
                 price,
-                broker_payload
+                broker_payload,
+                proposal_id,
+                entry_leg_id
             )
             VALUES (
                 :order_intent_id,
@@ -225,7 +234,9 @@ async def process_trade_message(
                 :filled_at,
                 :quantity,
                 :price,
-                CAST(:broker_payload AS jsonb)
+                CAST(:broker_payload AS jsonb),
+                :proposal_id,
+                :entry_leg_id
             )
             ON CONFLICT (fyers_trade_id) DO NOTHING
             RETURNING id
@@ -238,6 +249,8 @@ async def process_trade_message(
             "quantity": quantity,
             "price": price,
             "broker_payload": _json(payload),
+            "proposal_id": intent.get("proposal_id"),
+            "entry_leg_id": intent.get("entry_leg_id"),
         },
     )
     fill_row = fill_id.mappings().one_or_none()
@@ -352,6 +365,24 @@ async def process_trade_message(
 
     if intent["intent_type"] == "entry":
         previous_state = intent["position_state"]
+        position_aggregate = (
+            await db.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(f.quantity), 0)::integer AS quantity,
+                           SUM(f.quantity * f.price) / NULLIF(SUM(f.quantity), 0)
+                               AS average_price
+                    FROM order_fills f
+                    JOIN order_intents oi ON oi.id = f.order_intent_id
+                    WHERE oi.position_id = :position_id
+                      AND oi.intent_type = 'entry'
+                    """
+                ),
+                {"position_id": intent["position_id"]},
+            )
+        ).mappings().one()
+        aggregate_open_quantity = int(position_aggregate["quantity"])
+        staged = apportion_staged_exits(aggregate_open_quantity)
         await db.execute(
             text(
                 """
@@ -360,6 +391,10 @@ async def process_trade_message(
                     state = 'open',
                     open_quantity = :open_quantity,
                     average_entry_price = :average_price,
+                    t1_shares = :t1_shares,
+                    t2_shares = :t2_shares,
+                    t3_shares = :t3_shares,
+                    runner_shares = :runner_shares,
                     opened_at = COALESCE(opened_at, :filled_at)
                 WHERE id = :position_id
                   AND state IN ('pending_entry', 'open')
@@ -367,11 +402,35 @@ async def process_trade_message(
             ),
             {
                 "position_id": intent["position_id"],
-                "open_quantity": open_quantity,
-                "average_price": aggregate["average_price"],
+                "open_quantity": aggregate_open_quantity,
+                "average_price": position_aggregate["average_price"],
+                "t1_shares": staged.t1_shares,
+                "t2_shares": staged.t2_shares,
+                "t3_shares": staged.t3_shares,
+                "runner_shares": staged.runner_shares,
                 "filled_at": filled_at,
             },
         )
+        if intent.get("entry_leg_id") is not None:
+            await db.execute(
+                text(
+                    """
+                    UPDATE entry_legs
+                    SET status = :status, filled_shares = :filled_shares,
+                        filled_avg_price = :average_price,
+                        first_filled_at = COALESCE(first_filled_at, :filled_at),
+                        updated_at = now()
+                    WHERE id = :entry_leg_id
+                    """
+                ),
+                {
+                    "entry_leg_id": intent["entry_leg_id"],
+                    "status": intent_status,
+                    "filled_shares": open_quantity,
+                    "average_price": aggregate["average_price"],
+                    "filled_at": filled_at,
+                },
+            )
         await db.execute(
             text(
                 """
@@ -422,19 +481,40 @@ async def process_trade_message(
         "target_exit",
         "trailing_exit",
         "manual_exit",
+        "risk_reduction_exit",
+        "invalid_fill_exit",
     }:
         position_result = await db.execute(
             text(
                 """
                 SELECT
-                    state,
-                    side,
-                    open_quantity,
-                    average_entry_price,
-                    realized_pnl
-                FROM positions
-                WHERE id = :position_id
-                FOR UPDATE
+                    p.state,
+                    p.side,
+                    p.open_quantity,
+                    p.average_entry_price,
+                    p.realized_pnl,
+                    p.current_stop_loss,
+                    p.trailing_rule_type,
+                    p.trailing_rule,
+                    p.high_water_mark,
+                    p.trailing_stop,
+                    p.t1_target,
+                    p.t2_target,
+                    p.t3_target,
+                    p.t1_shares,
+                    p.t2_shares,
+                    p.t3_shares,
+                    p.runner_shares,
+                    p.t1_filled_shares,
+                    p.t2_filled_shares,
+                    p.t3_filled_shares,
+                    p.runner_filled_shares,
+                    i.tick_size,
+                    i.fyers_symbol AS symbol
+                FROM positions p
+                JOIN instruments i ON i.id = p.instrument_id
+                WHERE p.id = :position_id
+                FOR UPDATE OF p
                 """
             ),
             {"position_id": intent["position_id"]},
@@ -443,17 +523,88 @@ async def process_trade_message(
         if position is None:
             return True
         previous_state = position["state"]
-        exit_qty = min(total_filled, int(position["open_quantity"]))
+        # This trade message represents only the newly inserted fill. Using
+        # the intent's aggregate here would subtract earlier partial fills a
+        # second time on every subsequent broker message.
+        exit_qty = min(quantity, int(position["open_quantity"]))
         if exit_qty <= 0 or position["average_entry_price"] is None:
             return True
         pnl_delta = realized_pnl_on_exit(
             side=position["side"],
             average_entry_price=Decimal(position["average_entry_price"]),
             quantity=exit_qty,
-            exit_price=Decimal(str(aggregate["average_price"])),
+            exit_price=price,
         )
         remaining_open = max(int(position["open_quantity"]) - exit_qty, 0)
         new_state = "closed" if remaining_open == 0 else previous_state
+        t1_delta = t2_delta = t3_delta = 0
+        new_stop = Decimal(position["current_stop_loss"])
+        new_hwm = (
+            Decimal(position["high_water_mark"])
+            if position["high_water_mark"] is not None
+            else None
+        )
+        new_trailing_stop = (
+            Decimal(position["trailing_stop"])
+            if position["trailing_stop"] is not None
+            else None
+        )
+        if (
+            intent["intent_type"] == "target_exit"
+            and position["trailing_rule_type"] == "p10_staged_atr"
+        ):
+            rule = dict(position["trailing_rule"] or {})
+            atr14 = Decimal(str(rule.get("atr14", "0")))
+            staged = StagedPositionState(
+                id=intent["position_id"],
+                symbol=position["symbol"],
+                side=position["side"],
+                state=position["state"],
+                open_quantity=int(position["open_quantity"]),
+                weighted_entry_price=Decimal(position["average_entry_price"]),
+                current_stop=new_stop,
+                t1_target=Decimal(position["t1_target"]) if position["t1_target"] is not None else None,
+                t2_target=Decimal(position["t2_target"]) if position["t2_target"] is not None else None,
+                t3_target=Decimal(position["t3_target"]) if position["t3_target"] is not None else None,
+                t1_shares=int(position["t1_shares"]),
+                t2_shares=int(position["t2_shares"]),
+                t3_shares=int(position["t3_shares"]),
+                runner_shares=int(position["runner_shares"]),
+                t1_filled_shares=int(position["t1_filled_shares"]),
+                t2_filled_shares=int(position["t2_filled_shares"]),
+                t3_filled_shares=int(position["t3_filled_shares"]),
+                runner_filled_shares=int(position["runner_filled_shares"]),
+                high_water_mark=new_hwm,
+                trailing_stop=new_trailing_stop,
+                atr14=atr14,
+                tick_size=Decimal(position["tick_size"]),
+            )
+            allocation = allocate_cumulative_target_fill(
+                staged,
+                exit_purpose=str(intent.get("exit_purpose")),
+                fill_quantity=exit_qty,
+            )
+            t1_delta, t2_delta, t3_delta = allocation.t1, allocation.t2, allocation.t3
+            t1_complete = staged.t1_filled_shares + t1_delta >= staged.t1_shares > 0
+            t2_complete = staged.t2_filled_shares + t2_delta >= staged.t2_shares > 0
+            if t1_complete:
+                new_stop = max(new_stop, staged.weighted_entry_price)
+            if t2_complete and remaining_open > 0:
+                if atr14 <= 0:
+                    raise OrderGatewayError(
+                        "P10 T2 fill cannot activate a non-positive ATR trail."
+                    )
+                new_state = "trailing_active"
+                new_hwm = max(new_hwm or price, price)
+                candidate = floor_to_tick(
+                    new_hwm - (Decimal("2") * atr14),
+                    staged.tick_size,
+                )
+                new_trailing_stop = max(
+                    new_stop,
+                    new_trailing_stop or Decimal("0"),
+                    candidate,
+                )
         await db.execute(
             text(
                 """
@@ -462,6 +613,12 @@ async def process_trade_message(
                     state = :new_state,
                     open_quantity = :open_quantity,
                     realized_pnl = realized_pnl + :pnl_delta,
+                    current_stop_loss = :current_stop_loss,
+                    high_water_mark = :high_water_mark,
+                    trailing_stop = :trailing_stop,
+                    t1_filled_shares = t1_filled_shares + :t1_delta,
+                    t2_filled_shares = t2_filled_shares + :t2_delta,
+                    t3_filled_shares = t3_filled_shares + :t3_delta,
                     closed_at = CASE
                         WHEN :new_state = 'closed' THEN COALESCE(closed_at, :filled_at)
                         ELSE closed_at
@@ -476,6 +633,12 @@ async def process_trade_message(
                 "open_quantity": remaining_open,
                 "pnl_delta": pnl_delta,
                 "filled_at": filled_at,
+                "current_stop_loss": new_stop,
+                "high_water_mark": new_hwm,
+                "trailing_stop": new_trailing_stop,
+                "t1_delta": t1_delta,
+                "t2_delta": t2_delta,
+                "t3_delta": t3_delta,
             },
         )
         await db.execute(
@@ -520,6 +683,12 @@ async def process_trade_message(
                         "fill_quantity": quantity,
                         "total_filled": total_filled,
                         "realized_pnl_delta": str(pnl_delta),
+                        "exit_purpose": intent.get("exit_purpose"),
+                        "target_fill_allocation": {
+                            "t1": t1_delta,
+                            "t2": t2_delta,
+                            "t3": t3_delta,
+                        },
                     }
                 ),
             },
@@ -659,8 +828,72 @@ async def _close_unfilled_entry(
     terminal_status: str,
     details: dict[str, Any],
 ) -> None:
-    if intent["intent_type"] != "entry" or int(intent["open_quantity"]) > 0:
+    if intent["intent_type"] != "entry":
         return
+    if int(intent["open_quantity"]) > 0:
+        filled_quantity = int(
+            (
+                await db.execute(
+                    text(
+                        """
+                        SELECT COALESCE(SUM(quantity), 0)::integer
+                        FROM order_fills WHERE order_intent_id = :intent_id
+                        """
+                    ),
+                    {"intent_id": intent["id"]},
+                )
+            ).scalar_one()
+        )
+        unfilled_reservation = max(int(intent["quantity"]) - filled_quantity, 0)
+        if intent.get("entry_leg_id") is not None:
+            await db.execute(
+                text(
+                    """
+                    UPDATE entry_legs
+                    SET status = 'filled', filled_shares = :filled_quantity,
+                        updated_at = now()
+                    WHERE id = :entry_leg_id
+                      AND status IN (
+                          'intent_created', 'submitted', 'partially_filled',
+                          'submission_unknown'
+                      )
+                    """
+                ),
+                {
+                    "entry_leg_id": intent["entry_leg_id"],
+                    "filled_quantity": filled_quantity,
+                },
+            )
+        # Release only the IOC remainder; actual partial fills remain managed.
+        await db.execute(
+            text(
+                """
+                UPDATE positions
+                SET quantity = GREATEST(open_quantity, quantity - :reserved)
+                WHERE id = :position_id
+                """
+            ),
+            {
+                "position_id": intent["position_id"],
+                "reserved": unfilled_reservation,
+            },
+        )
+        return
+    if intent.get("entry_leg_id") is not None:
+        await db.execute(
+            text(
+                """
+                UPDATE entry_legs
+                SET status = 'cancelled', updated_at = now()
+                WHERE id = :entry_leg_id
+                  AND status IN (
+                      'intent_created', 'submitted', 'partially_filled',
+                      'submission_unknown'
+                  )
+                """
+            ),
+            {"entry_leg_id": intent["entry_leg_id"]},
+        )
     result = await db.execute(
         text(
             """
@@ -704,19 +937,20 @@ async def _close_unfilled_entry(
         },
     )
     instruction_status = "rejected" if terminal_status == "rejected" else "cancelled"
-    await db.execute(
-        text(
-            """
-            UPDATE trade_instructions
-            SET status = :status
-            WHERE id = :instruction_id
-            """
-        ),
-        {
-            "instruction_id": intent["trade_instruction_id"],
-            "status": instruction_status,
-        },
-    )
+    if intent.get("trade_instruction_id") is not None:
+        await db.execute(
+            text(
+                """
+                UPDATE trade_instructions
+                SET status = :status
+                WHERE id = :instruction_id
+                """
+            ),
+            {
+                "instruction_id": intent["trade_instruction_id"],
+                "status": instruction_status,
+            },
+        )
 
 
 async def _emit_unmatched_event(

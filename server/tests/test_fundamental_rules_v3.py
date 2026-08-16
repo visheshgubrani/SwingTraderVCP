@@ -1,6 +1,9 @@
 import unittest
 
-from app.services.fundamental_rules import score_minervini_inspired
+from app.services.fundamental_rules import (
+    apply_filing_risk_adjustments,
+    score_minervini_inspired,
+)
 
 
 def facts_fixture(*, financial: bool = False, complete: bool = True) -> dict:
@@ -91,6 +94,50 @@ class FundamentalRulesV3Tests(unittest.TestCase):
         )
         self.assertEqual(eps_cagr["status"], "negative")
         self.assertEqual(margin["status"], "negative")
+
+    def test_known_filing_risks_reduce_score_and_recompute_grade(self):
+        scorecard = {
+            "score": 82.0,
+            "grade": "A",
+            "red_flags": [],
+        }
+        adjusted = apply_filing_risk_adjustments(
+            scorecard,
+            {
+                "promoter_pledge": {
+                    "status": "red",
+                    "score_impact": -8,
+                    "source": "nse_shareholding_xbrl",
+                },
+                "leverage": {
+                    "status": "warning",
+                    "score_impact": -2,
+                    "source": "nse_integrated_xbrl",
+                },
+            },
+        )
+
+        self.assertEqual(scorecard["score"], 82.0)
+        self.assertEqual(adjusted["base_score"], 82.0)
+        self.assertEqual(adjusted["risk_score_impact"], -10.0)
+        self.assertEqual(adjusted["score"], 72.0)
+        self.assertEqual(adjusted["grade"], "B")
+        self.assertEqual(
+            adjusted["red_flags"],
+            ["promoter_pledge_red", "leverage_warning"],
+        )
+
+    def test_unknown_or_invalid_risk_does_not_receive_a_penalty(self):
+        adjusted = apply_filing_risk_adjustments(
+            {"score": 80.0, "grade": "A", "red_flags": []},
+            {
+                "promoter_pledge": {"status": "unknown", "score_impact": -15},
+                "leverage": {"status": "red", "score_impact": 5},
+            },
+        )
+        self.assertEqual(adjusted["score"], 80.0)
+        self.assertEqual(adjusted["risk_score_impact"], 0.0)
+        self.assertEqual(adjusted["risk_adjustments"], [])
 
 
 if __name__ == "__main__":

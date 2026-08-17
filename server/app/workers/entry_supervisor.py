@@ -15,7 +15,7 @@ import signal
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import redis.asyncio as aioredis
@@ -51,7 +51,14 @@ from app.domain.p10_triggers import (
 )
 from app.domain.journal_charges import FillLeg, estimate_cnc_charges
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
+from app.redis_pool import create_async_redis
+from app.redis_pubsub import consume_pubsub
 from app.services.bar_aggregator import REDIS_CHANNEL_5M_BARS
+from app.services.distributed_lease import (
+    acquire_distributed_lease,
+    release_distributed_lease,
+    renew_distributed_lease,
+)
 from app.services.execution_engine import (
     ExecutionBlockedError,
     _order_tag,
@@ -73,7 +80,13 @@ logger = logging.getLogger("entry_supervisor")
 IST_TZ = ZoneInfo("Asia/Kolkata")
 PG_ALLOCATION_LOCK_KEY = 987654321
 BROKER_SNAPSHOT_MAX_AGE_SECONDS = 15.0
-REDIS_STATUS_KEY = "entry_supervisor:status"
+
+_LOCK_KEY = "entry_supervisor:singleton"
+_STATUS_KEY = "entry_supervisor:status"
+_LOCK_TTL_SECONDS = 30
+_LOCK_REFRESH_SECONDS = 10
+
+REDIS_STATUS_KEY = _STATUS_KEY
 REDIS_LTP_PREFIX = "ltp:"
 
 _shutdown = asyncio.Event()
@@ -252,10 +265,19 @@ async def load_portfolio_state_under_lock(
     if candidate_sector is None:
         raise ExecutionBlockedError("Candidate instrument metadata is unavailable.")
 
-    deployable = min(
+    stage_row = (
+        await db.execute(
+            text("SELECT stage FROM p10_rollout_state WHERE id = true")
+        )
+    ).mappings().one_or_none()
+    current_stage = stage_row["stage"] if stage_row else "shadow"
+
+    base_deployable = min(
         policy.deployable_capital_override or Decimal("0"),
         broker_snapshot.available_funds,
     )
+    scale_factor = Decimal("0.25") if current_stage == "reduced_live" else Decimal("1.0")
+    deployable = base_deployable * scale_factor
     if deployable <= 0:
         raise ExecutionBlockedError("Broker-available deployable capital is zero.")
 
@@ -1941,26 +1963,55 @@ async def _maintenance_loop(redis: aioredis.Redis) -> None:
             pass
 
 
-async def _heartbeat(redis: aioredis.Redis) -> None:
+async def _set_status(
+    redis: aioredis.Redis,
+    status: str,
+    worker_id: str | None = None,
+) -> None:
+    payload = {
+        "status": status,
+        "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    if worker_id is not None:
+        payload["worker_id"] = worker_id
+    await redis.set(_STATUS_KEY, json.dumps(payload), ex=_LOCK_TTL_SECONDS)
+
+
+async def _heartbeat(redis: aioredis.Redis, worker_id: str) -> None:
     while not _shutdown.is_set():
-        await redis.set(
-            REDIS_STATUS_KEY,
-            json.dumps(
-                {
-                    "status": "running",
-                    "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
-                }
-            ),
-            ex=30,
+        refreshed = await renew_distributed_lease(
+            redis,
+            _LOCK_KEY,
+            worker_id,
+            _LOCK_TTL_SECONDS,
         )
-        await asyncio.sleep(10)
+        if not refreshed:
+            logger.critical("Entry supervisor lost its singleton lease; stopping.")
+            _shutdown.set()
+            return
+        await _set_status(redis, "running", worker_id=worker_id)
+        try:
+            await asyncio.wait_for(_shutdown.wait(), timeout=_LOCK_REFRESH_SECONDS)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def run_entry_supervisor() -> None:
-    redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(REDIS_CHANNEL_5M_BARS)
-    heartbeat = asyncio.create_task(_heartbeat(redis))
+    redis = await create_async_redis()
+    worker_id = str(uuid4())
+
+    if not await acquire_distributed_lease(
+        redis,
+        _LOCK_KEY,
+        worker_id,
+        _LOCK_TTL_SECONDS,
+    ):
+        logger.error("Another entry supervisor owns the singleton lease.")
+        await redis.aclose()
+        return
+
+    await _set_status(redis, "running", worker_id=worker_id)
+    heartbeat = asyncio.create_task(_heartbeat(redis, worker_id))
     maintenance = asyncio.create_task(_maintenance_loop(redis))
     pending: dict[dt.datetime, list[ConfirmedLeg]] = {}
     dispatch_tasks: set[asyncio.Task[None]] = set()
@@ -1975,22 +2026,27 @@ async def run_entry_supervisor() -> None:
         batch = pending.pop(bar_time, [])
         await _process_competing_batch(redis, batch)
 
+    async def handle_bar_message(message: dict[str, Any]) -> None:
+        try:
+            confirmed = await handle_five_minute_bar_event(json.loads(message["data"]))
+            for item in confirmed:
+                new_bucket = item.bar_time not in pending
+                pending.setdefault(item.bar_time, []).append(item)
+                if new_bucket:
+                    task = asyncio.create_task(delayed_dispatch(item.bar_time))
+                    dispatch_tasks.add(task)
+                    task.add_done_callback(dispatch_tasks.discard)
+        except Exception:
+            logger.exception("Failed to process completed 5-minute bar")
+
     try:
-        while not _shutdown.is_set():
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
-            if not message or message.get("type") != "message":
-                continue
-            try:
-                confirmed = await handle_five_minute_bar_event(json.loads(message["data"]))
-                for item in confirmed:
-                    new_bucket = item.bar_time not in pending
-                    pending.setdefault(item.bar_time, []).append(item)
-                    if new_bucket:
-                        task = asyncio.create_task(delayed_dispatch(item.bar_time))
-                        dispatch_tasks.add(task)
-                        task.add_done_callback(dispatch_tasks.discard)
-            except Exception:
-                logger.exception("Failed to process completed 5-minute bar")
+        await consume_pubsub(
+            redis,
+            [REDIS_CHANNEL_5M_BARS],
+            component="entry_supervisor",
+            handler=handle_bar_message,
+            should_stop=_shutdown.is_set,
+        )
     finally:
         heartbeat.cancel()
         maintenance.cancel()
@@ -2001,9 +2057,8 @@ async def run_entry_supervisor() -> None:
                 await task
             except asyncio.CancelledError:
                 pass
-        await pubsub.unsubscribe(REDIS_CHANNEL_5M_BARS)
-        await pubsub.aclose()
-        await redis.delete(REDIS_STATUS_KEY)
+        await _set_status(redis, "stopped", worker_id=worker_id)
+        await release_distributed_lease(redis, _LOCK_KEY, worker_id)
         await redis.aclose()
 
 

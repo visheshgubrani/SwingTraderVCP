@@ -152,13 +152,14 @@ async def refresh_and_save(db: AsyncSession, redis) -> str | None:
         seconds=result["expires_in"]
     )
 
-    await save_fyers_token(db, result["access_token"], result["refresh_token"], expires_at)
-
-    # Cache in Redis
-    ttl = max(int(result["expires_in"]) - _EXPIRY_BUFFER_SECONDS, 60)
-    await redis.set(_REDIS_TOKEN_KEY, result["access_token"], ex=ttl)
-    await redis.set(_REDIS_EXPIRY_KEY, expires_at.isoformat(), ex=ttl)
-    await _set_auth_health(redis, True)
+    await persist_and_cache_fyers_token(
+        db,
+        redis,
+        access_token=result["access_token"],
+        refresh_token=result["refresh_token"],
+        expires_at=expires_at,
+        expires_in=result["expires_in"],
+    )
 
     await _emit_system_event(
         db, "info", "auth_refresh_succeeded", {"expires_at": expires_at.isoformat()}
@@ -166,6 +167,26 @@ async def refresh_and_save(db: AsyncSession, redis) -> str | None:
     await db.commit()
     logger.info("Fyers token refreshed, expires at %s", expires_at)
     return result["access_token"]
+
+
+async def persist_and_cache_fyers_token(
+    db: AsyncSession,
+    redis,
+    *,
+    access_token: str,
+    refresh_token: str | None,
+    expires_at: datetime.datetime,
+    expires_in: int = 86400,
+) -> None:
+    """
+    Unified entrypoint to persist Fyers token to Postgres and sync Redis token caches (AUTH-002).
+    Ensures Redis hot token, expiry cache, and auth health are updated synchronously.
+    """
+    await save_fyers_token(db, access_token, refresh_token, expires_at)
+    ttl = max(int(expires_in) - _EXPIRY_BUFFER_SECONDS, 60)
+    await redis.set(_REDIS_TOKEN_KEY, access_token, ex=ttl)
+    await redis.set(_REDIS_EXPIRY_KEY, expires_at.isoformat(), ex=ttl)
+    await _set_auth_health(redis, True)
 
 
 async def get_valid_access_token(redis) -> str:

@@ -10,18 +10,32 @@
 #   127.0.0.1:8002  api
 #   127.0.0.1:3002  swyingify (later, --profile saas)
 
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
+}
+
 app.edurel.xyz {
 	encode gzip
+	import security_headers
 	reverse_proxy 127.0.0.1:8090
 }
 
 api.edurel.xyz {
 	encode gzip
+	import security_headers
 	reverse_proxy 127.0.0.1:8002
 }
 
 # Swyingify — enable later on its own domain, e.g.:
 # swyingify.com, www.swyingify.com {
 # 	encode gzip
+# 	import security_headers
 # 	reverse_proxy 127.0.0.1:3002
 # }

@@ -12,8 +12,11 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import os
+import signal
 from decimal import Decimal
 from typing import Any, Literal
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from arq import cron, run_worker
@@ -25,6 +28,11 @@ from app.database import async_session
 from app.domain.p10_geometry import CandleData, derive_chart_geometry
 from app.domain.p10_sizing import TEMPLATE_CONFIG, EntryTemplate
 from app.redis_pool import redis_settings_from_config, tune_arq_redis_pool
+from app.services.distributed_lease import (
+    acquire_distributed_lease,
+    release_distributed_lease,
+    renew_distributed_lease,
+)
 from app.services.proposal_generator import (
     GEOMETRY_VERSION,
     PROMPT_VERSION,
@@ -40,6 +48,9 @@ from app.services.proposal_renderer import render_proposal_charts
 logger = logging.getLogger("proposal_worker")
 IST_TZ = ZoneInfo("Asia/Kolkata")
 CandidateOutcome = Literal["generated", "rejected", "uncertain", "failed", "timed_out"]
+_LOCK_KEY = "proposal_worker:singleton"
+_LOCK_TTL_SECONDS = 30
+_LOCK_REFRESH_SECONDS = 10
 
 
 def _holiday_dates() -> set[dt.date]:
@@ -374,6 +385,13 @@ async def process_proposal_candidate(
                 "Active risk policy has no operator-configured deployable capital"
             )
 
+        stage_row = (
+            await session.execute(
+                text("SELECT stage FROM p10_rollout_state WHERE id = true")
+            )
+        ).mappings().one_or_none()
+        current_stage = stage_row["stage"] if stage_row else "shadow"
+
     tick_size = Decimal(str(candidate.tick_size))
     annotations = derive_chart_geometry(candles, tick_size=tick_size)
     charts = render_proposal_charts(
@@ -453,7 +471,10 @@ async def process_proposal_candidate(
             risk_policy_version=int(policy["version"]),
             risk_per_trade_pct=Decimal(str(policy["risk_per_trade_pct"])),
             approved_risk_budget_amount=(
-                Decimal(str(policy["deployable_capital_override"]))
+                (
+                    Decimal(str(policy["deployable_capital_override"]))
+                    * (Decimal("0.25") if current_stage == "reduced_live" else Decimal("1.0"))
+                )
                 * Decimal(str(policy["risk_per_trade_pct"]))
             ),
             holidays=_holiday_dates(),
@@ -615,8 +636,48 @@ async def run_eod_proposal_batch(
     }
 
 
+async def _renew_proposal_worker_lease(redis: Any, worker_id: str) -> None:
+    while True:
+        await asyncio.sleep(_LOCK_REFRESH_SECONDS)
+        refreshed = await renew_distributed_lease(
+            redis,
+            _LOCK_KEY,
+            worker_id,
+            _LOCK_TTL_SECONDS,
+        )
+        if not refreshed:
+            logger.critical("Proposal worker lost its singleton lease; stopping.")
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+
+
 async def worker_on_startup(ctx: dict[str, Any]) -> None:
     await tune_arq_redis_pool(ctx["redis"])
+    worker_id = str(uuid4())
+    ctx["lease_owner"] = worker_id
+    if not await acquire_distributed_lease(
+        ctx["redis"],
+        _LOCK_KEY,
+        worker_id,
+        _LOCK_TTL_SECONDS,
+    ):
+        raise RuntimeError("Another proposal worker owns the singleton lease.")
+    ctx["lease_renew_task"] = asyncio.create_task(
+        _renew_proposal_worker_lease(ctx["redis"], worker_id)
+    )
+
+
+async def worker_on_shutdown(ctx: dict[str, Any]) -> None:
+    renew_task = ctx.get("lease_renew_task")
+    if renew_task is not None:
+        renew_task.cancel()
+        try:
+            await renew_task
+        except asyncio.CancelledError:
+            pass
+    owner_id = ctx.get("lease_owner")
+    if owner_id:
+        await release_distributed_lease(ctx["redis"], _LOCK_KEY, owner_id)
 
 
 class WorkerSettings:
@@ -635,6 +696,7 @@ class WorkerSettings:
     max_jobs = 1
     job_timeout = settings.proposal_batch_budget_minutes * 60 + 60
     on_startup = worker_on_startup
+    on_shutdown = worker_on_shutdown
     timezone = IST_TZ
     redis_settings = redis_settings_from_config()
 

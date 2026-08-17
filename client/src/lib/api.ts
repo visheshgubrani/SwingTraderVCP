@@ -1,5 +1,37 @@
-const API_BASE_URL =
+export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1"
+
+const CSRF_TOKEN_KEY = "swing_csrf_token"
+
+let onUnauthorizedCallback: (() => void) | null = null
+
+export function setOnUnauthorizedCallback(cb: (() => void) | null) {
+  onUnauthorizedCallback = cb
+}
+
+export function getStoredCsrfToken(): string | null {
+  try {
+    return window.sessionStorage.getItem(CSRF_TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function setStoredCsrfToken(csrf: string | null) {
+  try {
+    if (csrf) {
+      window.sessionStorage.setItem(CSRF_TOKEN_KEY, csrf)
+    } else {
+      window.sessionStorage.removeItem(CSRF_TOKEN_KEY)
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function clearAppSession() {
+  setStoredCsrfToken(null)
+}
 
 export class ApiError extends Error {
   readonly status: number
@@ -11,17 +43,40 @@ export class ApiError extends Error {
   }
 }
 
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"])
+
 export async function apiRequest<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase()
+  const headers = new Headers(init?.headers)
+
+  if (!headers.has("Content-Type") && !(init?.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json")
+  }
+
+  // Attach session-bound CSRF token on mutating requests (SEC-001)
+  if (MUTATING_METHODS.has(method)) {
+    const csrf = getStoredCsrfToken()
+    if (csrf) {
+      headers.set("X-CSRF-Token", csrf)
+    }
+  }
+
+  // Authentication is cookie-only (HttpOnly; SameSite=Lax; Secure)
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
+    credentials: "include",
+    headers,
   })
+
+  if (response.status === 401 && !path.includes("/auth/login")) {
+    clearAppSession()
+    if (onUnauthorizedCallback) {
+      onUnauthorizedCallback()
+    }
+  }
 
   if (!response.ok) {
     let message = `Request failed with status ${response.status}.`
@@ -45,4 +100,3 @@ export async function apiRequest<T>(
 
   return response.json() as Promise<T>
 }
-

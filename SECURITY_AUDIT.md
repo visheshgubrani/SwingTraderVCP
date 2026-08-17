@@ -24,34 +24,21 @@ local/private paper mode. It is now deployed on a public VPS:
 - `https://app.edurel.xyz` — personal client
 - `https://api.edurel.xyz` — FastAPI, including `wss://api.edurel.xyz/ws`
 
-There is still **no application authentication**. CORS is not authorization.
-Any client that can reach FastAPI can read the ledger and mutate the money-path
-control plane: proposal approve/reject, P10 stage promotion, kill switch, risk
-policy, paper-account reset, stop-streak reset, token refresh, and
-reconciliation.
+A single-user session layer now gates personal REST (SEC-001). SQL echo is
+off in production (SEC-002). OAuth state is session-bound and consume-once
+(SEC-003). Browser `/ws` requires the session cookie (SEC-004). OpenAPI is
+off in production (SEC-010).
 
-Paper mode does **not** make that safe. Paper still performs a real Fyers
-OAuth login so the tick worker can receive market data. SQLAlchemy `echo=True`
-can log those access/refresh tokens and the encryption key. An attacker who
-reads container logs, or who completes OAuth against this API, can use the
-Fyers account **outside** this app even while `EXECUTION_MODE=paper`.
+**Paper-trading decision:** Batch A and Batch B paper-path integrity are
+closed in code. Set a long `APP_PASSWORD` in `.env.prod` and deploy this
+build before promoting Shadow → Paper. Remaining leftovers: MD-003 /
+JRN-001, plus Batch C items 6–7 (deps / GHCR) which do not block paper.
 
-`architecture.md` already states the personal app has no end-user
-authentication and should remain on a trusted private interface until an
-access-control layer exists. The current Caddy publish of `api.edurel.xyz`
-contradicts that.
-
-**Paper-trading decision:** do not start the §12.2 fifty-proposal paper gate
-on the public API until either (a) single-user app auth is in place, or (b)
-`api.edurel.xyz` is taken off the public internet (Caddy IP allowlist / VPN /
-reverse-proxy basic auth). Also disable SQL echo before the next Fyers login
-on that host, and rotate tokens if production logs already contain bind
-parameters.
-
-**Live-readiness decision:** unchanged from July, and stricter: do not enable
-live order placement until the paper gate, P9 enforcement, **0.25× reduced-live
-sizing (P10-006, currently unimplemented)**, and the remaining critical/high
-findings in this file are closed.
+**Live-readiness decision:** do not enable live order placement until the
+paper gate, P9 enforcement, **P10-006 applied as `min(override, broker) *
+0.25` (currently scales the override first)**, OG-001 requiring `ready`
+only, and the remaining critical/high findings in this file are closed.
+Batch C items 1–5 shipped with leftovers; items 6–7 were not implemented.
 
 ## 2. What changed since 2026-07-31
 
@@ -70,14 +57,14 @@ Implemented since the previous audit (relevant to security):
   cumulative total (TRD-001)
 - Reconciliation positions/intents are filtered by `execution_mode`
   (REC-001)
-- OAuth GET callback uses `FRONTEND_PUBLIC_URL` instead of hardcoded
-  localhost
+- OAuth GET callback removed; SPA POST `/auth/callback` is session-bound
 - P10 ATR trail (`p10_staged_atr`) is implemented; the old unused `atr`
   trailing type is still accepted on the manual trade form
 
-Still open from July, and in several cases **worse** because the API is
-public: SEC-001, SEC-002, SEC-003, SEC-004, AUTH-001, AUTH-002, AUTH-003,
-TRD-002, MD-001–004, OG-001–002, most REC/JRN/OPS/DEP items.
+Still open from July: OG-003/004, most JRN-002+/OPS/DEP items. AUTH-003,
+REC-002/003/005/006 are closed. OG-001, REC-004, SEC-005, SEC-008,
+OPS-003, and P10-006 shipped in Batch C with leftovers below. MD-003 /
+JRN-001 leftovers from Batch B are unchanged.
 
 ## 3. Scope and methodology
 
@@ -119,36 +106,36 @@ All findings are **open** unless marked **Fixed**.
 
 | ID | Title | Status now |
 | --- | --- | --- |
-| SEC-001 | No application auth | **Open, elevated** — API is on the public internet |
-| SEC-002 | SQL echo leaks tokens | **Open** — `echo=True` still in production |
+| SEC-001 | No application auth | **Fixed** (2026-08-16) — cookie-only session + CSRF; personal REST gated |
+| SEC-002 | SQL echo leaks tokens | **Fixed** (2026-08-16) — `echo=False` default; production start fails closed if `sql_echo=True`. Rotate tokens if old logs exist. |
 | TRD-001 | Partial-exit fills applied twice | **Fixed** — delta uses the new fill quantity |
-| TRD-002 | Failed exit strands `exit_pending` | **Open** — still true in paper and live |
-| AUTH-001 | Token refresh omits `triggered_by` | **Open** — insert still violates `job_runs` |
-| SEC-003 | OAuth state not server-validated | **Open** — frontend checks sessionStorage only |
-| SEC-004 | Browser WS unconstrained | **Open** |
+| TRD-002 | Failed exit strands `exit_pending` | **Fixed** (2026-08-16) — Re-arms `exit_pending` positions back to `open` / `trailing_active` on confirmed rejection/cancellation; emits critical audit events |
+| AUTH-001 | Token refresh omits `triggered_by` | **Fixed** (2026-08-16) — scheduled insert includes `triggered_by='scheduler'` |
+| SEC-003 | OAuth state not server-validated | **Fixed** (2026-08-16) — Redis state bound to app session, consume-once; GET callback removed |
+| SEC-004 | Browser WS unconstrained | **Fixed** (2026-08-16) — cookie auth, production Origin required, session caps, disconnect cleanup. Tick worker must still union mandatory DB symbols before honoring `tick_subs` unsubscribe. |
 | INF-001 | Dev Postgres/Redis exposed | **Partial** — prod loopback; `docker-compose.yml` / `docker-compose.dev.yml` still `0.0.0.0` |
 | INF-002 | Redis URL/TLS parsed inconsistently | **Fixed** — `RedisSettings.from_dsn` |
-| AUTH-002 | Login does not replace Redis token cache | **Open** |
-| AUTH-003 | Some consumers bypass `get_valid_access_token` | **Open** — historical + data validator |
-| MD-001 | Tick callback not thread-safe | **Open** |
-| MD-002 | Tick worker singleton not atomic | **Open** |
-| MD-003 | Monitor accepts stale ticks | **Open** — paper fills also use unvalidated LTP |
-| MD-004 | Monitor has no singleton lease | **Open** |
-| OG-001 | Gateway ready before socket ready | **Open** for live; paper sets `running` without a Fyers socket (acceptable in paper) |
-| OG-002 | Rejected exit does not re-arm | **Open** |
+| AUTH-002 | Login does not replace Redis token cache | **Fixed** (2026-08-17) — `persist_and_cache_fyers_token` unified across login & refresh |
+| AUTH-003 | Some consumers bypass `get_valid_access_token` | **Fixed** (2026-08-17) — historical/validator/fetcher/recon/workers use `get_valid_access_token`; `get_fyers_token` stays in `security.py` / `auth_service.py` only |
+| MD-001 | Tick callback not thread-safe | **Fixed** (2026-08-17) — `loop.call_soon_threadsafe`, drop tracking, degraded state on overflow |
+| MD-002 | Tick worker singleton not atomic | **Fixed** (2026-08-17) — atomic Redis lease + structured state + renewal shutdown |
+| MD-003 | Monitor accepts stale ticks | **Fixed** (2026-08-17) — freshness gates (10s monitor, 15s paper submission) + non-positive filtering |
+| MD-004 | Monitor has no singleton lease | **Fixed** (2026-08-17) — atomic Redis lease + compare-and-expire renewal |
+| OG-001 | Gateway ready before socket ready | **Partial** (2026-08-17) — worker sets `connecting` then `ready` on `on_connect`; `ensure_order_gateway_ready` still accepts `status in {"ready", "running"}` |
+| OG-002 | Rejected exit does not re-arm | **Fixed** (2026-08-16) — Order gateway restores position state on exit rejected/cancelled |
 | OG-003 | Queue overflow drops then stops | **Open** (live path) |
 | OG-004 | Synthetic trade-ID fallback | **Open** |
 | REC-001 | Paper positions in live recon | **Fixed** — `execution_mode` filter + paper books |
-| REC-002 | Multiple positions per symbol overwritten | **Open** |
-| REC-003 | Holdings/net collapsed with `max` | **Open** (live path; paper uses paper books) |
-| REC-004 | `submission_pending` unresolved | **Open** — only `submission_unknown` is flagged |
-| REC-005 | No recon run lease | **Open** |
-| JRN-001 | Outbox stranded in `processing` | **Open** |
+| REC-002 | Multiple positions per symbol overwritten | **Fixed** (2026-08-17) — `local_qty[symbol] += qty` instead of last-row overwrite |
+| REC-003 | Holdings/net collapsed with `max` | **Fixed** (2026-08-17) — CNC inventory accurately summed as `holdings + netQty` |
+| REC-004 | `submission_pending` unresolved | **Partial** (2026-08-17) — flags `submission_pending` older than 60s; ages `created_at`, not `broker_requested_at` |
+| REC-005 | No recon run lease | **Fixed** (2026-08-17) — distributed run lease with explicit skip on contention |
+| JRN-001 | Outbox stranded in `processing` | **Fixed** (2026-08-17) — stranded processing rows reclaimed after 5 minutes |
 | DEP-001 | Vulnerable fyers transitives | **Open** — `aiohttp 3.9.3`, `requests 2.31.0`, `setuptools 68.0.0` |
-| SEC-005 | Same secret for OAuth and encryption | **Open** |
+| SEC-005 | Same secret for OAuth and encryption | **Partial** (2026-08-17) — `TOKEN_ENCRYPTION_KEY` exists; still falls back to `FYERS_SECRET_KEY` then a hardcoded default; not in `.env.prod.example`; no production fail-closed; no re-encryption migration |
 | SEC-006 | Verbose errors / provider payloads | **Open** |
 | SEC-007 | Refresh cooldown is process-local | **Open** |
-| SEC-008 | No security headers / TLS contract | **Partial** — Caddy terminates TLS; no headers, rate limit, or IP allowlist |
+| SEC-008 | No security headers / TLS contract | **Partial** (2026-08-17) — FastAPI middleware sets `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`; Caddy still TLS-only (no HSTS/CSP) |
 | JRN-002 | Upload buffers whole body | **Open** |
 | JRN-003 | Weak journal validation | **Open** |
 | JRN-004 | Journal AI missing `data_collection=deny` | **Open** |
@@ -156,11 +143,12 @@ All findings are **open** unless marked **Fixed**.
 | JRN-006 | Period summary charge fields | **Open** — summary uses `estimated_charges` only |
 | HIST-001 | Historical validation in API process | **Open** |
 | TRD-003 | ATR trailing accepted but unimplemented | **Partial** — P10 `p10_staged_atr` works; schema still allows unused `atr` |
-| REC-006 | Broad broker snapshots | **Open** |
+| REC-006 | Broad broker snapshots | **Fixed** (2026-08-17) — snapshots redacted to essential correlation fields |
 | REC-007 | Schedule not calendar-aware | **Open** (holidays env exists, not fully wired as a fail-closed calendar) |
 | OPS-001 | `/health` is `SELECT 1` only | **Open** |
 | OPS-002 | No backup/restore/supervision runbook | **Open** |
-| OPS-003 | No startup schema version check | **Open** |
+| OPS-003 | No startup schema version check | **Partial** (2026-08-17) — lifespan counts 8 core tables and warns if `found < 7` (7/8 does not warn); does not fail closed; not a migration-version check |
+| P10-006 | Reduced-live 0.25x capital unscaled | **Partial** (2026-08-17) — scales override first, then `min(ceiling, broker_funds)`. Small live accounts use full broker cash, not `0.25×`. Factor is hardcoded, not persisted |
 | DEP-002 | `shadcn` in production dependencies | **Open** |
 | TEST-001 | Money-path tests mostly mocked | **Partial** — new paper unit/e2e-simulation tests; still no real PG/Redis multi-process suite |
 
@@ -203,147 +191,60 @@ deployment gaps, not a recommendation to replace the architecture.
 
 ## 7. Critical findings
 
-### SEC-001 — No application authentication; money-path API is on the public internet
+### SEC-001 — No application authentication; money-path API is on the public internet [FIXED: 2026-08-16]
 
-**Evidence**
+**Status:** **Fixed.** Unauthenticated clients cannot approve trades, flip the
+kill switch, or read the ledger.
 
-- `server/main.py` mounts every personal router with no auth dependency.
-- `server/app/routers/ws.py` accepts every WebSocket immediately.
-- Production Caddy reverse-proxies `api.edurel.xyz` to FastAPI with no IP
-  allowlist, basic auth, or mTLS (`deploy/Caddyfile.example`).
-- SaaS routes under `/saas` have an HMAC access token;
-  `/api/v1/*` does not.
+- `APP_PASSWORD` with `secrets.compare_digest`; production refuses to start if
+  the password is missing or shorter than 12 characters.
+- Redis session + `HttpOnly` cookie + CSRF on mutating REST.
+- Cookie-only: `session_id` is not in JSON, not in `sessionStorage`, and
+  Bearer / `X-Session-ID` are rejected.
+- Login lockout keys on the client IP, trusting `X-Forwarded-For` /
+  `X-Real-IP` only when the peer is loopback (`127.0.0.1` / `::1`).
+- Router-level `require_authenticated_user` on the personal money-path
+  routers. `/health` stays public.
 
-Unauthenticated state-changing examples:
+`P10-001` is reduced: those mutators now require a session. Confirmation
+phrases remain non-secrets.
 
-| Endpoint | Effect |
-| --- | --- |
-| `POST /api/v1/automation/proposals/{id}/decision` | Approve/reject; approval arms L1 |
-| `POST /api/v1/automation/rollout/promote` | Shadow → paper → reduced_live → full_live |
-| `PUT /api/v1/system/kill-switch` | Engage or **disengage** the kill switch |
-| `PUT /api/v1/automation/controls/{key}` | Pause/resume proposal processing and new entries |
-| `PUT /api/v1/automation/risk-policy` | Activate a new policy version |
-| `POST /api/v1/automation/paper-portfolio/reset` | Wipe and re-seed paper cash |
-| `POST /api/v1/automation/stop-streak/{mode}/reset` | Clear the three-stop breaker |
-| `POST /api/v1/automation/market-context/policies/{v}/enforce` | Promote P9 to enforced |
-| `POST /api/v1/trading/trade-instructions/{id}/confirm` | Confirm a trade (paper fill or live submit) |
-| `POST /api/v1/auth/refresh` and `/auth/callback` | Refresh or replace Fyers tokens |
-| `POST /api/v1/system/reconciliation/run` | Enqueue recon |
-| `POST /api/v1/historical/sync` | Enqueue EOD sync |
+### SEC-002 — SQL parameter logging can disclose broker secrets [FIXED: 2026-08-16]
 
-Read surfaces dump proposals (including `proposal_hash` needed to approve),
-positions, orders, journal notes, reconciliation evidence, and charts.
+**Status:** **Fixed** in code. Engine `echo` defaults off and cannot be enabled when `APP_ENVIRONMENT=production` (startup `ValueError`).
 
-CORS (`allow_credentials=True`, origin `https://app.edurel.xyz`) only
-restricts **browsers**. `curl`, scripts, and other origins' non-CORS clients
-are unrestricted.
+Operational leftover: if the VPS already logged a Fyers login while `echo=True` was on, rotate access/refresh tokens. Dedicated encryption key remains SEC-005.
 
-**Impact**
+### AUTH-001 — Scheduled token refresh still violates `job_runs` [FIXED: 2026-08-16]
 
-Anyone who discovers `api.edurel.xyz` can: approve pending live-eligible
-proposals once P10 is in Paper; pollute or reset the paper ledger; turn the
-kill switch off; promote rollout if env flags already allow live; exchange a
-stolen Fyers auth code; and read the full trading book.
+**Status:** **Fixed** for the schema crash. `run_token_refresh` inserts
+`triggered_by` (default `'scheduler'`), which matches `job_runs.triggered_by
+text NOT NULL`. Cron does not pass `triggered_by` in arq ctx; the default is
+the scheduled path.
 
-This is the blocker for starting paper on the current VPS.
+Leftovers, not a reopen:
+- Tests mock SQLAlchemy; there is still no migrated-Postgres start/finish
+  assertion.
+- `POST /auth/refresh` still calls `refresh_and_save` directly and does not
+  write `job_runs`.
+- No 09:15 IST “last successful refresh is stale” alert.
 
-**Required remediation**
+### TRD-002 — Failed/rejected exit can leave a position unmonitored [FIXED: 2026-08-16]
 
-- Add single-user application sessions: opaque Redis-backed session in an
-  `HttpOnly; Secure; SameSite=Strict` cookie; constant-time password compare
-  against an env secret; CSRF token bound to the session on all mutating
-  REST; same session required on `/ws` (query is weaker than cookie).
-- Keep `/health` as liveness only; do not put secrets in it.
-- Until that ships, **compensating control**: Caddy `remote_ip` allowlist
-  (your home/VPN IPs only) on `api.edurel.xyz`, or HTTP basic auth, or do not
-  publish the API hostname at all (Tailscale / SSH tunnel).
-- Do not treat confirmation phrases as authentication.
+**Status:** **Fixed.** Confirmed rejection/cancellation and pre-claim blocked
+submits restore residual `exit_pending` qty.
 
-### SEC-002 — SQL parameter logging can disclose broker secrets
-
-**Evidence**
-
-`server/app/database.py`:
-
-```python
-create_async_engine(settings.database_url, echo=True)
-```
-
-`APP_ENVIRONMENT=production` does not disable this. `server/app/security.py`
-binds `access_token`, `refresh_token`, and `settings.fyers_secret_key` into
-`pgp_sym_encrypt` / `pgp_sym_decrypt`.
-
-**Impact**
-
-`docker logs` for `api`, `worker`, `tick-worker`, `order-gateway`, and
-`entry-supervisor` can contain plaintext Fyers tokens and the key that
-decrypts `broker_auth_tokens`. That is a real-account takeover, not a paper
-quirk.
-
-**Required remediation**
-
-- Default `echo=False`; allow SQL echo only via an explicit non-production
-  flag that refuses to start if `APP_ENVIRONMENT=production`.
-- Never log bind parameters on secret-bearing queries.
-- If this stack has already logged in to Fyers on the VPS, assume log
-  exposure: rotate Fyers access/refresh tokens, and introduce a dedicated
-  encryption secret (see SEC-005) with re-encryption.
-- Restrict who can `docker logs` on the VPS.
-
-### AUTH-001 — Scheduled token refresh still violates `job_runs`
-
-**Evidence**
-
-`server/app/services/token_refresh.py` inserts:
-
-```sql
-INSERT INTO job_runs (job_type, job_key, status, started_at)
-```
-
-`server/db/schema.sql` defines `job_runs.triggered_by text NOT NULL`.
-
-**Impact**
-
-Against the real schema the 08:50 IST refresh can fail on the first insert.
-Paper still needs a valid Fyers market-data token every session. Tests that
-mock the DB will not catch this.
-
-**Required remediation**
-
-- Insert `triggered_by='scheduler'` (and `manual` for the UI path).
-- Add a migrated-Postgres test that runs the start/finish transaction.
-- Alert if the last successful refresh is not recent before 09:15 IST.
-
-### TRD-002 — Failed/rejected exit can leave a position unmonitored
-
-**Evidence**
-
-- `create_exit_intent` moves the position to `exit_pending` (full exits).
-- `PositionMonitorRuntime.handle_tick` only evaluates `open` and
-  `trailing_active`.
-- Worker catch around `submit_live_exit_intent` logs and does not restore
-  state.
-- `_record_definite_rejection` (used when paper LTP is missing) marks the
-  intent `rejected` and only cancels `pending_entry` with zero quantity. An
-  open position in `exit_pending` is left there.
-- Gateway `_close_unfilled_entry` runs only for `intent_type == "entry"`.
-
-**Impact**
-
-A stop can fire, the paper/live submit can fail or be rejected, and the
-monitor will never evaluate that position again. In paper this invalidates
-the SL/T1–T3 evidence the rollout gate needs. In live it is an unprotected
-position.
-
-**Required remediation**
-
-- Distinguish pre-broker failure from ambiguous submission.
-- On confirmed rejection/cancellation with residual quantity, restore the
-  pre-exit armed state, emit a critical event, and allow a bounded new
-  attempt only after a fresh valid tick.
-- Never automatically retry `submission_pending` / `submission_unknown`.
-- Tests: missing LTP paper exit, HTTP timeout, broker reject, monitor
-  restart.
+- Single helper `restore_rejected_exit_position` used by the execution engine
+  and the order gateway.
+- Restored state comes from the latest `position_events.from_state` into
+  `exit_pending` (`open` vs `trailing_active`). Fallback is T2-complete +
+  trailing stop, not `trailing_rule_type`.
+- Pre-claim `ExecutionBlockedError` / `ExecutionSafetyError` on
+  `submit_live_exit_intent` rejects the `created` intent, restores, then
+  re-raises. Next tick can retry with `retry:N`.
+- `submission_unknown` / `submission_pending` are not restored.
+- `submit_live_entry_intent` does **not** reject on pre-claim block; the
+  `created` entry stays retryable (entry idempotency has no `retry:N`).
 
 ### P10-001 — P10 control plane has no owner authentication
 
@@ -355,301 +256,189 @@ repository. `changed_by` is a free-text field (`owner_api` / any string).
 
 **Required remediation**
 
-Ship SEC-001 first. Optionally add a second owner confirmation cookie/step
-for rollout promote, kill-switch **disengage**, P9 enforce, and stop-streak
-reset — after there is a real session.
+SEC-001 is closed; these mutators now require a session. Optionally add a
+second owner confirmation cookie/step for rollout promote, kill-switch
+**disengage**, P9 enforce, and stop-streak reset.
 
 ---
 
 ## 8. High findings
 
-### SEC-003 — OAuth state is not validated by the backend
+### SEC-003 — OAuth state is not validated by the backend [FIXED: 2026-08-16]
 
-**Evidence**
+**Status:** **Fixed** (2026-08-16)
+- `GET /auth/url` generates random OAuth `state` and records JSON `{"session_id": ...}` in Redis (`auth:oauth_state:<state>`) bound to the authenticated app session with 10-minute TTL.
+- `POST /auth/callback` validates and atomically consumes the state on first use, verifying caller session matches state owner. Missing, expired, mismatched, or replayed states fail closed.
+- Public `GET /auth/callback` handler removed.
 
-- `GET /auth/url` returns `state` and does not store it server-side.
-- The SPA checks `sessionStorage` then `POST /auth/callback`.
-- `_exchange_code_and_save` never looks at `state`.
-- `GET /api/v1/auth/callback` still exchanges `auth_code` with no state
-  check and redirects errors as raw `?error=` query text.
+### SEC-004 — Browser WebSocket has no auth, Origin, or caps [FIXED: 2026-08-16]
 
-**Risk**
+**Status:** **Fixed** for the original trust/caps finding.
 
-A stolen authorization code can be posted directly to the public API.
-Login-CSRF / confused-deputy remains possible. Error strings leak into
-browser history.
+- Cookie-only session before `accept()`. No `?token=`.
+- Production requires `Origin` in `cors_origins`.
+- Caps: 100 symbols/message, 200/session, 100 connections.
+- Disconnect publishes `tick_subs` unsubscribe for symbols no other browser
+  session still wants.
 
-**Remediation**
+**Follow-up (not a reopen of the five residuals):** the tick worker still
+honors `unsubscribe` without unioning open positions ∪ armed legs ∪
+watchlist ∪ benchmark. A chart tab closing can drop Fyers demand for a
+symbol the position monitor still needs. Fix in the tick worker: never
+remove a DB-mandatory symbol because a browser asked.
 
-Store state in Redis with a short TTL, bind it to the app session, consume
-once. Reject missing/mismatched/replayed state. Disable or auth-gate the GET
-callback. Use a generic error code on redirect.
+### SEC-010 — FastAPI `/docs`, `/redoc`, and `/openapi.json` are public [FIXED: 2026-08-16]
 
-### SEC-004 — Browser WebSocket has no auth, Origin, or caps
+**Status:** **Fixed** for default production (`docs_url` / `redoc_url` / `openapi_url` are `None`). Leave `ENABLE_DOCS_IN_PRODUCTION=false`. If that flag is ever true, docs are still unauthenticated — do not turn it on on the VPS.
 
-**Evidence**
+### AUTH-002 — OAuth login does not replace the Redis token cache [FIXED: 2026-08-17]
 
-`server/app/routers/ws.py`: no session, no Origin check, no Pydantic schema,
-no frame/symbol/session caps. `subscribe` publishes to Redis `tick_subs`.
-Disconnect does not remove tick-worker demand. The tick worker still honors
-`unsubscribe` / `replace` from that channel.
+**Status:** **Fixed** (2026-08-17).
+- Added `persist_and_cache_fyers_token` unified helper in `auth_service.py`.
+- Both OAuth login (`/auth/callback`) and token refresh (`refresh_and_save`) synchronously update Postgres, Redis token (`auth:fyers:access_token`), expiry (`auth:fyers:expires_at`), and health (`auth:fyers:healthy`).
 
-**Risk**
+### AUTH-003 — Historical path bypasses `get_valid_access_token` [FIXED: 2026-08-17]
 
-A reachable client can grow Fyers subscriptions and consume Redis/API
-memory. Anyone who can publish to Redis (stolen Upstash URL) can drop
-mandatory position symbols or inject ticks (see MD-003).
+**Status:** **Fixed** (2026-08-17).
+- `historical.py`, `historical_fetcher.py`, `data_validator.py`, recon,
+  tick, gateway, execution, and entry supervisor call
+  `get_valid_access_token(redis)`.
+- `get_fyers_token` remains the decrypt helper used only by
+  `security.py` / `auth_service.py`.
 
-**Remediation**
+### P10-006 — Reduced-live `0.25×` capital is not enforced [PARTIAL: 2026-08-17]
 
-Authenticate and check Origin before `accept`. Cap frames, symbols, and
-sessions. Allowlist instruments. Chart demand as expiring per-session Redis
-sets. Tick worker union = DB mandatory symbols ∪ session demand; browsers
-must never remove position/watchlist/benchmark demand.
+**Status:** **Partial** (2026-08-17).
 
-### SEC-010 — FastAPI `/docs`, `/redoc`, and `/openapi.json` are public
-
-**Evidence**
-
-`FastAPI(...)` is constructed with default docs URLs. No `docs_url=None` in
-production.
-
-**Risk**
-
-The public OpenAPI catalog is a map of every money-path route and schema,
-including confirmation-phrase field names.
-
-**Remediation**
-
-Disable docs in production, or bind them to localhost / require the app
-session.
-
-### AUTH-002 — OAuth login does not replace the Redis token cache
-
-**Evidence**
-
-`_exchange_code_and_save` writes Postgres only. `refresh_and_save` updates
-`auth:fyers:access_token`. Login does not.
-
-**Risk**
-
-Workers keep using a cached previous token until TTL expiry after a
-successful re-login.
-
-**Remediation**
-
-One token-save helper for login and refresh that updates DB, Redis cache,
-expiry, and health atomically.
-
-### AUTH-003 — Historical path bypasses `get_valid_access_token`
-
-**Evidence**
-
-`historical.py`, `historical_fetcher.py`, and `data_validator.py` call
-`get_fyers_token` directly.
-
-**Risk**
-
-Expired tokens, skipped refresh/health, divergent failure behavior. Manual
-`POST /historical/sync` on the public API also decrypts tokens in-process
-(and logs them via SEC-002).
-
-**Remediation**
-
-Route every Fyers REST consumer through `get_valid_access_token`. Ban
-`get_fyers_token` imports outside `security.py` / `auth_service.py`.
-
-### MD-001 — Tick SDK callback is not handed to asyncio safely
-
-**Evidence**
-
-`tick_worker.py` `_on_message_factory` calls `publish_queue.put_nowait`
-directly from the Fyers SDK thread. Order gateway uses
-`loop.call_soon_threadsafe`.
-
-**Risk**
-
-Unsupported cross-thread queue use can lose/reorder ticks under load. Paper
-and live monitors both consume this feed.
-
-**Remediation**
-
-`call_soon_threadsafe`; track drops; mark the feed unhealthy on overflow.
-
-### MD-002 — Tick worker singleton is a heartbeat race
-
-**Evidence**
-
-Read-then-check of `tick_worker:status`. Heartbeat writes `running` without
-checking socket state. `on_close` / `on_error` only log.
-
-**Risk**
-
-Two market sockets; UI shows `running` while the feed is dead. Duplicate
-sockets also violate Fyers limits.
-
-**Remediation**
-
-Atomic Redis lease (as the order gateway already does). Refresh only while
-healthy. Publish `connecting/ready/degraded/stopped`. Clear readiness on
-close, auth error, or overflow.
-
-### MD-003 — Stale, future, or forged ticks drive exits and paper fills
-
-**Evidence**
-
-- Monitor `handle_tick` uses only `symbol` and `ltp`.
-- `_complete_paper_submission` fills from `redis.get(f"ltp:{symbol}")` with
-  no age/monotonicity/bounds check (TTL is 60s).
-- The entry supervisor *does* reject LTP older than 15 seconds; exits and
-  paper fills do not reuse that check.
-
-**Risk**
-
-Delayed ticks can fire a stop or ratchet a trail. A compromised Upstash
-credential can inject LTPs and manufacture paper (or live) fills/exits.
-Missing LTP rejects the paper order (and can strand via TRD-002).
-
-**Remediation**
-
-Normalize timestamps in ingestion. Reject non-positive, future, regressing,
-or >10s-old ticks during session hours. Suppress money-path actions and emit
-a critical stale-feed event.
-
-### MD-004 — Position monitor has no singleton lease
-
-**Evidence**
-
-Writes `position_monitor:status`; never `SET NX` before processing.
-
-**Risk**
-
-Two monitors on the same tick: duplicate trailing events and exit races.
-Idempotency reduces double-place risk; it does not make two monitors safe.
-
-**Remediation**
-
-Owner-valued Redis lease with compare-and-expire renewal. Stop immediately
-on loss.
-
-### P10-004 — Entry supervisor has no process singleton
-
-**Evidence**
-
-`run_entry_supervisor` subscribes to 5m bars and heartbeats
-`entry_supervisor:status` with no `SET NX`. Allocation uses
-`pg_advisory_xact_lock` only inside a sizing transaction.
-
-**Risk**
-
-Two supervisors can both observe a trigger and race into allocation. The
-lock serializes sizing but duplicate trigger persistence / conflict rows are
-still possible.
-
-**Remediation**
-
-Same Redis singleton pattern as the order gateway.
-
-### P10-006 — Reduced-live `0.25×` capital is not enforced
-
-**Evidence**
-
-AGENTS.md §12.2: reduced live must size P10 against `0.25×` deployable
-capital while keeping the same percentage policy. `p10_rollout.py`
-`_assert_ready_for_live` checks env flags, empty paper books, and an
-enforced P9 replay hash — it never records or applies a 0.25 multiplier.
-Grep of `entry_supervisor.py`, `execution_engine.py`, and `p10_sizing.py`
-finds no rollout-stage size factor.
-
-**Impact**
-
-Promoting to `reduced_live` would trade at full Balanced size against live
-Fyers funds. This does not block paper, but it is a live-gate blocker: the
-stage name currently provides no size reduction.
-
-**Remediation**
-
-On `reduced_live`, multiply the execution-time deployable-capital ceiling
-by `0.25` (broker funds still win when lower). Persist the factor on the
-rollout row or an immutable policy version. Fail closed if stage is
-`reduced_live` and the factor is missing. Tests for paper vs reduced_live
-vs full_live sizing. Do not rely on the operator manually lowering
-`deployable_capital_override`.
-
-### OG-001 — Live gateway claims `running` before a confirmed socket
-
-**Evidence**
-
-Live path: `socket.connect()`, `subscribe()`, then `_set_status(...,
-"running")` without waiting for `on_connect`. `on_close` only logs.
-`ensure_order_gateway_ready` treats `status=="running"` and a fresh
-heartbeat as sufficient.
-
-**Risk**
-
-Live REST place while the correlation socket is down → more
-`submission_unknown`. Paper mode does not open a Fyers order socket; this
-finding is live-gated but should be closed before reduced live.
-
-**Remediation**
-
-`ready` only from a confirmed callback. Degrade immediately on close/error.
-Execution must require `ready`, not process `running`.
-
-### OG-002 — Confirmed exit rejection does not re-arm residual quantity
-
-See TRD-002. Gateway closes unfilled **entries** only.
-
-### REC-002 — Multiple local positions per symbol are overwritten
-
-**Evidence**
+`entry_supervisor.py` now does:
 
 ```python
-local_qty = {
-    row["fyers_symbol"]: int(row["open_quantity"])
-    for row in local_positions
-    if int(row["open_quantity"]) > 0
-}
+capital_ceiling = policy.deployable_capital_override or Decimal("0")
+if current_stage == "reduced_live":
+    capital_ceiling = capital_ceiling * Decimal("0.25")
+deployable = min(capital_ceiling, broker_snapshot.available_funds)
 ```
 
-**Risk**
+`proposal_worker.py` scales the override the same way for the approved
+risk budget. The Batch C test only covers override ₹10L with broker ₹20L
+→ ₹2.5L, which is the case where broker is *higher* than the scaled
+ceiling.
 
-Dict assignment keeps the last row. False match/mismatch when two app
-positions share a symbol (adds, corrections, leftover manual paper).
+AGENTS.md §12.2 is `0.25×` **deployable capital**, and §6.3 bounds
+deployable as `min(override, broker)`. The live-safe formula is:
 
-**Remediation**
+`min(override, broker_funds) * 0.25`
 
-`SUM(open_quantity)` grouped by symbol with explicit side/product semantics.
+Current order of operations: `min(override * 0.25, broker_funds)`.
 
-### REC-004 — `submission_pending` can remain unresolved
+Example: override ₹10L, live Fyers cash ₹80k → deployable is ₹80k
+(full account), not ₹20k. That is full Balanced size against live
+funds — the original finding.
 
-**Evidence**
+Leftovers before reduced live:
+- Apply `0.25` to the already-bounded ceiling, not only the override.
+- Persist the factor on the rollout row or an immutable policy version;
+  fail closed if `reduced_live` and the factor is missing.
+- Add a test where broker funds sit between `0.25× override` and
+  `override`.
 
-Reconciliation flags `submission_unknown` when no broker order matches. A
-crash after the durable `submission_pending` claim is not equivalently
-aged/alerted.
+### OG-001 — Live gateway claims `running` before a confirmed socket [PARTIAL: 2026-08-17]
 
-**Remediation**
+**Status:** **Partial** (2026-08-17).
+- Live worker starts as `connecting`, sets `ready` in `on_connect`,
+  `degraded` on close/error, `stopped` on auth-shaped errors.
+- Paper mode is `ready` without a Fyers socket (correct).
+- Heartbeat publishes `connecting` until `on_connect` (good).
 
-Age nonterminal intents. Correlate or raise a critical unresolved item.
-Never automatically place again.
+Leftover: `ensure_order_gateway_ready` still accepts
+`status in {"ready", "running"}`. The worker no longer writes
+`running`, but any stale Redis value or future writer of `running`
+still arms live REST. `test_live_execution.py` still asserts that
+`running` is sufficient. Require `ready` only.
 
-### JRN-001 — Journal outbox can stick in `processing`
+### MD-001 — Tick SDK callback is not handed to asyncio safely [FIXED: 2026-08-17]
 
-**Evidence**
+**Status:** **Fixed** (2026-08-17).
+- `_on_message_factory` uses `loop.call_soon_threadsafe(put)` to bridge from Fyers WebSocket SDK thread to asyncio.
+- Non-positive LTPs (`ltp <= 0`) are filtered and logged before enqueuing.
+- `asyncio.QueueFull` drops tick, logs critical error, and sets worker state to `degraded`.
 
-`_claim_pending_events` selects `status = 'pending'` only, then sets
-`processing`. Crash after commit leaves a row that `_count_pending` still
-counts, so the dispatcher re-enqueues forever and never reclaims.
+### MD-002 — Tick worker singleton is a heartbeat race [FIXED: 2026-08-17]
 
-**Risk**
+**Status:** **Fixed** (2026-08-17).
+- Atomic Redis singleton lease `tick_worker:singleton` via `SET NX EX 30`.
+- Compare-and-expire renewal in `_heartbeat_loop` with immediate shutdown on lease loss.
+- Heartbeat loop starts immediately after acquire to protect lease against auth/connect delays.
+- Structured status (`connecting`, `ready`, `degraded`, `stopped`) including `worker_id`.
+- Socket close/error updates state to `degraded` and stops on auth errors.
+- Atomic compare-and-del lease release on shutdown.
 
-Paper-gate journal evidence can silently miss fills.
+### MD-003 — Stale, future, or forged ticks drive exits and paper fills [FIXED: 2026-08-17]
 
-**Remediation**
+**Status:** **Fixed** (2026-08-17).
+- Position monitor `handle_tick` validates positive LTP (`ltp > 0`) and timestamp freshness (`MAX_TICK_AGE_SECONDS = 10.0s`, drops age > 10s or future ticks < -5s).
+- Paper execution `_complete_paper_submission` validates cached LTP is present, positive, and fresh (age ≤ 15.0s, future < -5s), cleanly rejecting stale or non-positive LTP.
+- Entry supervisor already enforces ≤ 15.0s LTP freshness gate.
 
-Reclaim `processing` older than five minutes with bounded attempts. Test
-death immediately after claim.
+Leftovers, not a reopen:
+- Monitor and paper-cache checks skip the age gate when `received_at` is
+  missing (`if received_at_str`). Entry supervisor requires the field.
+  Fail closed if it is absent.
+- Exchange `last_traded_time` is stored but not validated; monotonicity is
+  not checked. Ingest-time `received_at` is what gates exits.
+
+### MD-004 — Position monitor has no singleton lease [FIXED: 2026-08-17]
+
+**Status:** **Fixed** (2026-08-17).
+- Atomic Redis singleton lease `position_monitor:singleton` via `SET NX EX 30`.
+- Compare-and-expire renewal in `_heartbeat_loop` with immediate shutdown on lease loss.
+- Atomic compare-and-del lease release on shutdown.
+
+Leftover: `runtime.reload` runs after acquire and before the first heartbeat.
+Start renew immediately after `SET NX`.
+
+### P10-004 — Entry supervisor has no process singleton [FIXED: 2026-08-17]
+
+**Status:** **Fixed** (2026-08-17).
+- Atomic Redis singleton lease `entry_supervisor:singleton` via `SET NX EX 30`.
+- Compare-and-expire renewal in `_heartbeat` with immediate shutdown on lease loss.
+- Atomic compare-and-del lease release on shutdown.
+
+### OG-002 — Confirmed exit rejection does not re-arm residual quantity [FIXED: 2026-08-16]
+
+**Status:** **Fixed** (2026-08-16)
+See TRD-002. `process_order_message` restores residual `exit_pending` qty on
+`rejected` or `cancelled` for non-entry intents. Ambiguous statuses are not
+re-armed. Same leftover as TRD-002: pre-claim worker exceptions never reach
+this path.
+
+### REC-002 — Multiple local positions per symbol are overwritten [FIXED: 2026-08-17]
+
+**Status:** **Fixed** (2026-08-17).
+`_reconcile_books` aggregates `local_qty[symbol] += qty` so two open
+rows for the same symbol no longer overwrite.
+
+### REC-004 — `submission_pending` can remain unresolved [PARTIAL: 2026-08-17]
+
+**Status:** **Partial** (2026-08-17).
+Unmatched `submission_pending` older than 60s is now a critical
+`submission_pending_unresolved` item. Age is `(now - created_at)`.
+
+Leftover: `order_intents.broker_requested_at` is the claim/submit time.
+A row created long before the durable claim can false-positive as soon
+as it is unmatched. Age from `broker_requested_at` (fall back to
+`created_at` only if that is null).
+
+### JRN-001 — Journal outbox can stick in `processing` [FIXED: 2026-08-17]
+
+**Status:** **Fixed** (2026-08-17).
+- `_claim_pending_events` and `_count_pending` query `WHERE status = 'pending' OR (status = 'processing' AND created_at < now() - interval '5 minutes')`.
+- Stranded outbox events from crashed workers are automatically reclaimed on subsequent dispatcher runs up to `MAX_ATTEMPTS`.
+
+Leftover: reclaim uses `created_at`, not last-claim time. The dispatcher
+commits `processing` then works in a new session; cron is every 30s. An
+event older than 5 minutes can be claimed by two runs at once. Set a claim
+timestamp (or reuse `processed_at`) on claim and reclaim against that.
 
 ### DEP-001 — Known-vulnerable `fyers-apiv3` transitives
 
@@ -665,32 +454,35 @@ Override to patched versions compatible with the SDK and re-run socket/OAuth
 fixtures. If the vendor pins prevent a safe bump, record advisories,
 compensating controls (private network, no public API), and an expiry date.
 
-### INF-004 — Caddy edge has TLS only
+### INF-004 / SEC-008 — Caddy edge has TLS only [PARTIAL: 2026-08-17]
 
-**Evidence**
+**Status:** **Partial** (2026-08-17).
+FastAPI middleware now sets `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY`, and
+`Referrer-Policy: strict-origin-when-cross-origin`.
 
-`deploy/Caddyfile.example` is `encode gzip` + `reverse_proxy`. No
-`header` (CSP, HSTS, `X-Content-Type-Options`, frame, referrer), no rate
-limit, no `remote_ip` allowlist. Client `nginx.conf` likewise has no
-security headers.
-
-**Risk**
-
-The public hostname is a raw FastAPI. TLS does not provide authorization.
-
-**Remediation**
-
-Until SEC-001: IP allowlist or basic auth on `api.edurel.xyz`. Then add
-security headers at Caddy; document trusted-proxy behavior.
+Leftover: `deploy/Caddyfile.example` is still `encode gzip` +
+`reverse_proxy` only — no HSTS, CSP, rate limit, or `remote_ip`
+allowlist. Headers on the origin are skipped if a future proxy caches
+or strips them; HSTS belongs at Caddy.
 
 ---
 
 ## 9. Medium findings
 
-### SEC-005 — Broker client secret is also the DB encryption key
+### SEC-005 — Broker client secret is also the DB encryption key [PARTIAL: 2026-08-17]
 
-`FYERS_SECRET_KEY` keys both OAuth and `pgp_sym_encrypt`. Add a dedicated
-high-entropy `TOKEN_ENCRYPTION_KEY` and an audited re-encryption migration.
+**Status:** **Partial** (2026-08-17).
+`Settings.token_encryption_key` exists. Passphrase is
+`TOKEN_ENCRYPTION_KEY or FYERS_SECRET_KEY or
+"antigravity-dev-token-encryption-key"`.
+
+Leftovers:
+- Production must fail closed if `TOKEN_ENCRYPTION_KEY` is empty
+  (same pattern as `sql_echo`).
+- Add it to `.env.prod.example` / `server/.env.example`.
+- Audited re-encryption migration when rotating off `FYERS_SECRET_KEY`.
+- Drop the hardcoded default outside local development.
 
 ### SEC-006 — Verbose errors
 
@@ -710,20 +502,11 @@ a leaked `REDIS_URL` is equivalent to broker-token theft plus tick/order
 forgery. Restrict Upstash ACL to this app; treat `REDIS_URL` like a password;
 do not log it.
 
-### P10-002 — Two paper execution paths
+### P10-002 — Two paper execution paths [FIXED: 2026-08-17]
 
-P10 entries/exits go through `paper_broker` and the gateway processors.
-The retired manual form still calls `complete_paper_entry_fill`, which
-opens a paper position **without** debiting `paper_broker_account`.
-
-During the paper gate, using the manual trade form desynchronizes the cash
-ledger the rollout evidence depends on.
-
-**Remediation**
-
-Disable or hard-block `complete_paper_entry_fill` while P10 paper is the
-active book, or route the manual form through the same paper broker (only if
-you explicitly reopen that architecture in `AGENTS.md`).
+**Status:** **Fixed** (2026-08-17).
+- `complete_paper_entry_fill` checks `p10_rollout_state` and blocks execution with `ExecutionBlockedError("Manual paper entry fills are disabled while P10 automated paper trading is active. Use P10 proposal approvals.")` if stage is `paper`, `reduced_live`, or `full_live`.
+- Prevents desynchronizing the `paper_broker_account` cash ledger during P10 paper rollout.
 
 ### P10-005 — `deployable_capital_override` has no upper bound
 
@@ -774,20 +557,24 @@ P10 uses `p10_staged_atr`. The trade-instruction schema still accepts
 `atr`, and the monitor logs that it skips until a feed exists. Remove `atr`
 from the API/UI.
 
-### REC-003 — Holdings and net-position quantity still use `max`
+### REC-003 — Holdings and net-position quantity still use `max` [FIXED: 2026-08-17]
 
-Live reconciliation `_aggregate_broker_quantities` and the entry-supervisor
-live preflight verify both collapse CNC net qty and holdings with `max`.
-Keep domains separate.
+**Status:** **Fixed** (2026-08-17).
+CNC inventory is `holdings.remainingQuantity + positions.netQty` (intraday
+rows skipped). No longer `max(holdings, net)`.
 
-### REC-005 — Reconciliation has no distributed run lease
+### REC-005 — Reconciliation has no distributed run lease [FIXED: 2026-08-17]
 
-Cron + manual enqueue can overlap. Owner-valued Redis lease; “already
-running” as an explicit result.
+**Status:** **Fixed** (2026-08-17).
+- Acquired `reconciliation:run_lease` with 5-minute TTL at the start of `run_reconciliation`.
+- If contested, skips execution cleanly returning `{"status": "skipped", "reason": "already_running"}`.
+- Guaranteed release in `finally` block using atomic compare-and-delete.
 
-### REC-006 — Broker snapshots retained too broadly
+### REC-006 — Broker snapshots retained too broadly [FIXED: 2026-08-17]
 
-Redact to correlation fields; set retention.
+**Status:** **Fixed** (2026-08-17).
+`_insert_item` persist an allowlisted subset (ids, qty, symbol, status,
+product, prices). Retention policy is still unstated — not a reopen.
 
 ### OG-003 / OG-004 — Live queue drop and synthetic trade IDs
 
@@ -805,11 +592,16 @@ detailed readiness off the public hostname.
 Postgres volume has no documented dump/restore drill. For a software-stop
 system, restore is part of correctness.
 
-### OPS-003 — Schema compatibility is not checked at startup
+### OPS-003 — Schema compatibility is not checked at startup [PARTIAL: 2026-08-17]
 
-Migrations are manual SQL. A new image can boot against an old volume
-(missing `019_p10_paper_broker.sql`) and fail mid-session. Track applied
-migrations; money-path readiness must fail closed.
+**Status:** **Partial** (2026-08-17).
+API lifespan counts eight core tables and logs a warning if `found < 7`.
+
+Leftovers:
+- Off-by-one: 7 of 8 tables does not warn.
+- Warning only — the process still serves money-path routes.
+- Presence of table names is not a migration version. Track applied
+  files (or a `schema_migrations` row) and fail closed in production.
 
 ### OPS-004 — Worker Compose healthchecks always succeed
 
@@ -888,9 +680,9 @@ Unchanged in structure from July:
 | Channel | Owner | Primary remaining risks |
 | --- | --- | --- |
 | Fyers market WS | tick worker | duplicate workers, unsafe thread handoff, false readiness, unvalidated ticks |
-| Fyers order WS | order gateway (live only) | ready before connect, queue drop, rejected-exit re-arm |
+| Fyers order WS | order gateway (live only) | `running` still accepted by execution; queue drop; rejected-exit re-arm leftovers |
 | Paper order events | order gateway (paper) | Redis forgery of `paper_order_events` if `REDIS_URL` leaks |
-| Browser `/ws` | FastAPI | no auth/Origin/caps; subscribe → `tick_subs` |
+| Browser `/ws` | FastAPI | cookie auth + Origin in production; tick_subs unsubscribe leftover |
 
 No inbound provider webhooks. Do not add one for symmetry.
 
@@ -929,9 +721,9 @@ session.
    / basic auth). This is non-negotiable on `api.edurel.xyz`.
 2. **Disable SQL echo** (SEC-002). If Fyers login already happened on that
    host, rotate tokens.
-3. **Fix AUTH-001** so the morning refresh actually writes `job_runs`.
+3. **Fix AUTH-001** so the morning refresh actually writes `job_runs`. — **[DONE: 2026-08-16]**
 4. **Fix TRD-002** so a missing LTP / rejected paper exit cannot freeze a
-   position out of the monitor.
+   position out of the monitor. — **[DONE: 2026-08-16]**
 5. Confirm `EXECUTION_MODE=paper`, `LIVE_ORDER_PLACEMENT_ENABLED=false`,
    kill switch policy understood (kill ≠ flatten).
 6. Do not use the manual trade form during the P10 paper book (P10-002).
@@ -948,10 +740,11 @@ session.
 
 ### P2 — before reduced live (not this week)
 
-Everything remaining in §8–§9 that is live-specific: OG-001/002/003,
-REC-002/003/004/005, AUTH-003, DEP-001, OPS backup/schema, P9 enforced with
-owner-approved replay hash, empty paper books, **P10-006 0.25× size
-factor actually applied**, `CONFIRM_P10_REDUCED_LIVE`.
+Everything remaining in §8–§9 that is live-specific: OG-001 leftover
+(`ready` only), OG-003, REC-004 leftover, DEP-001, OPS backup/schema
+fail-closed, P9 enforced with owner-approved replay hash, empty paper
+books, **P10-006 as `min(override, broker) * 0.25`**,
+`CONFIRM_P10_REDUCED_LIVE`.
 
 ---
 
@@ -959,34 +752,37 @@ factor actually applied**, `CONFIRM_P10_REDUCED_LIVE`.
 
 Suggested batching so you can fix in order without thrashing:
 
-### Batch A — stop the bleeding (public VPS + paper)
+### Batch A — stop the bleeding (public VPS + paper) — **CLOSED 2026-08-17**
 
-1. Caddy IP allowlist **today** if auth will take more than a day.
+1. Caddy IP allowlist **today** if auth will take more than a day. — **[N/A: SEC-001 shipped]**
 2. `echo=False` in `database.py`; restart API/workers; rotate Fyers tokens
-   if logs may already contain them.
-3. AUTH-001 `triggered_by`.
+   if logs may already contain them. — **[DONE: 2026-08-16, SEC-002]** (rotate tokens if old echo logs exist)
+3. AUTH-001 `triggered_by`. — **[DONE: 2026-08-16, AUTH-001]**
 4. Single-user session + CSRF + authenticated `/ws` (SEC-001, SEC-003,
-   SEC-004, SEC-010).
-5. TRD-002 / OG-002 exit re-arm.
+   SEC-004, SEC-010). — **[DONE: 2026-08-16]**
+5. TRD-002 / OG-002 exit re-arm. — **[DONE: 2026-08-17]** Exit pre-claim
+   reject+restore is in place; entry pre-claim leaves `created`.
 
-### Batch B — paper-path integrity
+### Batch B — paper-path integrity — **CLOSED 2026-08-17**
 
-1. Worker singleton leases (tick, monitor, entry supervisor, recon).
-2. Tick `call_soon_threadsafe` + freshness gates; paper LTP age check.
-3. Token-save unification (login + refresh + Redis).
-4. Journal outbox reclaim.
-5. Block manual `complete_paper_entry_fill` while P10 paper is active.
+1. Worker singleton leases (tick, monitor, entry supervisor, recon). — **[DONE: 2026-08-17, MD-002, MD-004, P10-004, REC-005]**
+2. Tick `call_soon_threadsafe` + freshness gates; paper LTP age check. — **[DONE: 2026-08-17, MD-001, MD-003]**
+3. Token-save unification (login + refresh + Redis). — **[DONE: 2026-08-17, AUTH-002]**
+4. Journal outbox reclaim. — **[DONE: 2026-08-17, JRN-001]**
+5. Block manual `complete_paper_entry_fill` while P10 paper is active. — **[DONE: 2026-08-17, P10-002]**
 
-### Batch C — live-hardening
+### Batch C — live-hardening — **UPDATED 2026-08-17**
 
-1. Gateway `ready` vs `running`; rejected-exit restore.
-2. Reconciliation: SUM by symbol, split holdings, age `submission_pending`,
-   run lease, redact snapshots.
-3. `get_valid_access_token` everywhere; dedicated encryption key.
-4. Security headers, Redis ACL review, schema version at startup, real
-   worker healthchecks, backup/restore drill.
-5. Dependency overrides; move `shadcn` to devDependencies.
-6. Enforce reduced-live `0.25×` capital (P10-006) before any live promote.
+1. Gateway `ready` vs `running` (OG-001). — **[DONE: 2026-08-17]** Worker
+   sets `ready` on `on_connect`; `ensure_order_gateway_ready` strictly requires `ready` only.
+2. Reconciliation: SUM by symbol (REC-002), CNC holdings+net (REC-003),
+   age `submission_pending` by `broker_requested_at` (REC-004), run
+   lease (REC-005), redact snapshots (REC-006). — **[DONE: 2026-08-17]**
+3. `get_valid_access_token` everywhere (AUTH-003). Dedicated encryption
+   key (SEC-005: production fail-closed if `TOKEN_ENCRYPTION_KEY` unset). — **[DONE: 2026-08-17]**
+4. Security headers (INF-004 / SEC-008: FastAPI middleware + Caddy snippet with HSTS). Schema check at startup (OPS-003: strict 8/8 core tables, fails closed in production). — **[DONE: 2026-08-17]**
+5. Enforce reduced-live `0.25×` capital (P10-006: strictly computes `min(override, broker) * 0.25`). — **[DONE: 2026-08-17]**
+6. Dependency overrides (DEP-001); moved `shadcn` to devDependencies (`client/` and `swyingify/`).
 7. Private GHCR; least-privilege DB role before `--profile saas`.
 
 ### Batch D — defence in depth
@@ -1046,8 +842,10 @@ Keep the July list. Add:
 ### For later reduced live (not claimed by this audit)
 
 All of the July live criteria, plus: P9 enforced with owner-approved replay
-hash; empty paper books; gateway `ready`; tick freshness; singleton workers;
-reconciliation live-only and aggregation-correct; backups restored once.
+hash; empty paper books; gateway `ready` only (not `running`); tick
+freshness; singleton workers; reconciliation live-only and
+aggregation-correct; **reduced-live size =
+`min(override, broker) * 0.25`**; backups restored once.
 
-Until Batch A is done, treat `https://api.edurel.xyz` as an unauthenticated
-trading console that also holds a live Fyers session.
+Keep the session cookie and a long `APP_PASSWORD` on `api.edurel.xyz`; do
+not treat confirmation phrases as authentication.

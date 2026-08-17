@@ -12,7 +12,12 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import async_session
-from app.security import get_fyers_token
+from app.services.auth_service import AuthUnavailableError, get_valid_access_token
+from app.services.distributed_lease import (
+    acquire_distributed_lease,
+    release_distributed_lease,
+    renew_distributed_lease,
+)
 from app.services.scan_readiness import load_scan_readiness
 from app.services.screening_config import TechnicalScreeningConfig
 
@@ -295,11 +300,11 @@ async def run_historical_sync(
     effective_run_id = run_id or str(ctx.get("job_id", "scheduled"))
     target_date = latest_completed_eod_date()
     lock_owner = effective_run_id
-    lock_acquired = await redis.set(
+    lock_acquired = await acquire_distributed_lease(
+        redis,
         SYNC_LOCK_KEY,
         lock_owner,
-        ex=SYNC_LOCK_SECONDS,
-        nx=True,
+        SYNC_LOCK_SECONDS,
     )
     if not lock_acquired:
         logger.info("Skipping historical sync because another sync owns the lock")
@@ -324,16 +329,17 @@ async def run_historical_sync(
             await save_sync_status(redis, progress)
             return {"status": "cancelled"}
 
-        async with async_session() as session:
-            token_data = await get_fyers_token(session)
-            if not token_data or _token_is_expired(token_data["expires_at"]):
-                progress.finish(
-                    "authentication_required",
-                    "Fyers authentication is required before EOD data can be synced.",
-                )
-                await save_sync_status(redis, progress)
-                return {"status": "authentication_required"}
+        try:
+            access_token = await get_valid_access_token(redis)
+        except AuthUnavailableError:
+            progress.finish(
+                "authentication_required",
+                "Fyers authentication is required before EOD data can be synced.",
+            )
+            await save_sync_status(redis, progress)
+            return {"status": "authentication_required"}
 
+        async with async_session() as session:
             instruments_result = await session.execute(
                 text(
                     """
@@ -368,7 +374,6 @@ async def run_historical_sync(
                 )
             )
             instruments = instruments_result.all()
-            access_token = token_data["access_token"]
 
         if not instruments:
             progress.finish("failed", "No active Nifty 500 instruments were found.")
@@ -514,7 +519,19 @@ async def run_historical_sync(
             if not symbol_failed:
                 progress.successful_symbols += 1
             progress.log(f"{instrument.symbol}: saved {symbol_candles} new EOD candles.")
-            await redis.expire(SYNC_LOCK_KEY, SYNC_LOCK_SECONDS)
+            renewed = await renew_distributed_lease(
+                redis,
+                SYNC_LOCK_KEY,
+                lock_owner,
+                SYNC_LOCK_SECONDS,
+            )
+            if not renewed:
+                progress.finish(
+                    "failed",
+                    "Lost EOD sync lease; another run may have taken over.",
+                )
+                await save_sync_status(redis, progress)
+                return {"status": "lock_lost"}
             await save_sync_status(redis, progress)
 
         final_state = "partial" if progress.error_count else "succeeded"
@@ -564,8 +581,4 @@ async def run_historical_sync(
             except Exception:
                 logger.debug("Failed to close Fyers client cleanly", exc_info=True)
         await redis.delete(SYNC_CANCEL_KEY)
-        current_lock_owner = await redis.get(SYNC_LOCK_KEY)
-        if isinstance(current_lock_owner, bytes):
-            current_lock_owner = current_lock_owner.decode()
-        if current_lock_owner == lock_owner:
-            await redis.delete(SYNC_LOCK_KEY)
+        await release_distributed_lease(redis, SYNC_LOCK_KEY, lock_owner)

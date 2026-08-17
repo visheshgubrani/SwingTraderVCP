@@ -1,9 +1,13 @@
 import datetime
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.config import settings
-from app.redis_pool import redis_settings_from_config, tune_arq_redis_pool
+from app.config import settings, build_redis_url
+from app.redis_pool import (
+    create_async_redis,
+    redis_settings_from_config,
+    tune_arq_redis_pool,
+)
 from app.services.historical_fetcher import sync_status_blocks_enqueue
 from app.worker import WorkerSettings
 
@@ -59,6 +63,8 @@ class TuneArqRedisPoolTests(unittest.IsolatedAsyncioTestCase):
             kwargs["health_check_interval"],
             settings.redis_health_check_interval,
         )
+        self.assertTrue(kwargs["socket_keepalive"])
+        self.assertTrue(kwargs["retry_on_timeout"])
         pool.connection_pool.disconnect.assert_awaited_once()
         pool.ping.assert_awaited_once()
 
@@ -118,6 +124,64 @@ class SyncStatusBlocksEnqueueTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(blocks)
+
+
+class BuildRedisUrlTests(unittest.TestCase):
+    def test_encodes_special_characters_in_password(self) -> None:
+        url = build_redis_url(
+            host="redis",
+            port=6379,
+            password="p@ss/word",
+            db=0,
+        )
+        self.assertEqual(url, "redis://:p%40ss%2Fword@redis:6379/0")
+
+    def test_omits_auth_when_password_missing(self) -> None:
+        url = build_redis_url(host="localhost", port=6380)
+        self.assertEqual(url, "redis://localhost:6380/0")
+
+
+class CreateAsyncRedisTests(unittest.IsolatedAsyncioTestCase):
+    async def test_applies_keepalive_timeouts_and_pings(self) -> None:
+        mock_client = AsyncMock()
+        with patch("app.redis_pool.aioredis.from_url", return_value=mock_client) as from_url:
+            client = await create_async_redis()
+
+        self.assertIs(client, mock_client)
+        kwargs = from_url.call_args.kwargs
+        self.assertTrue(kwargs["decode_responses"])
+        self.assertTrue(kwargs["socket_keepalive"])
+        self.assertTrue(kwargs["retry_on_timeout"])
+        self.assertEqual(kwargs["socket_timeout"], settings.redis_socket_timeout)
+        self.assertEqual(
+            kwargs["socket_connect_timeout"],
+            settings.redis_connect_timeout_seconds,
+        )
+        self.assertEqual(
+            kwargs["health_check_interval"],
+            settings.redis_health_check_interval,
+        )
+        self.assertEqual(kwargs["max_connections"], settings.redis_max_connections)
+        mock_client.ping.assert_awaited_once()
+
+
+class HistoricalSyncLeaseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_skips_when_lease_is_held(self) -> None:
+        from app.services.historical_fetcher import run_historical_sync
+
+        redis = AsyncMock()
+        with patch(
+            "app.services.historical_fetcher.acquire_distributed_lease",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as acquire:
+            result = await run_historical_sync(
+                {"redis": redis, "job_id": "job-1"},
+                triggered_by="manual",
+            )
+
+        self.assertEqual(result["status"], "already_running")
+        acquire.assert_awaited_once()
 
 
 if __name__ == "__main__":

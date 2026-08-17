@@ -98,7 +98,7 @@ Do not substitute these without an explicit instruction from the user.
 | Market data & orders | Fyers API (REST + WebSocket)                      | See §2.1 for which Fyers surfaces we use                                                                                                            |
 | Fundamentals         | Upstox Company Fundamentals API + official NSE corporate filings | Upstox remains primary; official NSE shareholding and integrated-filing XBRL are read-only risk enrichment for technical survivors only; never prices, sockets, or orders |
 | Fundamental LLM inference | OpenRouter (`openai/gpt-5.6-luna-pro`)      | Blind structured second opinion over normalized snapshots; Python's deterministic fit remains authoritative. No tools or money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
-| VCP vision inference | OpenRouter (`google/gemini-3.6-flash`)            | Serial blind pattern interpretation over immutable OHLCV and standardized captures. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
+| VCP vision inference | OpenRouter (`google/gemini-3.7-flash`)            | Serial blind pattern interpretation over immutable OHLCV and standardized captures. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
 
 ### 2.1 Locked Fyers / trading product decisions
 

@@ -1,5 +1,5 @@
 """
-Browser-facing WebSocket handler.
+Browser-facing WebSocket handler with session authentication (SEC-004).
 
 Owns the server-side WS endpoint that browser clients connect to.
 Subscribes to Redis `ticks` channel once (shared) and fans out LTP
@@ -21,18 +21,28 @@ Protocol (JSON over WS):
         {"type": "error", "message": "..."}
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from starlette.websockets import WebSocketState
+
+from app.config import settings
+from app.services.session_service import get_user_session
+from app.redis_pubsub import consume_pubsub
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["ws"])
+
+MAX_SUBSCRIBE_SYMBOLS_PER_MSG = 100
+MAX_TOTAL_SYMBOLS_PER_SESSION = 200
+MAX_CONNECTED_CLIENTS = 100
 
 
 @dataclass
@@ -79,7 +89,12 @@ class WSManager:
         self._clients.clear()
         self._started = False
 
-    async def connect(self, ws: WebSocket):
+    async def connect(self, ws: WebSocket) -> bool:
+        if len(self._clients) >= MAX_CONNECTED_CLIENTS:
+            logger.warning("Rejecting WS connection: max clients reached (%d)", MAX_CONNECTED_CLIENTS)
+            await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="Max connections exceeded")
+            return False
+
         await ws.accept()
         session_id = id(ws)
         self._clients[session_id] = ClientSession(ws=ws)
@@ -92,10 +107,24 @@ class WSManager:
                 await ws.send_json({"type": "tick_worker_status", **json.loads(status_raw)})
         except Exception:
             pass
+        return True
 
-    def disconnect(self, session_id: int):
-        self._clients.pop(session_id, None)
+    async def disconnect(self, session_id: int):
+        removed_session = self._clients.pop(session_id, None)
         logger.info("Browser WS disconnected (total=%d)", len(self._clients))
+
+        # Demand cleanup: release symbols no longer needed by any browser session
+        if removed_session and removed_session.symbols and self._redis:
+            all_remaining_symbols = set().union(*(s.symbols for s in self._clients.values())) if self._clients else set()
+            dropped_symbols = removed_session.symbols - all_remaining_symbols
+            if dropped_symbols:
+                try:
+                    await self._redis.publish(
+                        "tick_subs",
+                        json.dumps({"action": "unsubscribe", "symbols": list(dropped_symbols)}),
+                    )
+                except Exception as e:
+                    logger.warning("Failed to publish tick unsubscribe on disconnect: %s", e)
 
     async def handle_message(self, session_id: int, raw: str):
         """Process a message from a browser client."""
@@ -112,10 +141,28 @@ class WSManager:
         action = data.get("action")
 
         if action == "subscribe":
-            symbols = set(data.get("symbols", []))
-            if not symbols:
+            raw_symbols = data.get("symbols", [])
+            if not isinstance(raw_symbols, list) or not raw_symbols:
                 await session.ws.send_json({"type": "error", "message": "No symbols"})
                 return
+
+            if len(raw_symbols) > MAX_SUBSCRIBE_SYMBOLS_PER_MSG:
+                await session.ws.send_json({
+                    "type": "error",
+                    "message": f"Too many symbols in subscription (max {MAX_SUBSCRIBE_SYMBOLS_PER_MSG})",
+                })
+                return
+
+            symbols = {s for s in raw_symbols if isinstance(s, str) and s.strip()}
+            new_symbols = symbols - session.symbols
+
+            if len(session.symbols) + len(new_symbols) > MAX_TOTAL_SYMBOLS_PER_SESSION:
+                await session.ws.send_json({
+                    "type": "error",
+                    "message": f"Session subscription limit exceeded (max {MAX_TOTAL_SYMBOLS_PER_SESSION} symbols)",
+                })
+                return
+
             session.symbols.update(symbols)
 
             # Fetch current LTP from cache for instant display
@@ -127,7 +174,7 @@ class WSManager:
                     except Exception:
                         pass
 
-            # Also tell tick worker to subscribe if not already
+            # Tell tick worker to subscribe
             await self._redis.publish(
                 "tick_subs",
                 json.dumps({"action": "subscribe", "symbols": list(symbols)}),
@@ -135,8 +182,21 @@ class WSManager:
             await session.ws.send_json({"type": "subscribed", "symbols": list(symbols)})
 
         elif action == "unsubscribe":
-            symbols = set(data.get("symbols", []))
+            raw_symbols = data.get("symbols", [])
+            symbols = {s for s in raw_symbols if isinstance(s, str)}
             session.symbols -= symbols
+
+            all_remaining = set().union(*(s.symbols for s in self._clients.values())) if self._clients else set()
+            dropped_symbols = symbols - all_remaining
+            if dropped_symbols and self._redis:
+                try:
+                    await self._redis.publish(
+                        "tick_subs",
+                        json.dumps({"action": "unsubscribe", "symbols": list(dropped_symbols)}),
+                    )
+                except Exception as e:
+                    logger.warning("Failed to publish tick unsubscribe: %s", e)
+
             await session.ws.send_json({"type": "unsubscribed", "symbols": list(symbols)})
 
         elif action == "ping":
@@ -145,65 +205,92 @@ class WSManager:
         else:
             await session.ws.send_json({"type": "error", "message": f"Unknown action: {action}"})
 
+    async def _fanout_tick_message(self, message: dict[str, Any]) -> None:
+        try:
+            tick = json.loads(message["data"])
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        symbol = tick.get("symbol")
+        if not symbol:
+            return
+
+        dead = []
+        for session_id, session in self._clients.items():
+            if symbol in session.symbols:
+                try:
+                    if session.ws.client_state == WebSocketState.CONNECTED:
+                        await session.ws.send_json(tick)
+                    else:
+                        dead.append(session_id)
+                except Exception:
+                    dead.append(session_id)
+
+        for sid in dead:
+            self._clients.pop(sid, None)
+
     async def _redis_subscriber(self):
         """Subscribe to Redis `ticks` channel and fan out to matching browser clients."""
-        pubsub = self._redis.pubsub()
-        await pubsub.subscribe("ticks")
-
         try:
-            while True:
-                message = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=1.0
-                )
-                if not message or message["type"] != "message":
-                    continue
-
-                try:
-                    tick = json.loads(message["data"])
-                except (json.JSONDecodeError, TypeError):
-                    continue
-
-                symbol = tick.get("symbol")
-                if not symbol:
-                    continue
-
-                # Fan out to clients subscribed to this symbol
-                dead = []
-                for session_id, session in self._clients.items():
-                    if symbol in session.symbols:
-                        try:
-                            if session.ws.client_state == WebSocketState.CONNECTED:
-                                await session.ws.send_json(tick)
-                            else:
-                                dead.append(session_id)
-                        except Exception:
-                            dead.append(session_id)
-
-                for sid in dead:
-                    self._clients.pop(sid, None)
-
+            await consume_pubsub(
+                self._redis,
+                ["ticks"],
+                component="browser_ws",
+                handler=self._fanout_tick_message,
+            )
         except asyncio.CancelledError:
-            pass
-        finally:
-            await pubsub.unsubscribe("ticks")
-            await pubsub.close()
+            return
 
 
 # Global singleton
 manager = WSManager()
 
 
+def _is_origin_allowed(origin: str | None) -> bool:
+    """Validate WS Origin header against allowed CORS origins."""
+    if not origin:
+        # In production, require an explicit valid Origin header
+        if settings.app_environment == "production":
+            return False
+        return True  # Dev/test without origin header
+    origin_clean = origin.rstrip("/")
+    for allowed in settings.cors_origins:
+        if origin_clean == allowed.rstrip("/"):
+            return True
+    return False
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    await manager.connect(ws)
-    session_id = id(ws)
+    # Origin verification (SEC-004)
+    origin = ws.headers.get("origin")
+    if not _is_origin_allowed(origin):
+        logger.warning("Rejected WS connection with disallowed/missing origin: %s", origin)
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="Origin not allowed")
+        return
+
+    # Cookie-only session authentication check (SEC-004 / SEC-001)
+    # (Token is extracted exclusively from HttpOnly cookie, never query params)
+    session_id = ws.cookies.get(settings.session_cookie_name)
+    redis = ws.app.state.redis
+    session = await get_user_session(redis, session_id)
+    if not session:
+        logger.warning("Rejected unauthenticated WS connection")
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="Authentication required")
+        return
+
+    connected = await manager.connect(ws)
+    if not connected:
+        return
+
+    client_id = id(ws)
     try:
         while True:
             raw = await ws.receive_text()
-            await manager.handle_message(session_id, raw)
+            await manager.handle_message(client_id, raw)
     except WebSocketDisconnect:
         pass
     except Exception as e:
         logger.error("WS session error: %s", e)
     finally:
-        manager.disconnect(session_id)
+        await manager.disconnect(client_id)

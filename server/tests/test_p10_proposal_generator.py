@@ -108,7 +108,7 @@ class TestProposalGenerator(unittest.TestCase):
             candles=self.candles,
             ai_output=ai_output,
             rendered_charts=self.charts,
-            model="google/gemini-3.6-flash",
+            model="google/gemini-3.7-flash",
             approved_risk_budget_amount=Decimal("1000"),
             generated_at=dt.datetime(2026, 8, 18, 8, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
         )
@@ -158,7 +158,7 @@ class TestProposalGenerator(unittest.TestCase):
             candles=self.candles,
             ai_output=ai_output,
             rendered_charts=self.charts,
-            model="google/gemini-3.6-flash",
+            model="google/gemini-3.7-flash",
             approved_risk_budget_amount=Decimal("1000"),
         )
         self.assertIsNone(proposal)

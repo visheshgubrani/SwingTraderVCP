@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ConstructionIcon } from "lucide-react"
 import { createBrowserRouter, Outlet, RouterProvider } from "react-router"
@@ -7,7 +7,9 @@ import { Sidebar } from "@/components/layout/Sidebar"
 import { TopBar } from "@/components/layout/TopBar"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AuthBanner } from "@/features/auth/AuthBanner"
+import { AuthProvider, useAppAuth } from "@/features/auth/AuthContext"
 import { FyersCallback } from "@/features/auth/FyersCallback"
+import { LoginPage } from "@/features/auth/LoginPage"
 import { TradingDashboard } from "@/features/dashboard/TradingDashboard"
 import { useTradingAppContext, type ActiveInstrument, type TradingAppContext } from "@/features/dashboard/app-context"
 import { FundamentalsView } from "@/features/fundamentals/FundamentalsView"
@@ -16,8 +18,9 @@ import { JournalView } from "@/features/journal/JournalView"
 import { OrderBookTable, type OrderIntentItem } from "@/features/orders/OrderBookTable"
 import { DashboardOverview } from "@/features/overview/DashboardOverview"
 import { PositionsTable, type PositionItem } from "@/features/positions/PositionsTable"
-import { RolloutBanner } from "@/features/proposals/RolloutBanner"
 import { PaperLedgerView } from "@/features/proposals/PaperLedgerView"
+import { ProposalInbox } from "@/features/proposals/ProposalInbox"
+import { RolloutBanner } from "@/features/proposals/RolloutBanner"
 import { ScannerPage } from "@/features/screener/ScannerPage"
 import { TradebookView } from "@/features/tradebook/TradebookView"
 import { useOrderIntents, usePositions } from "@/features/trade/api"
@@ -39,12 +42,35 @@ function UnavailableFeature({ title, description }: { title: string; description
   )
 }
 
+function AuthGate({ children }: { children: ReactNode }) {
+  const { isAuthenticated, isLoading } = useAppAuth()
+
+  if (isLoading) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-background text-foreground">
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+          <p className="text-xs text-muted-foreground font-mono">Authenticating workstation session...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!isAuthenticated) {
+    return <LoginPage />
+  }
+
+  return <>{children}</>
+}
+
 function TradingAppProviders() {
   return (
-    <MarketWSProvider>
-      <Outlet />
-      <JournalCaptureManager />
-    </MarketWSProvider>
+    <AuthGate>
+      <MarketWSProvider>
+        <Outlet />
+        <JournalCaptureManager />
+      </MarketWSProvider>
+    </AuthGate>
   )
 }
 
@@ -173,5 +199,11 @@ const router = createBrowserRouter([
 ])
 
 export default function App() {
-  return <QueryClientProvider client={queryClient}><RouterProvider router={router} /></QueryClientProvider>
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <RouterProvider router={router} />
+      </AuthProvider>
+    </QueryClientProvider>
+  )
 }

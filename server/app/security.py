@@ -12,7 +12,7 @@ async def save_fyers_token(
     """
     Saves the Fyers access token and refresh token encrypted in the broker_auth_tokens table.
     The encryption is performed database-side via pgcrypto's pgp_sym_encrypt function,
-    keyed by settings.fyers_secret_key.
+    keyed by settings.token_encryption_passphrase (TOKEN_ENCRYPTION_KEY).
     """
     query = text("""
         INSERT INTO broker_auth_tokens (
@@ -43,7 +43,7 @@ async def save_fyers_token(
     await session.execute(query, {
         "access_token": access_token,
         "refresh_token": refresh_token,
-        "key": settings.fyers_secret_key,
+        "key": settings.token_encryption_passphrase,
         "expires_at": expires_at
     })
 
@@ -62,7 +62,7 @@ async def get_fyers_token(session: AsyncSession) -> dict | None:
         FROM broker_auth_tokens
         WHERE broker = 'fyers' AND token_scope = 'default'
     """)
-    result = await session.execute(query, {"key": settings.fyers_secret_key})
+    result = await session.execute(query, {"key": settings.token_encryption_passphrase})
     row = result.first()
     if row:
         return {

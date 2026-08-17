@@ -23,6 +23,15 @@ dependencies = [
 [tool.fastapi]
 entrypoint = "main:app"
 
+# fyers-apiv3 still pins vulnerable transitives. Override to patched releases
+# that remain API-compatible with the SDK (DEP-001).
+[tool.uv]
+override-dependencies = [
+    "aiohttp>=3.11.18",
+    "requests>=2.32.4",
+    "setuptools>=78.1.1",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

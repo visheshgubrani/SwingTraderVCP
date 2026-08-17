@@ -226,7 +226,7 @@ class LiveExecutionTests(unittest.IsolatedAsyncioTestCase):
         healthy = AsyncMock()
         healthy.get.return_value = json.dumps(
             {
-                "status": "running",
+                "status": "ready",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )

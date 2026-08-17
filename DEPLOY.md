@@ -7,7 +7,7 @@ Public hostnames:
 - `https://app.edurel.xyz` — personal client
 - `https://api.edurel.xyz` — FastAPI (+ `wss://api.edurel.xyz/ws`)
 
-Redis is **Upstash** (`rediss://`). Postgres runs **on the VPS** via Compose. Local laptop deps stay in `docker-compose.dev.yml` (used by `./start-dev.sh`).
+Redis runs **on the VPS** in Compose (internal network, password, AOF). Postgres is also on the VPS. Local laptop deps stay in `docker-compose.dev.yml` (used by `./start-dev.sh`).
 
 Host ports avoid other stacks on this VPS (open-webui `8080`, academy `3000`/`5050`, cramlify `3001`/`8001`/`5470`).
 
@@ -20,7 +20,11 @@ Host ports avoid other stacks on this VPS (open-webui `8080`, academy `3000`/`50
    - `docker-compose.prod.yml`
    - `.env.prod` (from [`.env.prod.example`](.env.prod.example))
 3. DNS **A** records for `app.edurel.xyz` and `api.edurel.xyz` → `80.225.207.109`.
-4. Create an Upstash Redis database → set `REDIS_URL=rediss://default:…@….upstash.io:6379`.
+4. Set a strong `REDIS_PASSWORD` in `.env.prod`. Do **not** set `REDIS_URL` —
+   Compose sets `REDIS_HOST=redis` and the apps build the URL (so passwords
+   with `@` stay safe). Redis is not published on a host port.
+   Cutover from Upstash is not a data migration: app sessions must be
+   re-created (log in again) and any in-flight arq jobs on Upstash are abandoned.
 5. Set a strong `POSTGRES_PASSWORD` and Fyers credentials in `.env.prod`.
    Do **not** set `DATABASE_URL` in `.env.prod` — Compose sets `POSTGRES_HOST=postgres`
    and the apps build the URL (so passwords with `@` stay safe).
@@ -32,8 +36,9 @@ Host ports avoid other stacks on this VPS (open-webui `8080`, academy `3000`/`50
    - `VPS_USER` = SSH user
    - `VPS_SSH_KEY` = private key
    - `VPS_DEPLOY_DIR` = `/opt/swingtradervcp` (or your path)
-9. Package visibility: make the three GHCR packages **public**, or set repo secret
-   `GHCR_READ_TOKEN` to a PAT with `read:packages` so the VPS can pull.
+9. Keep the three GHCR packages **private**. Set repo secret `GHCR_READ_TOKEN`
+   to a PAT with `read:packages` so the VPS can pull. Do not make the server
+   image public.
 10. On the VPS, ensure `.env.prod` exists before the first deploy (workflow only
     copies `docker-compose.prod.yml`). Update existing `.env.prod` to use the
     `https://app.edurel.xyz` / HTTPS CORS values from `.env.prod.example`.
@@ -47,7 +52,10 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod pull
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```
 
-Step 1 services: `postgres`, `api`, `worker`, `client`. Swyingify is behind `--profile saas` (Step 2).
+Step 1 services: `postgres`, `redis`, `api`, `worker`, `proposal-worker`, `tick-worker`,
+`entry-supervisor`, `position-monitor`, `order-gateway`, `client`.
+Swyingify is behind `--profile saas` (Step 2). `docker compose up -d` starts
+the full personal money path.
 
 ## First-time data bootstrap (on the VPS, no repo)
 
@@ -185,19 +193,9 @@ If `POSTGRES_USER` / `POSTGRES_DB` in `.env.prod` are not `algo` / `algo_trading
 
 ### Caddy
 
-```caddy
-app.edurel.xyz {
-	encode gzip
-	reverse_proxy 127.0.0.1:8090
-}
-
-api.edurel.xyz {
-	encode gzip
-	reverse_proxy 127.0.0.1:8002
-}
-```
-
-Caddy handles TLS and WebSocket upgrades for `/ws` automatically.
+Use the security-header snippet in [deploy/Caddyfile.example](deploy/Caddyfile.example)
+(HSTS, nosniff, frame deny). Caddy handles TLS and WebSocket upgrades for `/ws`
+automatically.
 
 Server `.env.prod` (already in [`.env.prod.example`](.env.prod.example)):
 

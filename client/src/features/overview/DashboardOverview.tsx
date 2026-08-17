@@ -199,20 +199,22 @@ export function DashboardOverview({
                 || promoteBy.trim().length === 0
                 || promoteReason.trim().length === 0
               }
-              onClick={() =>
-                rollout.data?.next_stage &&
-                rollout.data.required_confirmation &&
-                promote.mutate({
-                  targetStage: rollout.data.next_stage,
-                  confirmation: rollout.data.required_confirmation,
-                  changedBy: promoteBy.trim(),
-                  reason: promoteReason.trim(),
-                })
-              }
+              onClick={() => {
+                const nextStage = rollout.data?.next_stage
+                const confirmation = rollout.data?.required_confirmation
+                if (nextStage && nextStage !== "shadow" && confirmation) {
+                  promote.mutate({
+                    targetStage: nextStage,
+                    confirmation,
+                    changedBy: promoteBy.trim(),
+                    reason: promoteReason.trim(),
+                  })
+                }
+              }}
               size="sm"
               type="button"
             >
-              Promote to {rollout.data.next_stage.replaceAll("_", " ")}
+              Promote to {rollout.data?.next_stage ? rollout.data.next_stage.replaceAll("_", " ") : "next stage"}
             </Button>
           </div>
         )}

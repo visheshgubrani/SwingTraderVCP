@@ -6,7 +6,7 @@
 #   docker compose -f docker-compose.prod.yml --env-file .env.prod pull
 #   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 #
-# Redis is Upstash (REDIS_URL=rediss://...). Do not run a Redis container here.
+# Redis runs on the Compose internal network (requirepass, AOF, no host port).
 # Enable Swyingify later with: --profile saas
 
 name: swingtradervcp
@@ -36,11 +36,46 @@ services:
     ports:
       - "127.0.0.1:5482:5432"
 
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "-a",
+          "${REDIS_PASSWORD:?set REDIS_PASSWORD}",
+          "--no-auth-warning",
+          "ping",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   api:
     image: ${GHCR_IMAGE_PREFIX:-ghcr.io/visheshgubrani/swingtradervcp}/server:${IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     env_file:
       - ${ENV_FILE:-.env.prod}
@@ -49,6 +84,8 @@ services:
       # POSTGRES_PASSWORD into DATABASE_URL (SQLAlchemy breaks on '@' in passwords).
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       APP_ENVIRONMENT: production
     networks:
       - internal
@@ -74,6 +111,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       api:
         condition: service_healthy
     env_file:
@@ -81,6 +120,8 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       APP_ENVIRONMENT: production
     networks:
       - internal
@@ -99,6 +140,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       api:
         condition: service_healthy
     env_file:
@@ -106,6 +149,8 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       APP_ENVIRONMENT: production
     networks: [internal]
     healthcheck:
@@ -118,6 +163,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       api:
         condition: service_healthy
     env_file:
@@ -125,6 +172,8 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       APP_ENVIRONMENT: production
     networks: [internal]
     healthcheck:
@@ -137,6 +186,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       api:
         condition: service_healthy
     env_file:
@@ -144,6 +195,8 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       APP_ENVIRONMENT: production
     networks: [internal]
     healthcheck:
@@ -156,6 +209,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       api:
         condition: service_healthy
     env_file:
@@ -163,6 +218,8 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       APP_ENVIRONMENT: production
     networks: [internal]
     healthcheck:
@@ -175,6 +232,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       api:
         condition: service_healthy
     env_file:
@@ -182,6 +241,8 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       APP_ENVIRONMENT: production
     networks: [internal]
     healthcheck:
@@ -224,3 +285,4 @@ networks:
 
 volumes:
   postgres_data:
+  redis_data:

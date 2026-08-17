@@ -236,9 +236,10 @@ async def ensure_order_gateway_ready(redis) -> None:
         raise ExecutionBlockedError(
             "Order gateway heartbeat is invalid; execution fails closed."
         ) from exc
-    if status.get("status") != "running" or age_seconds > 30:
+    current_status = status.get("status")
+    if current_status != "ready" or age_seconds > 30:
         raise ExecutionBlockedError(
-            "Order gateway is not healthy; execution fails closed."
+            f"Order gateway is not ready (status={current_status}, age={age_seconds:.1f}s); execution fails closed."
         )
 
 
@@ -613,15 +614,26 @@ async def complete_paper_entry_fill(
             "complete_paper_entry_fill requires EXECUTION_MODE=paper."
         )
 
+    stage_row = (
+        await db.execute(
+            text("SELECT stage FROM p10_rollout_state WHERE id = true")
+        )
+    ).mappings().one_or_none()
+    if stage_row and stage_row["stage"] in {"paper", "reduced_live", "full_live"}:
+        raise ExecutionBlockedError(
+            "Manual paper entry fills are disabled while P10 automated paper trading is active. "
+            "Use P10 proposal approvals."
+        )
+
     intent_result = await db.execute(
         text(
             """
             SELECT id, status, quantity, proposal_id, entry_leg_id
             FROM order_intents
             WHERE id = :order_intent_id
-              AND position_id = :position_id
-              AND intent_type = 'entry'
-              AND execution_mode = 'paper'
+            AND position_id = :position_id
+            AND intent_type = 'entry'
+            AND execution_mode = 'paper'
             FOR UPDATE
             """
         ),
@@ -1453,22 +1465,69 @@ async def submit_live_exit_intent(
             message=f"Intent is already in '{snapshot['status']}' state.",
         )
 
-    await ensure_orders_allowed(db)
-    access_token = None
-    if settings.execution_mode == "live":
-        try:
-            access_token = await get_valid_access_token(redis)
-        except AuthUnavailableError as exc:
-            raise ExecutionBlockedError(str(exc)) from exc
+    try:
+        await ensure_orders_allowed(db)
+        access_token = None
+        if settings.execution_mode == "live":
+            try:
+                access_token = await get_valid_access_token(redis)
+            except AuthUnavailableError as exc:
+                raise ExecutionBlockedError(str(exc)) from exc
 
-    await ensure_order_gateway_ready(redis)
-    limiter = rate_limiter or RedisOrderRateLimiter(
-        redis,
-        rate=settings.order_ops_limit,
-    )
-    await limiter.acquire()
-    await ensure_orders_allowed(db)
-    await ensure_order_gateway_ready(redis)
+        await ensure_order_gateway_ready(redis)
+        limiter = rate_limiter or RedisOrderRateLimiter(
+            redis,
+            rate=settings.order_ops_limit,
+        )
+        await limiter.acquire()
+        await ensure_orders_allowed(db)
+        await ensure_order_gateway_ready(redis)
+    except Exception as exc:
+        # Pre-claim failure (e.g. kill switch engaged, gateway not ready, live auth unavailable).
+        # Reject intent and restore position so it does not remain stranded in exit_pending.
+        await db.execute(
+            text(
+                """
+                UPDATE order_intents
+                SET
+                    status = 'rejected',
+                    broker_responded_at = now(),
+                    reason = :message
+                WHERE id = :order_intent_id
+                  AND status = 'created'
+                """
+            ),
+            {"order_intent_id": order_intent_id, "message": str(exc)},
+        )
+        if snapshot.get("trade_instruction_id"):
+            await db.execute(
+                text(
+                    """
+                    UPDATE trade_instructions
+                    SET status = 'rejected'
+                    WHERE id = :trade_instruction_id
+                    """
+                ),
+                {"trade_instruction_id": snapshot["trade_instruction_id"]},
+            )
+        await restore_rejected_exit_position(
+            db,
+            position_id=snapshot.get("position_id"),
+            order_intent_id=order_intent_id,
+            trade_instruction_id=snapshot.get("trade_instruction_id"),
+            event_type="exit_rejected",
+            reason=str(exc),
+            trigger_source="execution_engine",
+            details={"message": str(exc), "stage": "pre_claim_blocked"},
+        )
+        await db.commit()
+        if isinstance(exc, (ExecutionBlockedError, ExecutionSafetyError)):
+            raise
+        return SubmissionResult(
+            broker_call_made=False,
+            outcome="rejected",
+            message=str(exc),
+        )
 
     claim = await db.execute(
         text(
@@ -1850,8 +1909,37 @@ async def _complete_paper_submission(
                 outcome="rejected",
                 message="Paper submission requires a fill price or fresh LTP.",
             )
-        payload = json.loads(raw)
-        price = Decimal(str(payload["ltp"]))
+        try:
+            payload = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+            if not isinstance(payload, dict):
+                raise ValueError("Cached LTP payload is invalid")
+            price = Decimal(str(payload["ltp"]))
+            if price <= Decimal("0"):
+                raise ValueError("Cached LTP price is non-positive")
+            received_at_str = payload.get("received_at")
+            if not received_at_str:
+                raise ValueError("Cached LTP is missing received_at timestamp")
+            received_at = datetime.fromisoformat(received_at_str)
+            if received_at.tzinfo is None:
+                received_at = received_at.replace(tzinfo=timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - received_at).total_seconds()
+            if age_seconds > 15.0:
+                raise ValueError(f"Cached LTP is stale ({age_seconds:.1f}s > 15s)")
+            if age_seconds < -5.0:
+                raise ValueError("Cached LTP has future timestamp")
+        except Exception as exc:
+            await _record_definite_rejection(
+                db,
+                snapshot=snapshot,
+                payload={"s": "error", "message": f"invalid or stale LTP: {exc}"},
+                message=f"Paper submission requires a valid and fresh LTP: {exc}",
+            )
+            await db.commit()
+            return SubmissionResult(
+                broker_call_made=True,
+                outcome="rejected",
+                message=f"Paper submission requires a valid and fresh LTP: {exc}",
+            )
     try:
         paper_result = await place_paper_order(
             db, snapshot=snapshot, fill_price=price
@@ -2094,6 +2182,134 @@ def _extract_async_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
+async def restore_rejected_exit_position(
+    db: AsyncSession,
+    *,
+    position_id: UUID | str | None,
+    order_intent_id: UUID | str | None = None,
+    trade_instruction_id: UUID | str | None = None,
+    event_type: str = "exit_rejected",
+    reason: str = "Exit intent rejected or cancelled",
+    trigger_source: str = "execution_engine",
+    details: dict[str, Any] | None = None,
+) -> str | None:
+    """
+    Restore an exit_pending position back to active monitoring (open / trailing_active)
+    when an exit intent is definitively rejected or cancelled (TRD-002 / OG-002).
+    Uses the exact from_state from the prior position_events transition to exit_pending.
+    """
+    if not position_id:
+        return None
+
+    pos_result = await db.execute(
+        text(
+            """
+            SELECT
+                id,
+                state,
+                open_quantity,
+                trailing_stop,
+                t2_filled_shares,
+                t2_shares
+            FROM positions
+            WHERE id = :position_id
+            FOR UPDATE OF positions
+            """
+        ),
+        {"position_id": position_id},
+    )
+    position = pos_result.mappings().one_or_none()
+    if (
+        position is None
+        or position["state"] != "exit_pending"
+        or int(position["open_quantity"] or 0) <= 0
+    ):
+        return None
+
+    # Retrieve the exact from_state from the position_events entry that moved it to exit_pending
+    prior_event_result = await db.execute(
+        text(
+            """
+            SELECT from_state
+            FROM position_events
+            WHERE position_id = :position_id
+              AND to_state = 'exit_pending'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ),
+        {"position_id": position_id},
+    )
+    prior_event = prior_event_result.mappings().one_or_none()
+    if prior_event and prior_event["from_state"] in {"open", "trailing_active"}:
+        restored_state = prior_event["from_state"]
+    else:
+        # Fallback: check if trailing stop was active
+        is_trailing = (
+            position["trailing_stop"] is not None
+            and int(position["t2_filled_shares"] or 0) >= int(position["t2_shares"] or 0) > 0
+        )
+        restored_state = "trailing_active" if is_trailing else "open"
+
+    await db.execute(
+        text(
+            """
+            UPDATE positions
+            SET state = :restored_state
+            WHERE id = :position_id
+              AND state = 'exit_pending'
+              AND open_quantity > 0
+            """
+        ),
+        {"position_id": position_id, "restored_state": restored_state},
+    )
+    payload_details = details or {}
+    await db.execute(
+        text(
+            """
+            INSERT INTO position_events (
+                position_id,
+                event_type,
+                from_state,
+                to_state,
+                trigger_source,
+                details
+            )
+            VALUES (
+                :position_id,
+                :event_type,
+                'exit_pending',
+                :restored_state,
+                :trigger_source,
+                CAST(:details AS jsonb)
+            )
+            """
+        ),
+        {
+            "position_id": position_id,
+            "event_type": event_type,
+            "restored_state": restored_state,
+            "trigger_source": trigger_source,
+            "details": json.dumps(payload_details),
+        },
+    )
+    await _emit_system_event(
+        db,
+        severity="critical",
+        event_type="exit_intent_rejected_position_rearmed",
+        correlation_id=trade_instruction_id,
+        position_id=position_id,
+        order_intent_id=order_intent_id,
+        payload={
+            "reason": reason,
+            "restored_state": restored_state,
+            "residual_open_quantity": int(position["open_quantity"]),
+            "broker_payload": payload_details,
+        },
+    )
+    return restored_state
+
+
 async def _record_definite_rejection(
     db: AsyncSession,
     *,
@@ -2115,22 +2331,36 @@ async def _record_definite_rejection(
         ),
         {"order_intent_id": snapshot["id"], "message": message},
     )
-    await db.execute(
-        text(
-            """
-            UPDATE trade_instructions
-            SET status = 'rejected'
-            WHERE id = :trade_instruction_id
-            """
-        ),
-        {"trade_instruction_id": snapshot["trade_instruction_id"]},
-    )
-    await _cancel_unfilled_position(
-        db,
-        snapshot=snapshot,
-        event_type="entry_rejected",
-        details={"message": message, "broker_payload": payload},
-    )
+    if snapshot.get("trade_instruction_id"):
+        await db.execute(
+            text(
+                """
+                UPDATE trade_instructions
+                SET status = 'rejected'
+                WHERE id = :trade_instruction_id
+                """
+            ),
+            {"trade_instruction_id": snapshot["trade_instruction_id"]},
+        )
+    if snapshot.get("intent_type") == "entry":
+        await _cancel_unfilled_position(
+            db,
+            snapshot=snapshot,
+            event_type="entry_rejected",
+            details={"message": message, "broker_payload": payload},
+        )
+    else:
+        # Exit intent rejected: restore position back to active monitoring (TRD-002)
+        await restore_rejected_exit_position(
+            db,
+            position_id=snapshot.get("position_id"),
+            order_intent_id=snapshot.get("id"),
+            trade_instruction_id=snapshot.get("trade_instruction_id"),
+            event_type="exit_rejected",
+            reason=message,
+            trigger_source="execution_engine",
+            details={"message": message, "broker_payload": payload},
+        )
     await _insert_submission_event(
         db,
         snapshot=snapshot,

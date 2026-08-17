@@ -120,8 +120,8 @@ Configure without committing credentials:
 ```env
 VCP_VISION_ENABLED=true
 OPENROUTER_API_KEY=<openrouter-key>
-VCP_VISION_MODEL=google/gemini-3.6-flash
-VCP_VISION_REASONING_EFFORT=medium  # low | medium | high | xhigh
+VCP_VISION_MODEL=google/gemini-3.7-flash
+VCP_VISION_REASONING_EFFORT=high  # low | medium | high | xhigh
 VCP_VISION_MAX_TOKENS=16384  # includes hidden reasoning + structured JSON
 ```
 

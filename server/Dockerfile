@@ -6,7 +6,8 @@ FROM python:3.13-slim-bookworm AS builder
 
 COPY --from=uv /uv /uvx /bin/
 
-# fyers-apiv3 pins aiohttp==3.9.3 (sdist only on Python 3.13); need a compiler.
+# fyers-apiv3 historically pinned aiohttp 3.9.3 (sdist-only on Python 3.13).
+# uv override-dependencies bump that series; keep a compiler for any remaining sdists.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*

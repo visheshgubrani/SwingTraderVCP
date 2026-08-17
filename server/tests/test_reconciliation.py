@@ -163,12 +163,12 @@ class ReconciliationMatchingTests(unittest.TestCase):
         indexes = _build_order_indexes([order], {str(intent["id"]): intent})
         self.assertIs(_match_broker_order(intent, indexes), order)
 
-    def test_aggregate_broker_quantities_prefers_max_cnc_exposure(self) -> None:
+    def test_aggregate_broker_quantities_sums_holdings_and_positions(self) -> None:
         positions = [{"symbol": "NSE:SBIN-EQ", "productType": "CNC", "netQty": 5}]
         holdings = [{"symbol": "NSE:SBIN-EQ", "remainingQuantity": 8}]
         self.assertEqual(
             _aggregate_broker_quantities(positions, holdings),
-            {"NSE:SBIN-EQ": 8},
+            {"NSE:SBIN-EQ": 13},
         )
 
 

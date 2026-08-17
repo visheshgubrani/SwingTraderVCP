@@ -20,13 +20,19 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
-import redis.asyncio as aioredis
 from sqlalchemy import text
+from uuid import uuid4
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.config import settings
 from app.database import async_session
+from app.redis_pool import create_async_redis
+from app.redis_pubsub import consume_pubsub
+from app.services.distributed_lease import (
+    acquire_distributed_lease,
+    release_distributed_lease,
+    renew_distributed_lease,
+)
 from app.services.execution_engine import submit_live_exit_intent
 from app.services.position_monitor import (
     MonitoredPosition,
@@ -41,22 +47,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger("position_monitor_worker")
 
+_LOCK_KEY = "position_monitor:singleton"
+_STATUS_KEY = "position_monitor:status"
+_LOCK_TTL_SECONDS = 30
+_LOCK_REFRESH_SECONDS = 10
+
 REDIS_CHANNEL_TICKS = "ticks"
 REDIS_CHANNEL_CONTROLS = "system_controls"
-REDIS_STATUS_KEY = "position_monitor:status"
-REDIS_STATUS_TTL = 30
+REDIS_STATUS_KEY = _STATUS_KEY
+REDIS_STATUS_TTL = _LOCK_TTL_SECONDS
 RELOAD_SECONDS = 20
 
 _shutdown = asyncio.Event()
 
 
-async def _set_status(redis, status: str, *, positions: int = 0) -> None:
+async def _set_status(
+    redis,
+    status: str,
+    worker_id: str | None = None,
+    *,
+    positions: int = 0,
+) -> None:
     payload = {
         "status": status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "positions": positions,
     }
-    await redis.set(REDIS_STATUS_KEY, json.dumps(payload), ex=REDIS_STATUS_TTL)
+    if worker_id is not None:
+        payload["worker_id"] = worker_id
+    await redis.set(_STATUS_KEY, json.dumps(payload), ex=_LOCK_TTL_SECONDS)
 
 
 async def _emit_system_event(event_type: str, payload: dict) -> None:
@@ -103,8 +122,12 @@ async def _load_kill_switch(db) -> bool:
     return bool(row and row["enabled"])
 
 
+MAX_TICK_AGE_SECONDS = 10.0
+
+
 class PositionMonitorRuntime:
-    def __init__(self) -> None:
+    def __init__(self, worker_id: str | None = None) -> None:
+        self.worker_id = worker_id
         self.positions_by_symbol: dict[str, list[MonitoredPosition]] = {}
         self.positions_by_id: dict[str, MonitoredPosition] = {}
         self.kill_switch_engaged = False
@@ -125,7 +148,12 @@ class PositionMonitorRuntime:
                     position
                 )
             await sync_tick_subscriptions(redis, positions)
-            await _set_status(redis, "running", positions=len(positions))
+            await _set_status(
+                redis,
+                "running",
+                worker_id=self.worker_id,
+                positions=len(positions),
+            )
             logger.info(
                 "Loaded %d monitored positions (kill switch=%s)",
                 len(positions),
@@ -151,11 +179,49 @@ class PositionMonitorRuntime:
         if not symbol or ltp_raw is None:
             return
 
+        try:
+            ltp = Decimal(str(ltp_raw))
+        except (ValueError, TypeError):
+            return
+
+        if ltp <= Decimal("0"):
+            logger.warning(
+                "Position monitor dropped non-positive tick: symbol=%s ltp=%s",
+                symbol,
+                ltp,
+            )
+            return
+
+        received_at_str = tick.get("received_at")
+        if not received_at_str:
+            logger.warning(
+                "Position monitor dropped tick with missing received_at: symbol=%s",
+                symbol,
+            )
+            return
+
+        try:
+            received_at = datetime.fromisoformat(received_at_str)
+            if received_at.tzinfo is None:
+                received_at = received_at.replace(tzinfo=timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - received_at).total_seconds()
+            if age_seconds > MAX_TICK_AGE_SECONDS or age_seconds < -5.0:
+                logger.warning(
+                    "Position monitor dropped stale/future tick: symbol=%s age=%.2fs",
+                    symbol,
+                    age_seconds,
+                )
+                return
+        except (ValueError, TypeError):
+            logger.warning(
+                "Position monitor dropped tick with unparseable received_at: symbol=%s",
+                symbol,
+            )
+            return
+
         positions = self.positions_by_symbol.get(symbol, [])
         if not positions:
             return
-
-        ltp = Decimal(str(ltp_raw))
         async with self._tick_lock:
             for position in list(positions):
                 if position.state not in {"open", "trailing_active"}:
@@ -199,15 +265,26 @@ class PositionMonitorRuntime:
                         await self.reload(redis)
 
 
-async def _heartbeat_loop(redis, runtime: PositionMonitorRuntime) -> None:
+async def _heartbeat_loop(redis, runtime: PositionMonitorRuntime, worker_id: str) -> None:
     while not _shutdown.is_set():
+        refreshed = await renew_distributed_lease(
+            redis,
+            _LOCK_KEY,
+            worker_id,
+            _LOCK_TTL_SECONDS,
+        )
+        if not refreshed:
+            logger.critical("Position monitor lost its singleton lease; stopping.")
+            _shutdown.set()
+            return
         await _set_status(
             redis,
             "running",
+            worker_id=worker_id,
             positions=len(runtime.positions_by_id),
         )
         try:
-            await asyncio.wait_for(_shutdown.wait(), timeout=10)
+            await asyncio.wait_for(_shutdown.wait(), timeout=_LOCK_REFRESH_SECONDS)
         except asyncio.TimeoutError:
             pass
 
@@ -225,51 +302,56 @@ async def _reload_loop(redis, runtime: PositionMonitorRuntime) -> None:
 
 
 async def _ticks_loop(redis, runtime: PositionMonitorRuntime) -> None:
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(REDIS_CHANNEL_TICKS)
-    try:
-        while not _shutdown.is_set():
-            message = await pubsub.get_message(
-                ignore_subscribe_messages=True,
-                timeout=1.0,
-            )
-            if not message or message["type"] != "message":
-                continue
-            try:
-                tick = json.loads(message["data"])
-            except (json.JSONDecodeError, TypeError):
-                continue
-            await runtime.handle_tick(redis, tick)
-    finally:
-        await pubsub.unsubscribe(REDIS_CHANNEL_TICKS)
-        await pubsub.close()
+    async def handle_message(message: dict) -> None:
+        try:
+            tick = json.loads(message["data"])
+        except (json.JSONDecodeError, TypeError):
+            return
+        await runtime.handle_tick(redis, tick)
+
+    await consume_pubsub(
+        redis,
+        [REDIS_CHANNEL_TICKS],
+        component="position_monitor",
+        handler=handle_message,
+        should_stop=_shutdown.is_set,
+    )
 
 
 async def _controls_loop(redis, runtime: PositionMonitorRuntime) -> None:
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(REDIS_CHANNEL_CONTROLS)
-    try:
-        while not _shutdown.is_set():
-            message = await pubsub.get_message(
-                ignore_subscribe_messages=True,
-                timeout=1.0,
-            )
-            if not message or message["type"] != "message":
-                continue
-            await runtime.handle_kill_switch_message(message["data"])
-    finally:
-        await pubsub.unsubscribe(REDIS_CHANNEL_CONTROLS)
-        await pubsub.close()
+    async def handle_message(message: dict) -> None:
+        await runtime.handle_kill_switch_message(message["data"])
+
+    await consume_pubsub(
+        redis,
+        [REDIS_CHANNEL_CONTROLS],
+        component="position_monitor",
+        handler=handle_message,
+        should_stop=_shutdown.is_set,
+    )
 
 
 async def run_position_monitor() -> None:
-    redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-    runtime = PositionMonitorRuntime()
+    redis = await create_async_redis()
+    worker_id = str(uuid4())
 
-    await _emit_system_event("position_monitor_started", {})
+    if not await acquire_distributed_lease(
+        redis,
+        _LOCK_KEY,
+        worker_id,
+        _LOCK_TTL_SECONDS,
+    ):
+        logger.error("Another position monitor owns the singleton lease.")
+        await redis.aclose()
+        return
+
+    runtime = PositionMonitorRuntime(worker_id=worker_id)
+
+    await _set_status(redis, "running", worker_id=worker_id, positions=0)
+    await _emit_system_event("position_monitor_started", {"worker_id": worker_id})
     await runtime.reload(redis)
 
-    heartbeat_task = asyncio.create_task(_heartbeat_loop(redis, runtime))
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(redis, runtime, worker_id))
     reload_task = asyncio.create_task(_reload_loop(redis, runtime))
     ticks_task = asyncio.create_task(_ticks_loop(redis, runtime))
     controls_task = asyncio.create_task(_controls_loop(redis, runtime))
@@ -284,8 +366,9 @@ async def run_position_monitor() -> None:
                 await task
             except asyncio.CancelledError:
                 pass
-        await _set_status(redis, "stopped")
-        await _emit_system_event("position_monitor_stopped", {})
+        await _set_status(redis, "stopped", worker_id=worker_id)
+        await _emit_system_event("position_monitor_stopped", {"worker_id": worker_id})
+        await release_distributed_lease(redis, _LOCK_KEY, worker_id)
         await redis.aclose()
 
 

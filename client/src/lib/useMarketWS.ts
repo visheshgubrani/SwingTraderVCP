@@ -35,8 +35,6 @@ function resolveWsUrl(): string {
   }
 }
 
-const WS_URL = resolveWsUrl();
-
 export interface TickData {
   symbol: string;
   ltp: number;
@@ -66,7 +64,10 @@ export function useMarketWS() {
   const [tickWorkerStatus, setTickWorkerStatus] = useState<TickWorkerStatus | null>(null);
   const subscribedRef = useRef<Set<string>>(new Set());
 
-  const { sendJsonMessage, lastJsonMessage, readyState } = useWebSocket(WS_URL, {
+  // WebSocket connects directly using browser HttpOnly cookie for auth
+  const wsUrl = resolveWsUrl();
+
+  const { sendJsonMessage, lastJsonMessage, readyState } = useWebSocket(wsUrl, {
     shouldReconnect: () => true,
     reconnectInterval: 3000,
     reconnectAttempts: 50,

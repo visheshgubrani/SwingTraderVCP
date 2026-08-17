@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { apiRequest } from "@/lib/api"
 
 export interface TradeProposalItem {
   id: string
@@ -176,28 +177,10 @@ const operationsKeys = {
   paperPortfolio: ["automation", "paper-portfolio"] as const,
 }
 
-async function responseJson<T>(response: Response, fallback: string): Promise<T> {
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: fallback }))
-    const detail = body.detail
-    throw new Error(
-      typeof detail === "string"
-        ? detail
-        : detail
-          ? JSON.stringify(detail)
-          : fallback,
-    )
-  }
-  return response.json()
-}
-
 export function useMarketContext() {
   return useQuery<MarketContextLatest>({
     queryKey: operationsKeys.marketContext,
-    queryFn: async () => responseJson(
-      await fetch("/api/v1/automation/market-context/latest"),
-      "Failed to fetch P9 market context",
-    ),
+    queryFn: () => apiRequest<MarketContextLatest>("/automation/market-context/latest"),
     staleTime: 60_000,
     refetchInterval: 60_000,
   })
@@ -206,10 +189,7 @@ export function useMarketContext() {
 export function useStopStreak(mode: "paper" | "live") {
   return useQuery<StopStreakState>({
     queryKey: operationsKeys.stopStreak(mode),
-    queryFn: async () => responseJson(
-      await fetch(`/api/v1/automation/stop-streak/${mode}`),
-      `Failed to fetch ${mode} stop streak`,
-    ),
+    queryFn: () => apiRequest<StopStreakState>(`/automation/stop-streak/${mode}`),
     staleTime: 5_000,
     refetchInterval: 10_000,
   })
@@ -218,15 +198,11 @@ export function useStopStreak(mode: "paper" | "live") {
 export function useResetStopStreak() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async ({ mode, reason }: { mode: "paper" | "live"; reason: string }) =>
-      responseJson<StopStreakState>(
-        await fetch(`/api/v1/automation/stop-streak/${mode}/reset`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reason }),
-        }),
-        "Failed to reset stop streak",
-      ),
+    mutationFn: ({ mode, reason }: { mode: "paper" | "live"; reason: string }) =>
+      apiRequest<StopStreakState>(`/automation/stop-streak/${mode}/reset`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      }),
     onSuccess: (state) => {
       queryClient.setQueryData(operationsKeys.stopStreak(state.execution_mode), state)
     },
@@ -236,10 +212,7 @@ export function useResetStopStreak() {
 export function useP10Rollout() {
   return useQuery<P10RolloutState>({
     queryKey: operationsKeys.rollout,
-    queryFn: async () => responseJson(
-      await fetch("/api/v1/automation/rollout"),
-      "Failed to fetch P10 rollout stage",
-    ),
+    queryFn: () => apiRequest<P10RolloutState>("/automation/rollout"),
     staleTime: 5_000,
     refetchInterval: 10_000,
   })
@@ -248,7 +221,7 @@ export function useP10Rollout() {
 export function usePromoteP10Rollout() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       targetStage,
       confirmation,
       changedBy,
@@ -258,10 +231,9 @@ export function usePromoteP10Rollout() {
       confirmation: string
       changedBy: string
       reason: string
-    }) => responseJson<P10RolloutState>(
-      await fetch("/api/v1/automation/rollout/promote", {
+    }) =>
+      apiRequest<P10RolloutState>("/automation/rollout/promote", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target_stage: targetStage,
           confirmation,
@@ -269,8 +241,6 @@ export function usePromoteP10Rollout() {
           reason,
         }),
       }),
-      "Failed to promote P10 rollout stage",
-    ),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: operationsKeys.rollout })
       void queryClient.invalidateQueries({ queryKey: operationsKeys.paperPortfolio })
@@ -281,10 +251,7 @@ export function usePromoteP10Rollout() {
 export function usePaperPortfolio(enabled = true) {
   return useQuery<PaperPortfolio>({
     queryKey: operationsKeys.paperPortfolio,
-    queryFn: async () => responseJson(
-      await fetch("/api/v1/automation/paper-portfolio"),
-      "Failed to fetch paper portfolio",
-    ),
+    queryFn: () => apiRequest<PaperPortfolio>("/automation/paper-portfolio"),
     enabled,
     staleTime: 5_000,
     refetchInterval: 10_000,
@@ -295,24 +262,24 @@ export function usePaperPortfolio(enabled = true) {
 export function useResetPaperPortfolio() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       changedBy,
       reason,
     }: {
       changedBy: string
       reason: string
-    }) => responseJson<{ starting_cash: number; cash_available: number }>(
-      await fetch("/api/v1/automation/paper-portfolio/reset", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          confirmation: "CONFIRM_PAPER_RESET",
-          changed_by: changedBy,
-          reason,
-        }),
-      }),
-      "Failed to reset paper portfolio",
-    ),
+    }) =>
+      apiRequest<{ starting_cash: number; cash_available: number }>(
+        "/automation/paper-portfolio/reset",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            confirmation: "CONFIRM_PAPER_RESET",
+            changed_by: changedBy,
+            reason,
+          }),
+        },
+      ),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: operationsKeys.paperPortfolio })
     },
@@ -322,7 +289,7 @@ export function useResetPaperPortfolio() {
 export function useEnforceMarketContext() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       version,
       replayReportHash,
       membershipMode,
@@ -332,18 +299,18 @@ export function useEnforceMarketContext() {
       replayReportHash: string
       membershipMode: "point_in_time" | "current_membership_survivorship_biased"
       approvedBy: string
-    }) => responseJson<MarketContextLatest>(
-      await fetch(`/api/v1/automation/market-context/policies/${encodeURIComponent(version)}/enforce`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          replay_report_hash: replayReportHash,
-          replay_membership_mode: membershipMode,
-          approved_by: approvedBy,
-        }),
-      }),
-      "Failed to enforce P9 policy",
-    ),
+    }) =>
+      apiRequest<MarketContextLatest>(
+        `/automation/market-context/policies/${encodeURIComponent(version)}/enforce`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            replay_report_hash: replayReportHash,
+            replay_membership_mode: membershipMode,
+            approved_by: approvedBy,
+          }),
+        },
+      ),
     onSuccess: (context) => {
       queryClient.setQueryData(operationsKeys.marketContext, context)
     },
@@ -353,11 +320,10 @@ export function useEnforceMarketContext() {
 export function useTradeProposals(statusFilter: string = "pending_approval") {
   return useQuery<TradeProposalItem[]>({
     queryKey: ["trade-proposals", statusFilter],
-    queryFn: async () => {
-      const res = await fetch(`/api/v1/automation/proposals?status=${encodeURIComponent(statusFilter)}`)
-      if (!res.ok) throw new Error("Failed to fetch trade proposals")
-      return res.json()
-    },
+    queryFn: () =>
+      apiRequest<TradeProposalItem[]>(
+        `/automation/proposals?status=${encodeURIComponent(statusFilter)}`,
+      ),
     refetchInterval: 10000,
   })
 }
@@ -365,11 +331,9 @@ export function useTradeProposals(statusFilter: string = "pending_approval") {
 export function useTradeProposal(id: string | null) {
   return useQuery<TradeProposalItem>({
     queryKey: ["trade-proposal", id],
-    queryFn: async () => {
+    queryFn: () => {
       if (!id) throw new Error("No proposal ID provided")
-      const res = await fetch(`/api/v1/automation/proposals/${id}`)
-      if (!res.ok) throw new Error("Failed to fetch proposal details")
-      return res.json()
+      return apiRequest<TradeProposalItem>(`/automation/proposals/${id}`)
     },
     enabled: !!id,
   })
@@ -378,22 +342,15 @@ export function useTradeProposal(id: string | null) {
 export function useRecordProposalDecision() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async ({ id, payload }: { id: string; payload: DecisionPayload }) => {
-      const res = await fetch(`/api/v1/automation/proposals/${id}/decision`, {
+    mutationFn: ({ id, payload }: { id: string; payload: DecisionPayload }) =>
+      apiRequest<TradeProposalItem>(`/automation/proposals/${id}/decision`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: "Failed to record decision" }))
-        throw new Error(err.detail || "Failed to record decision")
-      }
-      return res.json()
-    },
+      }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
-      queryClient.invalidateQueries({ queryKey: ["trade-proposal"] })
-      queryClient.invalidateQueries({ queryKey: ["entry-supervisor-status"] })
+      void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
+      void queryClient.invalidateQueries({ queryKey: ["trade-proposal"] })
+      void queryClient.invalidateQueries({ queryKey: ["entry-supervisor-status"] })
     },
   })
 }
@@ -417,11 +374,7 @@ export function useEntrySupervisorStatus() {
     }>
   }>({
     queryKey: ["entry-supervisor-status"],
-    queryFn: async () => {
-      const res = await fetch("/api/v1/automation/entry-supervisor/status")
-      if (!res.ok) throw new Error("Failed to fetch supervisor status")
-      return res.json()
-    },
+    queryFn: () => apiRequest("/automation/entry-supervisor/status"),
     refetchInterval: 5000,
   })
 }
@@ -429,11 +382,7 @@ export function useEntrySupervisorStatus() {
 export function useCapacityConflicts() {
   return useQuery<CapacityConflict[]>({
     queryKey: ["capacity-conflicts", "open"],
-    queryFn: async () => {
-      const res = await fetch("/api/v1/automation/capacity-conflicts?status=open")
-      if (!res.ok) throw new Error("Failed to fetch capacity conflicts")
-      return res.json()
-    },
+    queryFn: () => apiRequest<CapacityConflict[]>("/automation/capacity-conflicts?status=open"),
     refetchInterval: 3000,
   })
 }
@@ -441,31 +390,24 @@ export function useCapacityConflicts() {
 export function useResolveCapacityConflict() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       id,
       chosenLegId,
     }: {
       id: string
       chosenLegId: string | null
-    }) => {
-      const res = await fetch(`/api/v1/automation/capacity-conflicts/${id}/decision`, {
+    }) =>
+      apiRequest(`/automation/capacity-conflicts/${id}/decision`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
           chosenLegId
             ? { resolution_type: "operator_selected", chosen_leg_id: chosenLegId }
             : { resolution_type: "operator_skipped" },
         ),
-      })
-      if (!res.ok) {
-        const error = await res.json().catch(() => ({ detail: "Decision failed" }))
-        throw new Error(error.detail || "Decision failed")
-      }
-      return res.json()
-    },
+      }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["capacity-conflicts"] })
-      queryClient.invalidateQueries({ queryKey: ["entry-supervisor-status"] })
+      void queryClient.invalidateQueries({ queryKey: ["capacity-conflicts"] })
+      void queryClient.invalidateQueries({ queryKey: ["entry-supervisor-status"] })
     },
   })
 }

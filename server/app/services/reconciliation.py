@@ -4,9 +4,10 @@ import base64
 import json
 import logging
 from collections import defaultdict
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from arq.connections import ArqRedis
 from sqlalchemy import text
@@ -15,6 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import async_session
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
+from app.services.distributed_lease import (
+    acquire_distributed_lease,
+    release_distributed_lease,
+)
 from app.services.fyers_broker_reads import BrokerBooks, FyersBrokerReadClient, FyersBrokerReadError
 from app.services.order_gateway import process_order_message, process_trade_message
 from app.services.paper_broker import PaperBrokerError, fetch_preflight as fetch_paper_preflight
@@ -25,6 +30,8 @@ _TERMINAL_INTENT_STATUSES = frozenset({"filled", "rejected", "cancelled"})
 _OPEN_POSITION_STATES = frozenset(
     {"pending_entry", "open", "trailing_active", "exit_pending"}
 )
+_RUN_LEASE_KEY = "reconciliation:run_lease"
+_RUN_LEASE_TTL_SECONDS = 300
 
 
 async def run_reconciliation(
@@ -34,75 +41,95 @@ async def run_reconciliation(
     """arq job: compare local live state to Fyers and heal or flag discrepancies."""
     redis: ArqRedis = ctx["redis"]
     job_id = str(ctx.get("job_id", triggered_by))
+    lease_id = str(uuid4())
 
-    async with async_session() as db:
-        job_run_id, recon_run_id = await _start_runs(
-            db,
-            job_key=f"reconciliation_{job_id}",
-            triggered_by=triggered_by,
+    if not await acquire_distributed_lease(
+        redis,
+        _RUN_LEASE_KEY,
+        lease_id,
+        _RUN_LEASE_TTL_SECONDS,
+    ):
+        logger.warning(
+            "Reconciliation run skipped: another reconciliation job currently holds the run lease (triggered_by=%s).",
+            triggered_by,
         )
-        await db.commit()
+        return {
+            "status": "skipped",
+            "reason": "already_running",
+            "triggered_by": triggered_by,
+        }
 
-        try:
-            if settings.execution_mode == "paper":
-                snapshot = await fetch_paper_preflight(db)
-                books = snapshot.books
-            else:
-                access_token = await get_valid_access_token(redis)
-                client = FyersBrokerReadClient(app_id=settings.fyers_app_id)
-                books = await client.fetch_all(access_token=access_token)
-        except (AuthUnavailableError, FyersBrokerReadError, PaperBrokerError) as exc:
-            await _fail_runs(
+    try:
+        async with async_session() as db:
+            job_run_id, recon_run_id = await _start_runs(
+                db,
+                job_key=f"reconciliation_{job_id}",
+                triggered_by=triggered_by,
+            )
+            await db.commit()
+
+            try:
+                if settings.execution_mode == "paper":
+                    snapshot = await fetch_paper_preflight(db)
+                    books = snapshot.books
+                else:
+                    access_token = await get_valid_access_token(redis)
+                    client = FyersBrokerReadClient(app_id=settings.fyers_app_id)
+                    books = await client.fetch_all(access_token=access_token)
+            except (AuthUnavailableError, FyersBrokerReadError, PaperBrokerError) as exc:
+                await _fail_runs(
+                    db,
+                    job_run_id=job_run_id,
+                    recon_run_id=recon_run_id,
+                    error=str(exc),
+                )
+                await _emit_system_event(
+                    db,
+                    severity="critical",
+                    event_type="reconciliation_fetch_failed",
+                    payload={"error": str(exc), "triggered_by": triggered_by},
+                )
+                await db.commit()
+                logger.error("Reconciliation broker fetch failed: %s", exc)
+                return {"status": "failed", "error": str(exc), "run_id": str(recon_run_id)}
+
+            summary = await _reconcile_books(db, recon_run_id=recon_run_id, books=books)
+            critical_open = int(summary.get("critical_open", 0))
+            discrepancies = int(summary.get("total_items", 0))
+
+            await _finish_runs(
                 db,
                 job_run_id=job_run_id,
                 recon_run_id=recon_run_id,
-                error=str(exc),
+                discrepancies=discrepancies,
+                summary=summary,
             )
-            await _emit_system_event(
-                db,
-                severity="critical",
-                event_type="reconciliation_fetch_failed",
-                payload={"error": str(exc), "triggered_by": triggered_by},
-            )
+            if critical_open > 0:
+                await _emit_system_event(
+                    db,
+                    severity="critical",
+                    event_type="reconciliation_critical_items",
+                    payload={
+                        "reconciliation_run_id": str(recon_run_id),
+                        "critical_open": critical_open,
+                        "summary": summary,
+                    },
+                )
             await db.commit()
-            logger.error("Reconciliation broker fetch failed: %s", exc)
-            return {"status": "failed", "error": str(exc), "run_id": str(recon_run_id)}
-
-        summary = await _reconcile_books(db, recon_run_id=recon_run_id, books=books)
-        critical_open = int(summary.get("critical_open", 0))
-        discrepancies = int(summary.get("total_items", 0))
-
-        await _finish_runs(
-            db,
-            job_run_id=job_run_id,
-            recon_run_id=recon_run_id,
-            discrepancies=discrepancies,
-            summary=summary,
-        )
-        if critical_open > 0:
-            await _emit_system_event(
-                db,
-                severity="critical",
-                event_type="reconciliation_critical_items",
-                payload={
-                    "reconciliation_run_id": str(recon_run_id),
-                    "critical_open": critical_open,
-                    "summary": summary,
-                },
+            logger.info(
+                "Reconciliation succeeded (run=%s, items=%s, healed=%s)",
+                recon_run_id,
+                discrepancies,
+                summary.get("healed", 0),
             )
-        await db.commit()
-        logger.info(
-            "Reconciliation succeeded (run=%s, items=%s, healed=%s)",
-            recon_run_id,
-            discrepancies,
-            summary.get("healed", 0),
-        )
-        return {
-            "status": "succeeded",
-            "run_id": str(recon_run_id),
-            "discrepancies_found": discrepancies,
-            "summary": summary,
-        }
+            return {
+                "status": "succeeded",
+                "run_id": str(recon_run_id),
+                "discrepancies_found": discrepancies,
+                "summary": summary,
+            }
+    finally:
+        await release_distributed_lease(redis, _RUN_LEASE_KEY, lease_id)
 
 
 async def _reconcile_books(
@@ -125,19 +152,32 @@ async def _reconcile_books(
     for intent in local_intents:
         broker_order = _match_broker_order(intent, order_indexes)
         if broker_order is None:
-            if intent["status"] == "submission_unknown":
+            pending_anchor = intent.get("broker_requested_at") or intent.get("created_at")
+            age_seconds = (
+                (datetime.now(timezone.utc) - pending_anchor).total_seconds()
+                if isinstance(pending_anchor, datetime)
+                else 0
+            )
+            if intent["status"] == "submission_unknown" or (
+                intent["status"] == "submission_pending" and age_seconds > 60
+            ):
+                issue_type = (
+                    "submission_unknown_unresolved"
+                    if intent["status"] == "submission_unknown"
+                    else "submission_pending_unresolved"
+                )
                 await _insert_item(
                     db,
                     recon_run_id=recon_run_id,
                     domain="orders",
-                    issue_type="submission_unknown_unresolved",
+                    issue_type=issue_type,
                     severity="critical",
                     local_record_id=str(intent["id"]),
                     broker_record_id=None,
                     local_snapshot=_snapshot_intent(intent),
                     broker_snapshot={},
                 )
-                summary["submission_unknown_unresolved"] += 1
+                summary[issue_type] += 1
                 summary["critical_open"] += 1
             continue
 
@@ -226,11 +266,11 @@ async def _reconcile_books(
                 known_trade_ids.add(trade_id)
 
     broker_qty = _aggregate_broker_quantities(books.positions, books.holdings)
-    local_qty = {
-        row["fyers_symbol"]: int(row["open_quantity"])
-        for row in local_positions
-        if int(row["open_quantity"]) > 0
-    }
+    local_qty: dict[str, int] = defaultdict(int)
+    for row in local_positions:
+        qty = int(row["open_quantity"])
+        if qty > 0:
+            local_qty[row["fyers_symbol"]] += qty
 
     all_symbols = set(local_qty) | set(broker_qty)
     for symbol in sorted(all_symbols):
@@ -421,6 +461,7 @@ async def _insert_item(
     broker_snapshot: dict[str, Any],
     resolution_status: str = "open",
 ) -> None:
+    redacted_broker = _redact_broker_snapshot(broker_snapshot)
     await db.execute(
         text(
             """
@@ -458,7 +499,7 @@ async def _insert_item(
             "issue_type": issue_type,
             "severity": severity,
             "local_snapshot": _json(local_snapshot),
-            "broker_snapshot": _json(broker_snapshot),
+            "broker_snapshot": _json(redacted_broker),
             "resolution_status": resolution_status,
         },
     )
@@ -689,8 +730,19 @@ def _aggregate_broker_quantities(
     holdings: list[dict[str, Any]],
 ) -> dict[str, int]:
     qty_by_symbol: dict[str, int] = defaultdict(int)
+    for row in holdings:
+        symbol = _string(row.get("symbol"))
+        if symbol is None:
+            continue
+        try:
+            remaining = int(row.get("remainingQuantity") or row.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if remaining > 0:
+            qty_by_symbol[symbol] += remaining
+
     for row in positions:
-        if str(row.get("productType", "")).upper() != "CNC":
+        if str(row.get("productType", "")).upper() not in {"", "CNC"}:
             continue
         symbol = _string(row.get("symbol"))
         if symbol is None:
@@ -701,19 +753,22 @@ def _aggregate_broker_quantities(
         except (TypeError, ValueError):
             continue
         if net != 0:
-            qty_by_symbol[symbol] = max(qty_by_symbol[symbol], abs(net))
+            qty_by_symbol[symbol] += net
 
-    for row in holdings:
-        symbol = _string(row.get("symbol"))
-        if symbol is None:
-            continue
-        try:
-            remaining = int(row.get("remainingQuantity") or 0)
-        except (TypeError, ValueError):
-            continue
-        if remaining > 0:
-            qty_by_symbol[symbol] = max(qty_by_symbol[symbol], remaining)
-    return dict(qty_by_symbol)
+    return {s: q for s, q in qty_by_symbol.items() if q > 0}
+
+
+def _redact_broker_snapshot(broker_snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not broker_snapshot:
+        return {}
+    allowed_keys = {
+        "id", "id_fyers", "idFyers", "orderNumber", "exchangeOrderNo", "exchOrdId",
+        "symbol", "qty", "quantity", "filledQty", "tradedQty", "remainingQuantity",
+        "netQty", "buyQty", "sellQty", "type", "side", "productType", "status",
+        "orderDateTime", "tradeNumber", "tradeValue", "tradePrice", "limitPrice",
+        "stopPrice", "broker_quantity", "message", "s",
+    }
+    return {k: v for k, v in broker_snapshot.items() if k in allowed_keys}
 
 
 def _broker_order_key(order: dict[str, Any]) -> str:

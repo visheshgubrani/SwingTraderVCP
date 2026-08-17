@@ -15,6 +15,7 @@ from app.config import settings
 from app.domain.trading import realized_pnl_on_exit
 from app.domain.p10_geometry import floor_to_tick
 from app.domain.p10_sizing import apportion_staged_exits
+from app.services.execution_engine import restore_rejected_exit_position
 from app.services.journal_outbox import enqueue_journal_fill_event
 from app.services.risk_stop_streak import record_closed_position, synchronize_stop_streak
 from app.services.staged_exit_manager import (
@@ -170,12 +171,24 @@ async def process_order_message(
         await _mark_instruction_submitted(db, intent["trade_instruction_id"])
 
     if effective_status in {"rejected", "cancelled"}:
-        await _close_unfilled_entry(
-            db,
-            intent=intent,
-            terminal_status=effective_status,
-            details=payload,
-        )
+        if intent.get("intent_type") == "entry":
+            await _close_unfilled_entry(
+                db,
+                intent=intent,
+                terminal_status=effective_status,
+                details=payload,
+            )
+        else:
+            await restore_rejected_exit_position(
+                db,
+                position_id=intent.get("position_id"),
+                order_intent_id=intent.get("id"),
+                trade_instruction_id=intent.get("trade_instruction_id"),
+                event_type=f"exit_{effective_status}",
+                reason=f"Broker {effective_status} order update",
+                trigger_source="order_gateway",
+                details=payload,
+            )
     return True
 
 

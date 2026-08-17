@@ -76,7 +76,10 @@ async def _count_pending(db: AsyncSession) -> int:
             """
             SELECT COUNT(*)::integer
             FROM journal_fill_outbox
-            WHERE status IN ('pending', 'processing')
+            WHERE (
+                status = 'pending'
+                OR (status = 'processing' AND processed_at < now() - interval '5 minutes')
+            )
               AND attempts < :max_attempts
             """
         ),
@@ -92,11 +95,15 @@ async def _claim_pending_events(db: AsyncSession, *, limit: int) -> list[dict]:
             UPDATE journal_fill_outbox
             SET
                 status = 'processing',
-                attempts = attempts + 1
+                attempts = attempts + 1,
+                processed_at = now()
             WHERE id IN (
                 SELECT id
                 FROM journal_fill_outbox
-                WHERE status = 'pending'
+                WHERE (
+                    status = 'pending'
+                    OR (status = 'processing' AND processed_at < now() - interval '5 minutes')
+                )
                   AND attempts < :max_attempts
                 ORDER BY created_at ASC
                 FOR UPDATE SKIP LOCKED

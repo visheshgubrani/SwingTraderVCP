@@ -26,6 +26,19 @@ def build_asyncpg_database_url(
     )
 
 
+def build_redis_url(
+    *,
+    host: str,
+    port: int,
+    password: str | None = None,
+    db: int = 0,
+) -> str:
+    """Build a redis:// URL with a safely encoded password."""
+    if password:
+        return f"redis://:{quote(password, safe='')}@{host}:{port}/{db}"
+    return f"redis://{host}:{port}/{db}"
+
+
 class Settings(BaseSettings):
     # Fail closed when a deployment forgets to declare its environment.
     app_environment: Literal["development", "test", "production"] = "production"
@@ -38,22 +51,52 @@ class Settings(BaseSettings):
     postgres_password: str | None = None
     postgres_db: str = "algo_trading"
     redis_url: str = "redis://localhost:6380/0"
+    # When set (Compose prod), rebuild redis_url from discrete parts so
+    # passwords with @/#/? do not corrupt the hostname.
+    redis_host: str | None = None
+    redis_port: int = 6379
+    redis_password: str | None = None
+    redis_db: int = 0
     # redis-py 8 defaults socket_timeout=5s; arq does not override it. Tune for long jobs.
     redis_socket_timeout: float = Field(default=30.0, gt=0, le=300)
     redis_health_check_interval: float = Field(default=30.0, ge=0, le=300)
     redis_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    redis_max_connections: int = Field(default=32, ge=8, le=256)
     sync_queued_stale_seconds: int = Field(default=300, ge=60, le=3600)
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:3000",
         "http://localhost:3000",
     ]
+    # Single-user authentication password for personal trading workstation.
+    app_password: str = ""
+    session_ttl_seconds: int = Field(default=604800, ge=300, le=2592000)
+    session_cookie_name: str = "swing_session"
+    session_cookie_secure: bool | None = None
+    session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    session_cookie_domain: str | None = None
+
+    # SQL query logging (SEC-002). Must NEVER be true in production.
+    sql_echo: bool = False
+    # Public OpenAPI / Swagger documentation hardening (SEC-010).
+    enable_docs_in_production: bool = False
+
     # Shared secret for Next BFF → FastAPI when requesting historical SaaS scans.
     # Leave empty in local dev to keep history locked until configured.
     saas_internal_api_key: str = ""
 
     fyers_app_id: str = ""
     fyers_secret_key: str = ""
+    # Dedicated symmetric encryption key for broker tokens in Postgres (SEC-005).
+    # Required in production. Local/dev may fall back to fyers_secret_key.
+    token_encryption_key: str = ""
+
+    @property
+    def token_encryption_passphrase(self) -> str:
+        if self.token_encryption_key:
+            return self.token_encryption_key
+        return self.fyers_secret_key or "antigravity-dev-token-encryption-key"
+
     fyers_redirect_uri: str = "http://127.0.0.1:3000/callback"
     # Where the GET /auth/callback browser bounce should land after Fyers OAuth.
     # Defaults to the personal Vite app; set to the public client URL on the VPS.
@@ -131,7 +174,7 @@ class Settings(BaseSettings):
     # model is independently configurable and must support image input plus
     # strict structured output.
     vcp_vision_enabled: bool = False
-    vcp_vision_model: str = "google/gemini-3.6-flash"
+    vcp_vision_model: str = "google/gemini-3.7-flash"
     vcp_vision_reasoning_effort: Literal[
         "low", "medium", "high", "xhigh"
     ] = "medium"
@@ -194,6 +237,38 @@ class Settings(BaseSettings):
                 port=self.postgres_port,
                 database=self.postgres_db,
             )
+        if self.redis_host:
+            if not self.redis_password:
+                raise ValueError(
+                    "REDIS_PASSWORD is required when REDIS_HOST is set"
+                )
+            self.redis_url = build_redis_url(
+                host=self.redis_host,
+                port=self.redis_port,
+                password=self.redis_password,
+                db=self.redis_db,
+            )
+
+        # Security validations
+        if self.app_environment == "production":
+            if self.sql_echo:
+                raise ValueError("SQL_ECHO cannot be enabled in production (SEC-002)")
+            if not self.app_password or len(self.app_password.strip()) < 12:
+                raise ValueError(
+                    "APP_PASSWORD must be set and at least 12 characters in production (SEC-001)"
+                )
+            if not self.token_encryption_key or not self.token_encryption_key.strip():
+                raise ValueError(
+                    "TOKEN_ENCRYPTION_KEY is required in production environment; "
+                    "refusing to fall back to broker secret."
+                )
+        else:
+            if not self.app_password:
+                self.app_password = "dev_swing_password_2026"
+
+        if self.session_cookie_secure is None:
+            self.session_cookie_secure = self.app_environment == "production"
+
         return self
 
     model_config = {"env_file": ".env", "extra": "ignore"}

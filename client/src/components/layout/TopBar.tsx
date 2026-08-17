@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   LogIn,
+  LogOut,
   Menu,
   ShieldAlert,
   ShieldCheck,
@@ -23,6 +24,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { useKillSwitch, useSetKillSwitch } from '@/features/admin/api';
+import { useAppAuth } from '@/features/auth/AuthContext';
 import {
   useAuthStatus,
   useStartFyersLogin,
@@ -51,6 +53,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   const setKillSwitch = useSetKillSwitch();
   const authStatus = useAuthStatus();
   const startLogin = useStartFyersLogin();
+  const { logout } = useAppAuth();
   const killSwitchActive = killSwitch.data?.enabled ?? true;
   const activeChange = activeTick?.change ?? 0;
   const activeChangePct = activeTick?.change_pct ?? 0;
@@ -256,6 +259,18 @@ export const TopBar: React.FC<TopBarProps> = ({
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+
+        {/* Workstation Sign Out */}
+        <Button
+          onClick={() => void logout()}
+          size="sm"
+          title="Sign out of Workstation"
+          type="button"
+          variant="ghost"
+          className="text-muted-foreground hover:text-foreground"
+        >
+          <LogOut className="size-4" />
+        </Button>
       </div>
     </header>
   );

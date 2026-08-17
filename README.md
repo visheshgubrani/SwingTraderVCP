@@ -128,10 +128,10 @@ For the full component boundaries, state machines, and data flows, read
 │   ├── main.py             # FastAPI entrypoint
 │   └── run_worker.py       # arq entrypoint
 ├── architecture.md         # Detailed personal-system architecture
-├── DEPLOY.md               # VPS / GHCR / Upstash production bring-up
+├── DEPLOY.md               # VPS / GHCR production bring-up
 ├── docker-compose.yml      # Alias of local Postgres + Redis
 ├── docker-compose.dev.yml  # Local Postgres + Redis (start-dev.sh)
-├── docker-compose.prod.yml # VPS: Postgres + api + worker + client (+ saas)
+├── docker-compose.prod.yml # VPS: Postgres + Redis + api + worker + client (+ saas)
 └── start-dev.sh            # Local multi-process launcher
 ```
 
@@ -172,7 +172,7 @@ docker compose up -d --wait
 ```
 
 The development compose file exposes PostgreSQL on `localhost:5480` and Redis
-on `localhost:6380`.
+on `127.0.0.1:6380` (loopback only).
 
 ### 3. Initialize the database
 

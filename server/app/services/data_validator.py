@@ -5,7 +5,8 @@ from typing import Dict, Any, List, Optional, Set
 from sqlalchemy import text
 from app.config import settings
 from app.database import async_session
-from app.security import get_fyers_token
+from app.redis_pool import create_async_redis
+from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from fyers_apiv3 import fyersModel
 
 class ValidationProgress:
@@ -59,7 +60,7 @@ class ValidationProgress:
 
 validation_progress = ValidationProgress()
 
-async def run_data_validation(years: int = 2):
+async def run_data_validation(years: int = 2, redis: Any = None):
     """
     Background validation task for market candle data in the PostgreSQL DB.
     """
@@ -75,14 +76,25 @@ async def run_data_validation(years: int = 2):
     validation_progress.log("Fetching active Nifty 500 instruments from database...")
     
     # 1. Fetch symbols from DB
+    access_token = None
+    created_redis = False
+    if redis is None:
+        try:
+            redis = await create_async_redis()
+            created_redis = True
+        except Exception:
+            redis = None
+
+    if redis is not None:
+        try:
+            access_token = await get_valid_access_token(redis)
+        except AuthUnavailableError:
+            access_token = None
+        finally:
+            if created_redis:
+                await redis.aclose()
+
     async with async_session() as session:
-        # Check active token first
-        token_data = await get_fyers_token(session)
-        access_token = None
-        if token_data:
-            expires_at = token_data["expires_at"]
-            if expires_at > datetime.datetime.now(datetime.timezone.utc):
-                access_token = token_data["access_token"]
         
         # Fetch Nifty 500 instruments
         query = text("""

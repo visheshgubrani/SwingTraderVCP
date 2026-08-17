@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.security import get_fyers_token
+from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.services.data_validator import validation_progress, run_data_validation
 from app.services.historical_fetcher import (
     SYNC_CANCEL_KEY,
@@ -56,9 +56,9 @@ async def trigger_sync(
             detail="An EOD sync is already queued or running.",
         )
 
-    token_data = await get_fyers_token(db)
-    now = datetime.datetime.now(datetime.timezone.utc)
-    if not token_data or token_data["expires_at"] <= now + datetime.timedelta(minutes=5):
+    try:
+        await get_valid_access_token(redis)
+    except AuthUnavailableError:
         raise HTTPException(
             status_code=401,
             detail="Fyers authentication is required before EOD data can be synced.",
@@ -213,7 +213,7 @@ async def cancel_sync(request: Request) -> dict[str, str]:
     return {"status": "cancelled", "message": "Sync cancellation requested."}
 
 @router.post("/validate")
-async def trigger_validation(payload: ValidateRequest, background_tasks: BackgroundTasks):
+async def trigger_validation(payload: ValidateRequest, request: Request, background_tasks: BackgroundTasks):
     """
     Triggers the historical candle validation in the background.
     """
@@ -223,7 +223,7 @@ async def trigger_validation(payload: ValidateRequest, background_tasks: Backgro
             detail="Validation is already running. Please wait for the current run to finish or cancel it."
         )
     
-    background_tasks.add_task(run_data_validation, years=payload.years)
+    background_tasks.add_task(run_data_validation, years=payload.years, redis=request.app.state.redis)
     return {"status": "started", "message": "Data validation initiated."}
 
 @router.get("/validate/status")

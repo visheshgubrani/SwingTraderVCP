@@ -12,12 +12,18 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-import redis.asyncio as aioredis
 from sqlalchemy import text
 
 from app.config import settings
 from app.database import async_session
+from app.redis_pool import create_async_redis
+from app.redis_pubsub import consume_pubsub
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
+from app.services.distributed_lease import (
+    acquire_distributed_lease,
+    release_distributed_lease,
+    renew_distributed_lease,
+)
 from app.services.execution_engine import ensure_execution_mode_armed
 from app.services.order_gateway import process_order_message, process_trade_message
 from app.services.paper_broker import (
@@ -41,13 +47,13 @@ _LOCK_REFRESH_SECONDS = 10
 
 async def run_order_gateway() -> None:
     ensure_execution_mode_armed()
-    redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    redis = await create_async_redis()
     worker_id = str(uuid4())
-    if not await redis.set(
+    if not await acquire_distributed_lease(
+        redis,
         _LOCK_KEY,
         worker_id,
-        nx=True,
-        ex=_LOCK_TTL_SECONDS,
+        _LOCK_TTL_SECONDS,
     ):
         logger.error("Another order gateway owns the singleton lock.")
         await redis.aclose()
@@ -58,141 +64,170 @@ async def run_order_gateway() -> None:
     for signal_name in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signal_name, stop_event.set)
 
+    class GatewayState:
+        def __init__(self) -> None:
+            self.status = "connecting"
+
+    gateway_state = GatewayState()
+
     if settings.execution_mode == "paper":
-        await _run_paper_gateway(redis, worker_id, stop_event)
+        gateway_state.status = "ready"
+        await _run_paper_gateway(redis, worker_id, stop_event, gateway_state)
         return
+
+    heartbeat = asyncio.create_task(
+        _heartbeat(redis, worker_id, stop_event, lambda: gateway_state.status)
+    )
+    socket = None
+    processor = None
 
     try:
-        access_token = await get_valid_access_token(redis)
-    except AuthUnavailableError as exc:
-        await _emit_worker_event(
-            "critical",
-            "order_gateway_start_failed",
-            {"reason": str(exc)},
-        )
-        await _release_lock(redis, worker_id)
-        await redis.aclose()
-        return
-
-    event_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(
-        maxsize=10_000
-    )
-
-    def enqueue(kind: str, message: Any) -> None:
-        if not isinstance(message, dict):
+        try:
+            access_token = await get_valid_access_token(redis)
+        except AuthUnavailableError as exc:
+            await _emit_worker_event(
+                "critical",
+                "order_gateway_start_failed",
+                {"reason": str(exc)},
+            )
             return
 
-        def put() -> None:
-            try:
-                event_queue.put_nowait((kind, message))
-            except asyncio.QueueFull:
-                logger.critical("Order gateway queue is full; event was dropped.")
-                stop_event.set()
+        event_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(
+            maxsize=10_000
+        )
 
-        loop.call_soon_threadsafe(put)
+        def enqueue(kind: str, message: Any) -> None:
+            if not isinstance(message, dict):
+                return
 
-    def on_error(error: Any) -> None:
-        logger.error("Fyers order socket error: %s", error)
-        message = str(error)
+            def put() -> None:
+                try:
+                    event_queue.put_nowait((kind, message))
+                except asyncio.QueueFull:
+                    logger.critical("Order gateway queue is full; event was dropped.")
+                    gateway_state.status = "degraded"
+                    stop_event.set()
 
-        def put_error() -> None:
-            try:
-                event_queue.put_nowait(("socket_error", {"message": message}))
-            except asyncio.QueueFull:
-                stop_event.set()
-            if any(
-                marker in message.lower()
-                for marker in ("auth", "token", "unauthorized", "forbidden")
-            ):
-                stop_event.set()
+            loop.call_soon_threadsafe(put)
 
-        loop.call_soon_threadsafe(put_error)
+        def on_connect() -> None:
+            logger.info("Fyers order socket connected")
+            gateway_state.status = "ready"
 
-    def on_close(message: Any) -> None:
-        logger.warning("Fyers order socket closed: %s", message)
+        def on_error(error: Any) -> None:
+            logger.error("Fyers order socket error: %s", error)
+            gateway_state.status = "degraded"
+            message = str(error)
 
-    from fyers_apiv3.FyersWebsocket.order_ws import FyersOrderSocket
+            def put_error() -> None:
+                try:
+                    event_queue.put_nowait(("socket_error", {"message": message}))
+                except asyncio.QueueFull:
+                    stop_event.set()
+                if any(
+                    marker in message.lower()
+                    for marker in ("auth", "token", "unauthorized", "forbidden")
+                ):
+                    gateway_state.status = "stopped"
+                    stop_event.set()
 
-    FyersOrderSocket._instance = None
-    socket = FyersOrderSocket(
-        access_token=f"{settings.fyers_app_id}:{access_token}",
-        write_to_file=False,
-        reconnect=True,
-        reconnect_retry=50,
-        on_orders=lambda message: enqueue("order", message),
-        on_trades=lambda message: enqueue("trade", message),
-        on_error=on_error,
-        on_connect=lambda: logger.info("Fyers order socket connected"),
-        on_close=on_close,
-    )
-    socket.connect()
-    socket.subscribe(data_type="OnOrders,OnTrades")
+            loop.call_soon_threadsafe(put_error)
 
-    await _set_status(redis, "running", worker_id)
-    await _emit_worker_event("info", "order_gateway_started", {})
-    processor = asyncio.create_task(_process_events(event_queue, stop_event))
-    heartbeat = asyncio.create_task(_heartbeat(redis, worker_id, stop_event))
+        def on_close(message: Any) -> None:
+            logger.warning("Fyers order socket closed: %s", message)
+            gateway_state.status = "degraded"
 
-    try:
+        from fyers_apiv3.FyersWebsocket.order_ws import FyersOrderSocket
+
+        FyersOrderSocket._instance = None
+        socket = FyersOrderSocket(
+            access_token=f"{settings.fyers_app_id}:{access_token}",
+            write_to_file=False,
+            reconnect=True,
+            reconnect_retry=50,
+            on_orders=lambda message: enqueue("order", message),
+            on_trades=lambda message: enqueue("trade", message),
+            on_error=on_error,
+            on_connect=on_connect,
+            on_close=on_close,
+        )
+        socket.connect()
+        socket.subscribe(data_type="OnOrders,OnTrades")
+
+        await _set_status(redis, gateway_state.status, worker_id)
+        await _emit_worker_event("info", "order_gateway_started", {})
+        processor = asyncio.create_task(_process_events(event_queue, stop_event))
+
         await stop_event.wait()
     finally:
-        processor.cancel()
+        if processor:
+            processor.cancel()
         heartbeat.cancel()
         for task in (processor, heartbeat):
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        if socket:
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        try:
-            # The SDK closes the socket before touching its optional runner
-            # thread; an AttributeError after closure is harmless here.
-            await asyncio.to_thread(socket.close_connection)
-        except Exception:
-            logger.debug("Fyers socket close completed with SDK cleanup noise.")
+                # The SDK closes the socket before touching its optional runner
+                # thread; an AttributeError after closure is harmless here.
+                await asyncio.to_thread(socket.close_connection)
+            except Exception:
+                logger.debug("Fyers socket close completed with SDK cleanup noise.")
+        gateway_state.status = "stopped"
         await _set_status(redis, "stopped", worker_id)
         await _emit_worker_event("info", "order_gateway_stopped", {})
         await _release_lock(redis, worker_id)
         await redis.aclose()
 
 
-async def _run_paper_gateway(redis, worker_id: str, stop_event: asyncio.Event) -> None:
-    await _set_status(redis, "running", worker_id)
+async def _run_paper_gateway(
+    redis,
+    worker_id: str,
+    stop_event: asyncio.Event,
+    gateway_state: Any = None,
+) -> None:
+    status = "ready"
+    await _set_status(redis, status, worker_id)
     await _emit_worker_event("info", "order_gateway_started", {"mode": "paper"})
     await _recover_paper_fills()
-    heartbeat = asyncio.create_task(_heartbeat(redis, worker_id, stop_event))
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(REDIS_PAPER_ORDER_CHANNEL)
+    heartbeat = asyncio.create_task(
+        _heartbeat(redis, worker_id, stop_event, lambda: "ready")
+    )
+
+    async def handle_paper_message(message: dict[str, Any]) -> None:
+        try:
+            payload = json.loads(message["data"])
+            kind = payload["kind"]
+            event = payload["message"]
+        except (KeyError, TypeError, json.JSONDecodeError):
+            return
+        try:
+            async with async_session() as db:
+                if kind == "order":
+                    await process_order_message(db, event)
+                elif kind == "trade":
+                    await process_trade_message(db, event)
+                await db.commit()
+        except Exception:
+            logger.exception("Failed to persist paper %s update", kind)
+
     try:
-        while not stop_event.is_set():
-            message = await pubsub.get_message(
-                ignore_subscribe_messages=True,
-                timeout=1.0,
-            )
-            if not message or message["type"] != "message":
-                continue
-            try:
-                payload = json.loads(message["data"])
-                kind = payload["kind"]
-                event = payload["message"]
-            except (KeyError, TypeError, json.JSONDecodeError):
-                continue
-            try:
-                async with async_session() as db:
-                    if kind == "order":
-                        await process_order_message(db, event)
-                    elif kind == "trade":
-                        await process_trade_message(db, event)
-                    await db.commit()
-            except Exception:
-                logger.exception("Failed to persist paper %s update", kind)
+        await consume_pubsub(
+            redis,
+            [REDIS_PAPER_ORDER_CHANNEL],
+            component="order_gateway",
+            handler=handle_paper_message,
+            should_stop=stop_event.is_set,
+        )
     finally:
         heartbeat.cancel()
         try:
             await heartbeat
         except asyncio.CancelledError:
             pass
-        await pubsub.unsubscribe(REDIS_PAPER_ORDER_CHANNEL)
-        await pubsub.close()
         await _set_status(redis, "stopped", worker_id)
         await _emit_worker_event("info", "order_gateway_stopped", {"mode": "paper"})
         await _release_lock(redis, worker_id)
@@ -292,27 +327,21 @@ async def _heartbeat(
     redis,
     worker_id: str,
     stop_event: asyncio.Event,
+    status_provider: Any = None,
 ) -> None:
-    refresh_script = """
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  redis.call('EXPIRE', KEYS[1], ARGV[2])
-  return 1
-end
-return 0
-"""
     while not stop_event.is_set():
-        refreshed = await redis.eval(
-            refresh_script,
-            1,
+        refreshed = await renew_distributed_lease(
+            redis,
             _LOCK_KEY,
             worker_id,
             _LOCK_TTL_SECONDS,
         )
-        if int(refreshed) != 1:
+        if not refreshed:
             logger.critical("Order gateway lost its singleton lock; stopping.")
             stop_event.set()
             return
-        await _set_status(redis, "running", worker_id)
+        status = status_provider() if callable(status_provider) else "ready"
+        await _set_status(redis, status, worker_id)
         try:
             await asyncio.wait_for(
                 stop_event.wait(),
@@ -337,13 +366,7 @@ async def _set_status(redis, status: str, worker_id: str) -> None:
 
 
 async def _release_lock(redis, worker_id: str) -> None:
-    release_script = """
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-end
-return 0
-"""
-    await redis.eval(release_script, 1, _LOCK_KEY, worker_id)
+    await release_distributed_lease(redis, _LOCK_KEY, worker_id)
 
 
 async def _emit_worker_event(

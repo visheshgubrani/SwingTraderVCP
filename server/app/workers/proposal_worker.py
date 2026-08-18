@@ -455,12 +455,24 @@ async def process_proposal_candidate(
                 timeout=timeout,
             )
         except TimeoutError as exc:
+            logger.warning(
+                "Proposal attempt %s for %s timed out: %s",
+                attempt_number,
+                candidate.symbol,
+                exc,
+            )
             async with async_session() as session:
                 await _finish_attempt(session, attempt_id=attempt_id, status="timed_out", error=exc)
             if dt.datetime.now(dt.timezone.utc) >= deadline:
                 return "timed_out"
             continue
         except Exception as exc:
+            logger.warning(
+                "Proposal attempt %s for %s failed: %s",
+                attempt_number,
+                candidate.symbol,
+                exc,
+            )
             async with async_session() as session:
                 await _finish_attempt(session, attempt_id=attempt_id, status="failed", error=exc)
             if attempt_number == settings.proposal_max_attempts:
@@ -643,6 +655,13 @@ async def run_eod_proposal_batch(
             outcome = "failed"
         counts[outcome] += 1
         processed += 1
+        logger.info(
+            "Proposal candidate %s outcome=%s (%s/%s)",
+            candidate.symbol,
+            outcome,
+            processed,
+            len(candidates),
+        )
 
     terminal_status = "timed_out" if counts["timed_out"] else "completed"
     error_message = None

@@ -193,15 +193,25 @@ async def call_gemini_vision_for_proposal(
         resp.raise_for_status()
         data = resp.json()
 
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise RuntimeError("OpenRouter returned no proposal choice")
-    content_str = choices[0].get("message", {}).get("content")
-    parsed_json = parse_openrouter_structured_content(content_str)
-    output = GeminiVcpProposalOutput.model_validate(parsed_json)
-    usage = data.get("usage", {})
-    cost = float(data.get("usage", {}).get("total_cost", 0.0) or 0.0)
+    return parse_proposal_openrouter_response(data)
 
+
+def parse_proposal_openrouter_response(
+    data: Mapping[str, Any],
+) -> tuple[GeminiVcpProposalOutput, dict[str, Any], float, str | None]:
+    """Parse a completed OpenRouter chat payload into the locked Gemini schema.
+
+    The helper expects the full choice object, matching VCP vision / P7 / journal.
+    Passing message content alone raises because that string has no ``message`` key.
+    """
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+        raise RuntimeError("OpenRouter returned no proposal choice")
+    raw_usage = data.get("usage", {})
+    usage = dict(raw_usage) if isinstance(raw_usage, Mapping) else {}
+    parsed_json = parse_openrouter_structured_content(choices[0], usage=usage)
+    output = GeminiVcpProposalOutput.model_validate(parsed_json)
+    cost = float(usage.get("total_cost", usage.get("cost", 0.0)) or 0.0)
     request_id = str(data["id"]) if data.get("id") is not None else None
     return output, usage, cost, request_id
 

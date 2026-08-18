@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import unittest
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -16,6 +17,7 @@ from app.services.proposal_generator import (
     generate_trade_proposal_from_analysis,
     calculate_next_session_and_deadline,
     compute_proposal_hash,
+    parse_proposal_openrouter_response,
 )
 
 
@@ -162,6 +164,64 @@ class TestProposalGenerator(unittest.TestCase):
             approved_risk_budget_amount=Decimal("1000"),
         )
         self.assertIsNone(proposal)
+
+
+class TestParseProposalOpenRouterResponse(unittest.TestCase):
+    def _payload(self, content: str | dict) -> dict:
+        return {
+            "id": "gen-proposal-1",
+            "usage": {"cost": 0.012, "total_tokens": 800},
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": content},
+                }
+            ],
+        }
+
+    def _valid_content(self) -> dict:
+        return {
+            "verdict": "valid",
+            "contradicts_scanner": False,
+            "confidence": 0.81,
+            "contraction_anchors": [
+                {
+                    "date": "2026-08-10",
+                    "price": "100.5",
+                    "anchor_type": "contraction_low",
+                },
+                {
+                    "date": "2026-08-17",
+                    "price": "112.0",
+                    "anchor_type": "resistance",
+                },
+            ],
+            "pivot_price": "112.0",
+            "t1": "120.0",
+            "t2": "128.0",
+            "t3": "136.0",
+            "entry_template": "two_leg",
+            "base_tightness": "solid",
+            "dry_up_quality": "drying_up",
+            "resistance_room": "clear",
+            "evidence_summary": "Two nested contractions with volume dry-up into resistance.",
+        }
+
+    def test_parses_full_choice_object(self) -> None:
+        output, usage, cost, request_id = parse_proposal_openrouter_response(
+            self._payload(json.dumps(self._valid_content())),
+        )
+        self.assertEqual(output.verdict, "valid")
+        self.assertEqual(output.entry_template, EntryTemplate.TWO_LEG)
+        self.assertEqual(request_id, "gen-proposal-1")
+        self.assertEqual(cost, 0.012)
+        self.assertEqual(usage["total_tokens"], 800)
+
+    def test_rejects_message_content_passed_as_choice(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "no proposal choice"):
+            parse_proposal_openrouter_response(
+                {"choices": [json.dumps(self._valid_content())]},
+            )
 
 
 if __name__ == "__main__":

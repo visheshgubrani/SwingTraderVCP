@@ -59,10 +59,10 @@ Cashfree requires an explicit architecture update before it is added.
 
 SEO / crawl controls (also in `.env.example`):
 
-- `SITE_URL` — canonical origin for metadata, sitemap, and robots
-- `SEO_INDEXING_ENABLED` — keep `false` until real scan data and the final
+- `SITE_URL`: canonical origin for metadata, sitemap, and robots
+- `SEO_INDEXING_ENABLED`: keep `false` until real scan data and the final
   domain are ready; when false, robots disallow all and the sitemap is empty
-- `GOOGLE_SITE_VERIFICATION` — optional Search Console token
+- `GOOGLE_SITE_VERIFICATION`: optional Search Console token
 
 Canonical live scanner path: `/scanners/minervini-vcp` (legacy `/scanner` and
 `/scanners/minervini` permanently redirect there).
@@ -77,10 +77,10 @@ Filtered scanner URLs and stock detail pages stay `noindex`.
 
 Paid/test surfaces:
 
-- `/scanners/minervini-vcp/strict` — paid Strict board; public result count.
-- `/scanners/minervini-vcp/custom` — guided user variants, five per day.
-- `/past-scans` — 20 sessions for signed-in free; complete for Pro/admin/dev.
-- `/account` — effective tier, bypass reason, and enforced limits.
+- `/scanners/minervini-vcp/strict`: paid Strict board; public result count.
+- `/scanners/minervini-vcp/custom`: guided user variants, five per day.
+- `/past-scans`: 20 sessions for signed-in free; complete for Pro/admin/dev.
+- `/account`: effective tier, bypass reason, and enforced limits.
 
 ## Checks
 

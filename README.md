@@ -1,182 +1,288 @@
 # SwingTraderVCP
 
-A single-user, human-in-the-loop swing trading workstation for Indian equities.
-It screens the Nifty 500, presents candidates for chart and fundamental review,
-requires an explicit human trade decision, and then automates broker execution,
-position monitoring, exits, reconciliation, and journaling.
+A single-user swing trading workstation for Indian equities (Nifty 500) built on the Fyers API. It automates technical screening, chart pattern validation, and trade plan proposals, requires an explicit human approve/reject decision, and then automates intraday entry triggers, position monitoring, risk enforcement, broker reconciliation, and trade journaling.
 
 > [!WARNING]
-> This project can place real orders when live execution is enabled. It is not
-> financial advice, it is not production-ready by default, and software-held
-> stops do not provide the same protection as exchange-held orders. Start in
-> paper mode, review the [security audit](SECURITY_AUDIT.md), and test every
-> failure and restart path before risking capital.
+> This application can place real orders when live execution is armed. It is not financial advice, and software-held stops do not provide the same execution guarantees as exchange-held stop orders. Start in paper mode, review all risk policies, and test failure and restart procedures thoroughly before committing capital.
 
-## Why this project exists
+---
 
-SwingTraderVCP keeps research automation and trading authority deliberately
-separate:
+## The Core Concept
+
+SwingTraderVCP separates automated research from trading authority:
 
 ```text
-AUTOMATED RESEARCH                 HUMAN CHECKPOINT              AUTOMATED MONEY PATH
-EOD data -> scan -> annotation -> chart review + confirm -> entry -> monitor -> exit
+[ Automated Research ]            [ Human Checkpoint ]            [ Automated Money Path ]
+EOD Data -> Scanner -> AI   ->    Approve / Reject Plan   ->    Entry -> Position Monitor -> Exit
+(No money authority)              (Explicit human decision)     (Deterministic execution)
 ```
 
-The scanner and AI can rank or annotate a stock, but they cannot confirm a
-trade or call the order execution path. Once a confirmed position is open,
-stop-loss, target, and supported trailing rules run in a backend worker and do
-not depend on the browser remaining open.
+The system follows four core rules:
 
-## Features
+1. Scanners, market context calculations, and AI models only discover setups and annotate patterns. They cannot place, size, or confirm orders.
+2. The human checkpoint is strictly approve or reject. Live proposals generated from scans cannot be arbitrarily edited in the browser; approving locks a versioned trade plan and risk budget.
+3. API requests never place orders inline. Approving a proposal arms the entry supervisor worker to evaluate 5-minute bar breakouts and chase limits.
+4. Position management runs continuously in backend workers and does not depend on an open browser session.
 
-- Incremental Nifty 500 daily candle ingestion from Fyers
-- Versioned technical screening with Stage-2/VCP-style gates and scoring
-- Interactive candlestick workspace powered by TradingView
-  `lightweight-charts`
-- Optional survivor-only company fundamentals from the read-only Upstox API
-- Optional structured OpenRouter second opinion; deterministic Python scoring
-  remains authoritative
-- Explicit draft-and-confirm trade workflow with a durable audit trail
-- Safe-by-default paper execution and separately armed live CNC execution
-- One Fyers market-data WebSocket for live LTP fan-out
-- One Fyers order WebSocket for order and fill correlation
-- Backend position monitor for stop-loss, target, and step-percentage trailing
-- Global kill switch, worker heartbeats, and broker reconciliation
-- Automated trade journal, chart snapshots, P&L/R-multiple calculations, and a
-  read-only AI journal coach
+---
 
-## Architecture at a glance
+## System Architecture
 
-```mermaid
-flowchart LR
-    UI[React workstation] <-->|REST + browser WebSocket| API[FastAPI API]
+### Trading Lifecycle Flow
 
-    API <--> PG[(PostgreSQL)]
-    API <--> R[(Redis)]
-
-    ARQ[arq worker + scheduler] <--> PG
-    ARQ <--> R
-    ARQ -->|historical data + account reads| FYREST[Fyers REST]
-    ARQ -->|fundamentals| UP[Upstox]
-    ARQ -->|structured analysis| OR[OpenRouter]
-
-    TICK[Tick ingestion] -->|single market-data WS| FYMD[Fyers Market WS]
-    TICK -->|LTP cache + pub/sub| R
-
-    API -->|confirmed entry| EXEC[Execution engine]
-    MON[Position monitor] -->|rule-triggered exit| EXEC
-    MON <--> R
-    MON <--> PG
-    EXEC -->|async orders; max 10 OPS| FYREST
-    EXEC --> PG
-
-    GATE[Order gateway] -->|single order WS| FYOWS[Fyers Order WS]
-    GATE -->|events + fills| PG
+```text
++------------------------------------------------------------------------------------+
+| 1. SCANNING & RESEARCH (Automated)                                                 |
+|                                                                                    |
+|  [Fyers EOD Candles] -> [P9 Market Context] -> [Technical Scan] -> [Top 20 Ranked] |
+|                                                                          |         |
+|                                 [Upstox / NSE Filings Fundamentals] <----+         |
++--------------------------------------------------------------------------|---------+
+                                                                           v
++------------------------------------------------------------------------------------+
+| 2. PROPOSAL GENERATION (Automated, Serial Worker)                                  |
+|                                                                                    |
+|  [Freeze EOD OHLCV] -> [Render Standardized PNG Charts (1280x720)]                 |
+|                                          |                                         |
+|                                          v                                         |
+|  [Python Risk Engine] <---- [Gemini 3.7 Flash Pattern Read]                        |
+|   - Template Selection      (Strict JSON: pivot, valid/invalid, confidence, T1-T3) |
+|   - Stop & Chase Limits                                                            |
+|   - Target Validation                                                              |
++--------------------------------------------------------------------------|---------+
+                                                                           v
++------------------------------------------------------------------------------------+
+| 3. HUMAN CHECKPOINT (Decision Required by 08:30 IST)                              |
+|                                                                                    |
+|  [Proposals Inbox in UI] ----> [Human Decision] ----> [REJECT: Plan Archived]      |
+|                                       |                                            |
+|                                       +-------------> [APPROVE: Plan Locked]       |
++--------------------------------------------------------------------------|---------+
+                                                                           v
++------------------------------------------------------------------------------------+
+| 4. AUTOMATED EXECUTION & MONITORING (Armed & Durable)                              |
+|                                                                                    |
+|  [Entry Supervisor Worker]                                                         |
+|   - Evaluates completed 5-minute bars from Tick Ingestion                          |
+|   - Verifies breakout trigger, relative volume, and chase ceiling                  |
+|   - Sizing and allocation based on template (single, two-leg, three-leg)           |
+|           |                                                                        |
+|           v                                                                        |
+|  [Execution Engine] ---> [Paper Broker (Simulated fills)]                          |
+|           |         ---> [Live Fyers API (Idempotent async REST, max 10 OPS)]       |
+|           v                                                                        |
+|  [Order Gateway]   ---> Captures fill events and updates order ledger              |
+|           v                                                                        |
+|  [Position Monitor] -> Evaluates SL, targets (T1/T2/T3), and trailing per tick     |
+|           v                                                                        |
+|  [Journal & Coach]  -> Freezes entry charts, tracks P&L/R, runs AI coach           |
++------------------------------------------------------------------------------------+
 ```
 
-The application intentionally runs as separate processes:
+### Process & Component Map
+
+```text
++-----------------------------------------------------------------------+
+|                             BROWSER UI                                |
+|  React 19 + TypeScript + Vite + TanStack Query + lightweight-charts   |
++-----------------------------------+-----------------------------------+
+                                    | REST / Browser WebSocket
+                                    v
++-----------------------------------------------------------------------+
+|                           FASTAPI BACKEND                             |
+|  - Proposal review & manual approval decisions                        |
+|  - System controls & kill switch API                                  |
+|  - Browser price fan-out via WebSockets                               |
+|  - Read-only data endpoints (scanner, positions, journal, analytics)  |
++-------------------+-----------------------------------+---------------+
+                    |                                   |
+         Postgres SQL Reads/Writes           Redis Pub/Sub & Hot Cache
+                    |                                   |
+                    v                                   v
++-----------------------------------------------------------------------+
+|                         BACKGROUND PROCESSES                          |
+|                                                                       |
+|  [Core ARQ Worker & Scheduler]                                        |
+|   - EOD candle sync from Fyers                                        |
+|   - P9 market regime context & sector breadth calculations            |
+|   - Technical scanner runs & P7 Upstox/NSE fundamentals pass          |
+|   - Daily token refresh & 15m broker reconciliation                   |
+|                                                                       |
+|  [Proposal Worker]                                                    |
+|   - Serial worker with dedicated queue                                |
+|   - Headless chart rendering (matplotlib/mplfinance Agg)              |
+|   - Blind Gemini 3.7 Flash VCP pattern interpretation                 |
+|   - Python deterministic proposal construction                        |
+|                                                                       |
+|  [Tick Ingestion Worker]                                              |
+|   - Single market-data WebSocket connection to Fyers                  |
+|   - Publishes live ticks to Redis and updates LTP cache               |
+|   - Aggregates and persists completed 5-minute bars                   |
+|                                                                       |
+|  [Entry Supervisor]                                                   |
+|   - Listens for completed 5-minute bar events                         |
+|   - Evaluates breakout triggers against approved proposals           |
+|   - Checks chase ceilings, volume surge, and multi-leg gates          |
+|   - Triggers order creation via Execution Engine                      |
+|                                                                       |
+|  [Execution Engine]                                                   |
+|   - Idempotent order placement (token bucket <= 10 OPS)               |
+|   - Kill switch verification before every order                       |
+|   - Dispatches to Paper Broker or live Fyers async REST API           |
+|                                                                       |
+|  [Order Gateway]                                                      |
+|   - Single order WebSocket connection to Fyers (live mode)            |
+|   - Correlates order status, trades, and fill events                  |
+|   - Updates DB order intents and fill ledger                          |
+|                                                                       |
+|  [Position Monitor Worker]                                            |
+|   - Subscribes to live LTP ticks from Redis                           |
+|   - Evaluates software SL, targets (T1, T2, T3), and trailing stops   |
+|   - Calls Execution Engine for automated market/limit exits           |
++-----------------------------------------------------------------------+
+```
+
+---
+
+## Process Responsibilities
 
 | Process | Responsibility |
 | --- | --- |
-| React client | Review scans and charts, create trade plans, explicitly confirm trades, inspect positions and journals |
-| FastAPI API | Thin REST layer, browser WebSocket fan-out, validation, control updates, and job enqueueing |
-| arq worker | EOD sync, screening, fundamentals, token refresh, reconciliation, journal processing, and AI jobs |
-| Tick worker | The only Fyers market-data socket; publishes normalized LTP updates through Redis |
-| Position monitor | Reloads non-closed positions and evaluates software stop, target, and trailing rules tick by tick |
-| Order gateway | The only Fyers order socket; correlates asynchronous orders, events, trades, and fills |
-| Execution engine | The only module allowed to place, modify, or cancel Fyers orders |
+| **React Client** | Trading workstation for scanning, interactive charts, proposal inbox, position tables, order books, and journals. |
+| **FastAPI Backend** | Thin REST API and browser WebSocket fan-out. Handles proposal approvals, risk configuration, and system control state. |
+| **Core ARQ Worker** | Runs cron jobs: EOD candle sync, P9 market context, screener runs, P7 fundamentals, token refresh, and broker reconciliation. |
+| **Proposal Worker** | Dedicated queue worker. Renders headless chart images, queries Gemini for pattern reads, and uses Python to construct immutable trade plans. |
+| **Tick Ingestion** | The single connection to Fyers Market WebSocket. Updates Redis LTP cache and aggregates 5-minute bars. |
+| **Entry Supervisor** | Monitors completed 5-minute bars for approved proposals. Evaluates triggers, chase ceilings, volume requirements, and sizing before ordering entries. |
+| **Execution Engine** | Routes orders to Paper Broker or Fyers REST. Enforces rate limits (10 OPS), idempotency checks, and the global kill switch. |
+| **Order Gateway** | The single connection to Fyers Order WebSocket in live mode. Drains paper events in paper mode. Reconciles fills and order events in Postgres. |
+| **Position Monitor** | Evaluates software stop-losses, partial targets (T1/T2/T3), and step-percentage trailing stops against live ticks. Dispatches exit orders. |
 
-PostgreSQL is the system of record. Redis is used for the background queue,
-pub/sub, hot LTP values, rate limiting, singleton locks, and worker status.
+PostgreSQL is the durable system of record. Redis handles message queuing, pub/sub fan-out, the live price cache, and worker heartbeats.
 
-For the full component boundaries, state machines, and data flows, read
-[architecture.md](architecture.md). The locked engineering decisions are in
-[AGENTS.md](AGENTS.md), and exact tables and constraints live in
-[server/db](server/db/README.md).
+---
 
-## Technology stack
+## Features
+
+- **Automated Technical Screener**: Scans the Nifty 500 for Stage-2 uptrends, Volatility Contraction Patterns (VCP), pivot tightness, and volume dry-up.
+- **P9 Market Regime Context**: Computes market breadth, index moving averages, and sector rankings to dynamically adjust risk rules.
+- **VCP Vision Pattern Validator**: Generates 1280x720 context and detail charts for candidate stocks and runs structured AI pattern verification (Gemini 3.7 Flash via OpenRouter).
+- **Proposal Inbox & Templates**: Turns valid chart setups into immutable trade proposals with defined pivot prices, stop levels, targets, and multi-leg risk templates (Single, Two-Leg, Three-Leg Front, Three-Leg Balanced).
+- **5-Minute Entry Supervisor**: Waits for live 5-minute bar breakouts above pivot levels, checks relative volume thresholds, and prevents entries beyond chase ceilings.
+- **Sub-Second Position Monitor**: Evaluates software stop-losses, multi-tier profit targets, and step trailing rules against live tick streams without depending on open browser tabs.
+- **Paper & Live Execution**: Built-in Paper Broker for zero-risk simulation and double-armed Live CNC trading with token-bucket rate limiting (10 OPS) and Fyers async order APIs.
+- **P7 Company Fundamentals**: Optional survivor-only fundamental enrichment via Upstox API and official NSE corporate filings (promoter pledge and leverage checks).
+- **Automated Trade Journal & AI Coach**: Automatically records trade fills, captures entry/exit charts, computes P&L and R-multiples, and provides structured post-trade AI coaching.
+- **Global Kill Switch & Ops Controls**: Instant emergency breaker that pauses all automated entries and exits while leaving open positions intact for manual management.
+
+---
+
+## Technology Stack
 
 | Layer | Technology |
 | --- | --- |
-| Frontend | Vite, React 19, TypeScript, React Router, TanStack Query, shadcn/ui, Tailwind CSS |
-| Charts | TradingView `lightweight-charts` v5 |
-| API and workers | Python 3.13, FastAPI, SQLAlchemy, asyncpg, arq |
-| Data | PostgreSQL 17, Redis 7 |
-| Broker and market data | Fyers API v3 |
-| Fundamentals | Upstox Company Fundamentals API, read-only |
-| AI annotations | OpenRouter with strict structured output |
+| **Frontend** | React 19, TypeScript, Vite, TanStack Query, React Router, Tailwind CSS, shadcn/ui |
+| **Charting** | TradingView `lightweight-charts` v5 (Presentational only) |
+| **Server-Side Charts** | `matplotlib` and `mplfinance` (Agg headless rendering for proposals) |
+| **Backend API** | Python 3.13, FastAPI, SQLAlchemy (asyncio), Pydantic v2 |
+| **Databases & Cache** | PostgreSQL 17, Redis 7 (arq queue, pub/sub, hot cache) |
+| **Broker Integration** | Fyers API v3 (REST + Market Data WebSocket + Order WebSocket) |
+| **Fundamentals** | Upstox Company Fundamentals API + official NSE corporate filings |
+| **AI Models** | OpenRouter (Gemini 3.7 Flash for VCP vision, GPT-5.6 / DeepSeek for fundamentals and journal coaching) |
 
-## Repository layout
+---
+
+## Dual Product Layout
+
+This repository contains two products that share core backend scanning tools:
+
+| Product | Directory | Purpose | Orders / Money Path |
+| --- | --- | --- | --- |
+| **SwingTraderVCP (Personal)** | `client/` + `server/` | Single-user swing trading workstation | **Yes** (Fyers live + paper execution) |
+| **Swyingify (SaaS)** | `swyingify/` | Multi-tenant screening platform | **No** (Watchlists and scans only) |
+
+---
+
+## Repository Layout
 
 ```text
 .
-├── client/                 # Vite + React trading workstation
+├── client/                 # Personal React trading workstation (Vite + TS)
 │   └── src/
-│       ├── components/     # Shared layout and UI primitives
-│       ├── features/       # Scanner, chart, trades, positions, journal, ops
-│       └── lib/            # REST and browser WebSocket clients
-├── server/
+│       ├── components/     # UI primitives and shared layout
+│       ├── features/       # Screener, chart, proposals, trades, positions, journal
+│       └── lib/            # REST and WebSocket client connectors
+├── server/                 # Python backend and workers
 │   ├── app/
-│   │   ├── domain/         # Pure trading, journal, and regime calculations
-│   │   ├── routers/        # Thin FastAPI HTTP and browser WS routes
-│   │   ├── schemas/        # Pydantic API contracts
-│   │   ├── services/       # Screening, execution, reconciliation, journal
-│   │   └── workers/        # Tick, order-gateway, and position processes
-│   ├── db/                 # Canonical schema and ordered SQL migrations
-│   ├── scripts/            # Instrument import and operational utilities
-│   ├── tests/              # Backend test suite
+│   │   ├── domain/         # Pure trading math, risk calculations, and state machines
+│   │   ├── routers/        # FastAPI REST endpoints and browser WS handlers
+│   │   ├── schemas/        # Pydantic data contracts
+│   │   ├── services/       # Screener, proposal, execution, reconciliation services
+│   │   └── workers/        # Tick ingestion, proposal, entry supervisor, monitor, gateway
+│   ├── db/                 # Postgres schema and numbered SQL migrations
+│   ├── scripts/            # Database import tools and replay scripts
+│   ├── tests/              # Backend test suite (pytest)
 │   ├── main.py             # FastAPI entrypoint
-│   └── run_worker.py       # arq entrypoint
-├── architecture.md         # Detailed personal-system architecture
-├── DEPLOY.md               # VPS / GHCR production bring-up
-├── docker-compose.yml      # Alias of local Postgres + Redis
-├── docker-compose.dev.yml  # Local Postgres + Redis (start-dev.sh)
-├── docker-compose.prod.yml # VPS: Postgres + Redis + api + worker + client (+ saas)
-└── start-dev.sh            # Local multi-process launcher
+│   └── run_worker.py       # Core arq background worker entrypoint
+├── swyingify/              # Multi-tenant Next.js SaaS scanner application
+├── architecture.md         # Detailed architectural documentation
+├── AGENTS.md               # Source of truth for personal system boundaries
+├── DEPLOY.md               # Production deployment guide (ARM VPS + Docker Compose)
+├── docker-compose.dev.yml  # Local development Postgres and Redis containers
+├── docker-compose.prod.yml # Production multi-container definition
+└── start-dev.sh            # Local development process supervisor script
 ```
 
-Production packaging lives in each app's `Dockerfile`. See [DEPLOY.md](DEPLOY.md)
-for the ARM VPS + GHCR flow.
-## Quick start
+---
+
+## Quick Start
 
 ### Prerequisites
 
-- Docker with the Compose plugin
+- Linux or macOS (or WSL2 on Windows)
+- Docker with Docker Compose plugin
 - Python 3.13 and [`uv`](https://docs.astral.sh/uv/)
-- Node.js and [`pnpm`](https://pnpm.io/)
-- `lsof` and `setsid` when using `start-dev.sh` (Linux or WSL is the simplest
-  supported local environment)
-- A Fyers API v3 application for real market data or broker integration
-- Optional Upstox Analytics and OpenRouter credentials for fundamental
-  annotations and AI journal analysis
+- Node.js (v20+) and [`pnpm`](https://pnpm.io/)
+- Fyers API v3 developer account credentials
+- Optional: Upstox developer token and OpenRouter API key
 
-### 1. Clone and install dependencies
+---
+
+### Step 1: Clone and Install Dependencies
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/visheshgubrani/SwingTraderVCP.git
 cd SwingTraderVCP
 
+# Install server dependencies
 cd server
 uv sync --dev
 
+# Install client dependencies
 cd ../client
 pnpm install --frozen-lockfile
 
 cd ..
 ```
 
-### 2. Start PostgreSQL and Redis
+---
+
+### Step 2: Start Postgres and Redis
+
+Start local database containers in the background:
 
 ```bash
-docker compose up -d --wait
+docker compose -f docker-compose.dev.yml up -d --wait
 ```
 
-The development compose file exposes PostgreSQL on `localhost:5480` and Redis
-on `127.0.0.1:6380` (loopback only).
+- PostgreSQL runs on `localhost:5480`
+- Redis runs on `127.0.0.1:6380`
 
-### 3. Initialize the database
+---
 
-For a new local database, apply the canonical schema from the repository root:
+### Step 3: Initialize the Database
+
+Apply the base schema to the database container:
 
 ```bash
 docker exec -i algo-trading-postgres \
@@ -184,7 +290,7 @@ docker exec -i algo-trading-postgres \
   < server/db/schema.sql
 ```
 
-Then import the bundled Nifty 500 instrument universe:
+Import the Nifty 500 instrument master list:
 
 ```bash
 cd server
@@ -192,183 +298,203 @@ uv run python scripts/import_nifty500_instruments.py
 cd ..
 ```
 
-The import is repeatable: it updates existing instruments, creates current
-memberships, and closes memberships absent from the supplied CSV.
+---
 
-For an existing database, apply only the unapplied SQL files in
-`server/db/migrations/` in numeric order. The repository does not currently
-include an automated migration runner.
+### Step 4: Configure Environment Variables
 
-### 4. Configure the backend
-
-Create `server/.env`. The following is a safe paper-mode starting point:
+Create `server/.env`:
 
 ```dotenv
+APP_ENVIRONMENT=development
 DATABASE_URL=postgresql+asyncpg://algo:algo@localhost:5480/algo_trading
 REDIS_URL=redis://localhost:6380/0
-CORS_ORIGINS=["http://localhost:3000"]
+CORS_ORIGINS=["http://localhost:5173","http://localhost:3000"]
+APP_PASSWORD=dev_swing_password_2026
 
-FYERS_APP_ID=your_app_id
-FYERS_SECRET_KEY=your_secret_key
+# Fyers API Configuration
+FYERS_APP_ID=your_fyers_app_id
+FYERS_SECRET_KEY=your_fyers_secret_key
 FYERS_REDIRECT_URI=http://127.0.0.1:3000/callback
 
+# Execution Safety Controls (Default: Safe Paper Trading)
 EXECUTION_MODE=paper
 LIVE_ORDER_PLACEMENT_ENABLED=false
 
+# VCP Vision AI Proposal Engine
+VCP_VISION_ENABLED=true
+OPENROUTER_API_KEY=your_openrouter_key
+VCP_VISION_MODEL=google/gemini-3.7-flash
+VCP_VISION_REASONING_EFFORT=medium
+PROPOSAL_AUTOMATION_ENABLED=true
+
+# P7 Fundamentals & NSE Risk Enrichment
 P7_FUNDAMENTAL_PASS_ENABLED=false
 UPSTOX_ANALYTICS_TOKEN=
 NSE_FUNDAMENTAL_RISK_ENABLED=true
-OPENROUTER_API_KEY=
 OPENROUTER_MODEL=openai/gpt-5.6-luna-pro
-OPENROUTER_REASONING_EFFORT=medium
 ```
 
-Never commit this file. Fyers tokens and provider keys must remain server-side.
-The app stores Fyers access tokens encrypted in PostgreSQL and shares valid
-tokens with workers through the backend token service.
-
-The frontend defaults to `http://localhost:8000/api/v1` for REST and
-`ws://localhost:8000/ws` for live prices. A different REST base can be set in
-`client/.env.local`:
+Create `client/.env.local` (optional if using defaults):
 
 ```dotenv
 VITE_API_BASE_URL=http://localhost:8000/api/v1
 ```
 
-### 5. Start the development stack
+---
+
+### Step 5: Start the Development Stack
+
+Launch all services with a single command:
 
 ```bash
 ./start-dev.sh
 ```
 
-This starts the API, arq worker, tick worker, position monitor, and UI. The
-order gateway starts only when live execution is double-armed.
+This starts:
+- FastAPI backend on `http://localhost:8000`
+- React UI on `http://localhost:5173`
+- Background workers (ARQ, Tick worker, Position monitor, Proposal worker, Entry supervisor)
 
-Open:
-
-- UI: <http://localhost:3000>
-- API documentation: <http://localhost:8000/docs>
-- Health check: <http://localhost:8000/health>
-
-Runtime logs and PID files are written to `.dev-runtime/`.
-
+Useful commands:
 ```bash
-./start-dev.sh status
-./start-dev.sh stop
+./start-dev.sh status   # Check status of running processes
+./start-dev.sh stop     # Stop all application processes
 ```
 
-When `start-dev.sh` is attached to the terminal, `Ctrl-C` stops the application
-processes but intentionally leaves PostgreSQL and Redis running.
+Interactive API documentation is accessible at `http://localhost:8000/docs`.
 
-## First-run workflow
+---
 
-1. Open the UI and complete the Fyers authorization flow.
-2. Run the historical EOD sync to backfill daily candles.
-3. Start a technical scan and wait for the arq worker to persist its results.
-4. Review candidates in the scanner and chart workspace.
-5. Optionally run the fundamental pass on selected technical survivors.
-6. Create a trade instruction with quantity, entry, stop, target, and trailing
-   rule.
-7. Review the instruction and enter the explicit paper confirmation phrase.
-8. Observe the resulting position, order intent, monitor status, and journal.
+## Running Individual Processes
 
-Nothing produced by screening or AI can skip step 7.
-
-## Running processes individually
-
-Run these from separate terminals when debugging or configuring a supervisor:
+For debugging specific workers, launch them in dedicated terminals:
 
 ```bash
-# API
+# 1. FastAPI API server
 cd server
 uv run uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 
-# Background jobs and schedules
+# 2. Core ARQ scheduler & background jobs
 cd server
 uv run python run_worker.py
 
-# Fyers market-data WebSocket -> Redis
+# 3. Fyers Market-Data WebSocket -> Redis LTP worker
 cd server
 uv run python -m app.workers.tick_worker
 
-# Software SL/target/trailing enforcement
+# 4. Software Stop-Loss and Trailing Position Monitor
 cd server
 uv run python -m app.workers.position_monitor
 
-# Serial P10 chart/Gemini proposal queue
+# 5. Serial Proposal Generator (Charts + Gemini Vision)
 cd server
 uv run python -m app.workers.proposal_worker
 
-# Approved-proposal 5-minute triggers, adds, allocation, and correction
+# 6. 5-Minute Entry Supervisor
 cd server
 uv run python -m app.workers.entry_supervisor
 
-# Live mode only: Fyers order WebSocket -> order/fill ledger
+# 7. Live Order Gateway (Live mode only)
 cd server
 uv run python -m app.workers.order_gateway
 
-# Frontend
+# 8. React UI
 cd client
 pnpm dev
 ```
 
-Do not run multiple tick workers or order gateways against the same deployment.
-The topology is intentionally one market-data socket and one order socket.
+---
 
-## Paper and live execution
+## Daily Operating Routine
 
-Paper mode is the default:
+```text
+Time (IST)   Phase             Actions & Process
+-----------------------------------------------------------------------------------------
+08:50        Pre-Market        - ARQ worker runs token refresh
+                               - System checks Fyers authorization status
+
+09:15-15:30  Market Hours      - Tick Ingestion updates live prices and 5m bars
+                               - Entry Supervisor watches approved proposals for triggers
+                               - Position Monitor tracks active positions tick by tick
+                               - Reconciliation runs every 15 minutes to verify broker state
+
+15:40-18:30  Post-Market       - Journal dispatcher builds closed trade logs
+                               - AI Coach runs async reviews on completed trades
+
+18:30        EOD Sync & Scan   - ARQ worker fetches daily candles for Nifty 500
+                               - P9 computes market regime and sector breadths
+                               - Screener filters Stage-2 and VCP candidate shortlist
+
+19:00-20:00  Proposals         - Proposal worker generates charts and Gemini pattern reads
+                               - Python risk engine builds immutable trade plans
+
+By 08:30     Human Review      - Trader opens Proposals Inbox in UI
+(Next Day)                     - Reviews chart geometry, risk stops, and profit targets
+                               - Explicitly clicks Approve or Reject on each proposal
+```
+
+---
+
+## Execution Modes & Safety Controls
+
+### Paper Trading Mode (Default)
 
 ```dotenv
 EXECUTION_MODE=paper
 LIVE_ORDER_PLACEMENT_ENABLED=false
 ```
 
-Confirming a paper trade creates the full instruction, position, intent, fill,
-monitoring, and journal trail without contacting the Fyers order API. Paper
-entries fill at the planned price; software exits fill at the observed LTP.
+In paper mode:
+- Approved proposal triggers simulate instant fills via the internal Paper Broker.
+- Software stops and targets trigger simulated exits at current market LTP.
+- No network requests are sent to Fyers order endpoints.
+- Full ledger, fill history, and journal trails are generated for inspection.
 
-Live placement requires both settings to be changed before startup:
+### Live Trading Mode (Double-Armed)
 
 ```dotenv
 EXECUTION_MODE=live
 LIVE_ORDER_PLACEMENT_ENABLED=true
 ```
 
-Live entry is deliberately double-armed and requires the explicit
-`CONFIRM_LIVE_ORDER` phrase in the UI. The current live path is intended for
-buy-side CNC entry orders. It persists an idempotent intent before calling the
-Fyers asynchronous order API, relies on the order gateway for fills, and never
-blind-retries an ambiguous placement.
+Live execution requires both environment variables to be active:
+- Orders use Fyers asynchronous REST APIs for buy-side CNC equity swing trades.
+- Every order persists an idempotent intent key before dispatch.
+- Rate limiting enforces a strict 10 orders per second limit.
+- Live order events and trade fills are captured via the dedicated Order Gateway WebSocket.
 
-> [!CAUTION]
-> The global kill switch means **no new automated orders**. It blocks automated
-> entries and exits and does not flatten existing positions. If it is enabled
-> while a position is open, manage broker risk deliberately.
+### Global Kill Switch
 
-## Background schedules
+The global kill switch provides an emergency stop:
+- When activated, all automated entries and exits are immediately blocked.
+- It does not dump or market-flatten existing positions. Open positions must be managed manually via the Fyers terminal or disarmed once safe.
 
-The arq worker uses `Asia/Kolkata` by default:
+---
 
-| Job | Default schedule |
-| --- | --- |
-| Incremental EOD candle sync | Weekdays at 18:30 IST |
-| Fyers token refresh | Weekdays at 08:50 IST |
-| Broker reconciliation | Every 15 minutes, weekdays during configured market hours |
-| Journal fill dispatcher | Every 30 seconds |
+## Background Job Schedules
 
-These are clock schedules and do not include an exchange holiday calendar.
+Scheduled jobs run via the ARQ worker in the `Asia/Kolkata` time zone:
 
-## Verification
+| Job | Schedule | Purpose |
+| --- | --- | --- |
+| **Token Refresh** | Weekdays at 08:50 IST | Verifies and refreshes Fyers access tokens before market open. |
+| **Broker Reconciliation** | Every 15 minutes (09:00 to 16:00 IST) | Compares local DB positions and orders with Fyers broker books. |
+| **Journal Fill Dispatcher** | Every 30 seconds | Ingests new order fills into the trade journal ledger. |
+| **EOD Candle Sync** | Weekdays at 18:30 IST | Fetches daily OHLCV candles for all Nifty 500 stocks. |
+| **Market Regime & Scan** | Follows EOD Sync | Computes P9 market regime metrics and runs technical screener. |
 
-Run the backend tests:
+---
+
+## Verification & Testing
+
+Run backend tests:
 
 ```bash
 cd server
-UV_CACHE_DIR=/tmp/swingtrader-uv-cache uv run pytest -q
+uv run pytest -q
 ```
 
-Check the frontend:
+Run frontend linting and production build check:
 
 ```bash
 cd client
@@ -376,64 +502,16 @@ pnpm lint
 pnpm build
 ```
 
-Money-path changes should also be tested with broker mocks, replayed LTP
-sequences, duplicate order events, kill-switch checks, and worker restart
-drills. Never use meaningful live size as a substitute for a test suite.
+---
 
-## API overview
+## Production Deployment
 
-Business endpoints are under `/api/v1`; live browser prices use `/ws`.
+Production runs on an ARM64 Linux VPS using Docker Compose with Caddy as the reverse proxy. Container images are built and pushed via GitHub Actions to GitHub Container Registry (GHCR).
 
-| Area | Representative endpoints |
-| --- | --- |
-| Broker authorization | `/auth/url`, `/auth/status`, `/auth/refresh` |
-| Historical data | `/historical/sync`, `/historical/status`, `/historical/candles` |
-| Screening | `/screening/scan`, `/screening/runs`, `/screening/runs/{id}/results` |
-| Trading | `/trading/execution-status`, `/trading/trade-instructions`, `/trading/positions`, `/trading/order-intents` |
-| Operations | `/system/kill-switch`, `/system/reconciliation/run`, `/system/reconciliation/runs` |
-| Journal | `/journal/entries`, `/journal/summary`, `/journal/ai/runs` |
+Refer to [DEPLOY.md](DEPLOY.md) for full deployment and secret management instructions.
 
-FastAPI exposes the complete interactive OpenAPI reference at `/docs` while
-the API process is running.
-
-## Operational and security notes
-
-- This is a single-user application and currently has no application-level
-  login. Bind it to trusted interfaces and do not expose it publicly as-is.
-- The included Compose services use development credentials and published
-  ports. They are not a production deployment definition.
-- Run the API, arq worker, tick worker, position monitor, and live order gateway
-  under process supervision in any persistent environment.
-- Keep PostgreSQL and Redis private, terminate TLS at a trusted edge, back up
-  the database, and alert on stale worker heartbeats and critical
-  `system_events`.
-- PostgreSQL is the durable ledger. Redis pub/sub is ephemeral and must not be
-  treated as an order or fill audit log.
-- Upstox and OpenRouter failures affect annotations only; they must not pause or
-  alter the Fyers money path.
-- Reconciliation may heal broker events that match existing local intents. It
-  flags unknown manual broker activity instead of fighting it automatically.
-
-See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) before deploying beyond a trusted
-development machine.
-
-## Contributing
-
-Contributions should preserve the project's central safety boundaries:
-
-- no automatic entry from scanner or AI output;
-- no Fyers calls from the browser;
-- one owner for each Fyers WebSocket;
-- all order mutations go through the execution engine;
-- persist an idempotent order intent before broker placement;
-- position protection must not depend on the UI being open;
-- screening and AI work belongs in the background queue.
-
-Before opening a change, run the backend tests, frontend lint, and frontend
-build. Changes to component ownership, providers, long-running services, or
-money-path behavior should first update [AGENTS.md](AGENTS.md).
+---
 
 ## License
 
-No open-source license has been selected yet. Add a `LICENSE` file before
-redistributing the project or accepting external contributions.
+All rights reserved. Private trading software for personal use.

@@ -1,32 +1,49 @@
-# React + TypeScript + Vite
+# SwingTraderVCP Client
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The web frontend for the SwingTraderVCP trading workstation. Built with React 19, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query, and TradingView `lightweight-charts`.
 
-Currently, two official plugins are available:
+## Key Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Dashboard**: Overview of current market status, active positions, open orders, and recent screening results.
+- **Screener Workspace**: Stage-2 and VCP scan shortlists with interactive filtering, score breakdown, and VCP vision sheets.
+- **Trading Chart**: High-performance candlestick charting powered by lightweight-charts v5 with EMA overlays, volume bars, and drawing tools.
+- **Proposals Inbox**: Review automated trade proposals generated from shortlisted patterns. Inspect pivot levels, risk limits, chase ceilings, and multi-leg risk templates before issuing explicit approvals or rejections.
+- **Positions & Orders**: Real-time position tracking with software stop-loss levels, profit targets (T1/T2/T3), step trailing indicators, and live order book synchronization.
+- **Paper & Live Trading**: Safe paper mode simulation and double-armed live CNC execution controls.
+- **Trade Journal**: Automated fill logging, entry/exit chart capture, P&L calculations, and structured AI coaching reviews.
 
-## React Compiler
+## Local Development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### Prerequisites
 
-## Expanding the Oxlint configuration
+- Node.js (v20 or higher)
+- pnpm (v9 or higher)
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+### Setup
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+# Install dependencies
+pnpm install --frozen-lockfile
+
+# Start development server
+pnpm dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+The frontend runs by default on `http://localhost:5173`.
+
+### Environment Configuration
+
+Create `client/.env.local` to customize the API base URL if not using defaults:
+
+```dotenv
+VITE_API_BASE_URL=http://localhost:8000/api/v1
+```
+
+### Scripts
+
+```bash
+pnpm dev       # Start local Vite development server
+pnpm build     # Type-check with TypeScript and build production bundle
+pnpm lint      # Run ESLint / Oxlint checks
+pnpm preview   # Preview production build locally
+```

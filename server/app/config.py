@@ -205,6 +205,9 @@ class Settings(BaseSettings):
     proposal_automation_enabled: bool = False
     proposal_queue_name: str = "arq:queue:p10-proposals"
     proposal_batch_budget_minutes: int = Field(default=45, ge=5, le=120)
+    # Testing default is 10. Restore the locked production top-20 with
+    # PROPOSAL_BATCH_LIMIT=20. Hard-capped at 20 in the worker/queue.
+    proposal_batch_limit: int = Field(default=10, ge=1, le=20)
     proposal_attempt_timeout_seconds: float = Field(default=90.0, ge=10, le=120)
     proposal_max_attempts: int = Field(default=2, ge=1, le=2)
     # Populate exchange holidays as JSON in the environment, for example

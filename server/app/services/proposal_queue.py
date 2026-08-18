@@ -25,7 +25,7 @@ async def enqueue_proposal_batch(
     job = await redis.enqueue_job(
         "run_eod_proposal_batch",
         str(scan_run_id),
-        min(limit, 20),
+        min(limit, settings.proposal_batch_limit, 20),
         manual,
         _job_id=job_id,
         _queue_name=settings.proposal_queue_name,

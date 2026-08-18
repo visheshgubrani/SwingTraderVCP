@@ -55,13 +55,22 @@ export function ProposalInbox() {
     if (proposalBatch.data?.status === "completed") {
       return `Last batch: ${proposalBatch.data.proposals_generated} proposals from ${proposalBatch.data.candidates_processed} charts`
     }
-    if (proposalBatch.data?.status === "timed_out" || proposalBatch.data?.status === "failed") {
-      return proposalBatch.data.error_message ?? `Last batch ${proposalBatch.data.status}`
+    if (proposalBatch.data?.status === "timed_out") {
+      return (
+        proposalBatch.data.error_message ??
+        "Last batch timed out before any charts were processed."
+      )
+    }
+    if (proposalBatch.data?.status === "failed") {
+      return proposalBatch.data.error_message ?? "Last batch failed."
     }
     return latestScan
       ? `Latest scan ${latestScan.as_of_date ?? ""} · ${latestScan.passing_count} setups`
       : "No completed personal scan yet"
   }, [latestScan, proposalBatch.data, triggerBatch.error])
+  const batchFailed =
+    proposalBatch.data?.status === "timed_out" ||
+    proposalBatch.data?.status === "failed"
 
   const templateBadges: Record<string, string> = {
     single: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
@@ -90,7 +99,10 @@ export function ProposalInbox() {
 
         {/* Live Supervisor Indicator */}
         <div className="flex items-center gap-3">
-          <div className="hidden max-w-72 truncate text-[10px] text-muted-foreground lg:block" title={batchMessage}>
+          <div
+            className="max-w-80 truncate text-[10px] text-muted-foreground"
+            title={batchMessage}
+          >
             {batchMessage}
           </div>
           <Button
@@ -125,6 +137,12 @@ export function ProposalInbox() {
           </div>
         </div>
       </div>
+
+      {batchFailed ? (
+        <div className="mx-4 mt-2 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[10px] text-rose-200">
+          {batchMessage}
+        </div>
+      ) : null}
 
       <MarketContextPanel />
 

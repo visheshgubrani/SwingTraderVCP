@@ -48,9 +48,34 @@ from app.services.proposal_renderer import render_proposal_charts
 logger = logging.getLogger("proposal_worker")
 IST_TZ = ZoneInfo("Asia/Kolkata")
 CandidateOutcome = Literal["generated", "rejected", "uncertain", "failed", "timed_out"]
+PROPOSAL_BATCH_HARD_CAP = 20
 _LOCK_KEY = "proposal_worker:singleton"
 _LOCK_TTL_SECONDS = 30
 _LOCK_REFRESH_SECONDS = 10
+
+
+def proposal_batch_deadline(
+    *,
+    scan_completed_at: dt.datetime,
+    now: dt.datetime,
+    budget_minutes: int,
+    manual: bool,
+) -> dt.datetime:
+    """Return the hard stop for a serial proposal batch.
+
+    Automatic EOD runs measure the budget from shortlist freeze. Manual
+    Generate clicks start a fresh clock so a late evening test still runs.
+    """
+    if scan_completed_at.tzinfo is None:
+        scan_completed_at = scan_completed_at.replace(tzinfo=dt.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    started = now if manual else scan_completed_at
+    return started + dt.timedelta(minutes=budget_minutes)
+
+
+def cap_proposal_batch_limit(limit: int, configured_limit: int) -> int:
+    return min(limit, configured_limit, PROPOSAL_BATCH_HARD_CAP)
 
 
 def _holiday_dates() -> set[dt.date]:
@@ -528,6 +553,7 @@ async def run_eod_proposal_batch(
     if not manual and not settings.proposal_automation_enabled:
         return {"status": "disabled", "scan_run_id": scan_run_id}
 
+    effective_limit = cap_proposal_batch_limit(limit, settings.proposal_batch_limit)
     async with async_session() as session:
         if await _control_is_paused(session, "proposal_processing_paused"):
             return {"status": "paused", "scan_run_id": scan_run_id}
@@ -557,7 +583,7 @@ async def run_eod_proposal_batch(
             ),
             {
                 "scan_run_id": scan_run_id,
-                "limit": min(limit, 20),
+                "limit": effective_limit,
                 "p7_enabled": settings.p7_fundamental_pass_enabled,
             },
         )
@@ -568,10 +594,12 @@ async def run_eod_proposal_batch(
         scan_completed_at = candidates[0].scan_completed_at
         if scan_completed_at is None:
             raise RuntimeError("Proposal shortlist has no durable scan completion time")
-        if scan_completed_at.tzinfo is None:
-            scan_completed_at = scan_completed_at.replace(tzinfo=dt.timezone.utc)
-        deadline = scan_completed_at + dt.timedelta(
-            minutes=settings.proposal_batch_budget_minutes,
+        now = dt.datetime.now(dt.timezone.utc)
+        deadline = proposal_batch_deadline(
+            scan_completed_at=scan_completed_at,
+            now=now,
+            budget_minutes=settings.proposal_batch_budget_minutes,
+            manual=manual,
         )
         run_result = await session.execute(
             text(
@@ -591,7 +619,17 @@ async def run_eod_proposal_batch(
     processed = 0
     for index, candidate in enumerate(candidates):
         if dt.datetime.now(dt.timezone.utc) >= deadline:
-            counts["timed_out"] += len(candidates) - index
+            remaining = len(candidates) - index
+            counts["timed_out"] += remaining
+            logger.warning(
+                "Proposal batch for scan %s hit the deadline with %s candidates unprocessed "
+                "(deadline=%s manual=%s processed=%s)",
+                scan_run_id,
+                remaining,
+                deadline.isoformat(),
+                manual,
+                processed,
+            )
             break
         try:
             outcome = await process_proposal_candidate(
@@ -607,6 +645,19 @@ async def run_eod_proposal_batch(
         processed += 1
 
     terminal_status = "timed_out" if counts["timed_out"] else "completed"
+    error_message = None
+    if terminal_status == "timed_out" and processed == 0:
+        error_message = (
+            "Batch deadline already passed before any candidate was processed "
+            f"(deadline {deadline.isoformat()})."
+        )
+        logger.warning(
+            "Proposal batch for scan %s timed out before processing any candidate; "
+            "deadline=%s manual=%s",
+            scan_run_id,
+            deadline.isoformat(),
+            manual,
+        )
     async with async_session() as session:
         await session.execute(
             text(
@@ -617,6 +668,7 @@ async def run_eod_proposal_batch(
                     proposals_rejected = :rejected,
                     proposals_uncertain = :uncertain,
                     proposals_failed = :failed,
+                    error_message = :error_message,
                     completed_at = now(), updated_at = now()
                 WHERE id = :run_id
                 """
@@ -625,6 +677,7 @@ async def run_eod_proposal_batch(
                 "run_id": automation_run_id,
                 "status": terminal_status,
                 "processed": processed,
+                "error_message": error_message,
                 **counts,
             },
         )

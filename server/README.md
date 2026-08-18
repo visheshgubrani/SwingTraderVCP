@@ -262,15 +262,15 @@ them.
 
 The API surface is under `/api/v1`:
 
-- `GET /trading/execution-status` — public paper/live UI state, without
+- `GET /trading/execution-status`: public paper/live UI state, without
   credentials.
-- `POST /trading/trade-instructions` — save a validated human draft.
-- `POST /trading/trade-instructions/{id}/confirm` — explicit manual
+- `POST /trading/trade-instructions`: save a validated human draft.
+- `POST /trading/trade-instructions/{id}/confirm`: explicit manual
   checkpoint. The required phrase is `CONFIRM_PAPER_TRADE` in paper mode and
   `CONFIRM_LIVE_ORDER` in live mode.
 - `GET /trading/trade-instructions`, `/trading/positions`, and
-  `/trading/order-intents` — read the audit state.
-- `GET|PUT /system/kill-switch` — read or deliberately change the global
+  `/trading/order-intents`: read the audit state.
+- `GET|PUT /system/kill-switch`: read or deliberately change the global
   automation control; changes are persisted and published to Redis.
 
 ## P6 reconciliation
@@ -293,6 +293,6 @@ Flag-only (no auto-import in v1):
 
 Ops API:
 
-- `GET /system/reconciliation/runs` — recent reconciliation runs.
-- `GET /system/reconciliation/runs/{id}/items` — discrepancies for a run.
-- `POST /system/reconciliation/run` — enqueue a manual reconciliation job.
+- `GET /system/reconciliation/runs`: recent reconciliation runs.
+- `GET /system/reconciliation/runs/{id}/items`: discrepancies for a run.
+- `POST /system/reconciliation/run`: enqueue a manual reconciliation job.

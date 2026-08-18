@@ -272,7 +272,10 @@ async def trigger_proposal_batch(
         status="queued",
         scan_run_id=scan["id"],
         as_of_date=scan["as_of_date"],
-        message="Proposal generation queued. The dedicated worker will process the top 20 serially.",
+        message=(
+            "Proposal generation queued. The dedicated worker will process the "
+            f"top {min(settings.proposal_batch_limit, 20)} serially."
+        ),
     )
 
 

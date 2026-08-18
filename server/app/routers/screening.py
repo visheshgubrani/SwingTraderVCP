@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
+from app.domain.p9_sector_taxonomy import sector_for_industry
 from app.schemas.screening import (
     FundamentalDetailResponse,
     FundamentalPassProgressResponse,
@@ -44,6 +45,14 @@ def _fundamental_assessment(scorecard: object) -> dict | None:
     if not isinstance(scorecard, dict) or not isinstance(scorecard.get("grade"), str):
         return None
     return scorecard
+
+
+def _sector_code_from_metrics(tech_metrics: dict[str, Any]) -> str | None:
+    stored = tech_metrics.get("sector_code")
+    if isinstance(stored, str) and stored.strip():
+        return stored
+    mapped = sector_for_industry(tech_metrics.get("industry"))
+    return mapped.code if mapped is not None else None
 
 
 @router.get(
@@ -731,7 +740,7 @@ async def get_scan_results(
             "industry_key": tech_metrics.get("industry_key"),
             "fundamental_cap_exclusion_reason": tech_metrics.get("fundamental_cap_exclusion_reason"),
             "market_context_mode": tech_metrics.get("market_context_mode"),
-            "sector_code": tech_metrics.get("sector_code"),
+            "sector_code": _sector_code_from_metrics(tech_metrics),
             "sector_tier": tech_metrics.get("sector_tier", "unavailable"),
             "sector_gate_tier": tech_metrics.get("sector_gate_tier", "unavailable"),
             "sector_rs_rating": tech_metrics.get("sector_rs_rating"),

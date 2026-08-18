@@ -146,6 +146,38 @@ class P9MarketContextTests(unittest.TestCase):
         ranks = {row["symbol"]: row["result_rank"] for row in ordered}
         self.assertEqual(ranks, {"A": 1, "B": 2, "C": 3})
 
+    def test_power_and_services_use_live_fyers_symbols(self) -> None:
+        by_code = {sector.code: sector.fyers_symbol for sector in SECTORS}
+        self.assertEqual(by_code["power"], "NSE:NIFTYENERGY-INDEX")
+        self.assertEqual(by_code["services"], "NSE:NIFTYSERVSECTOR-INDEX")
+
+    def test_industry_keeps_sector_code_when_p9_is_unavailable(self) -> None:
+        from app.domain.p9_sector_taxonomy import annotate_sector
+
+        mapped = annotate_sector("Capital Goods")
+        self.assertEqual(mapped["sector_code"], "infrastructure")
+        self.assertEqual(mapped["sector_gate_tier"], "unavailable")
+        self.assertIsNone(mapped["sector_strength_result_id"])
+
+        complete = annotate_sector(
+            "Chemicals",
+            run_complete=True,
+            result={
+                "id": "result-1",
+                "raw_tier": "leading",
+                "gate_tier": "neutral",
+                "rs_rating": 88,
+            },
+        )
+        self.assertEqual(complete["sector_code"], "chemicals")
+        self.assertEqual(complete["sector_tier"], "leading")
+        self.assertEqual(complete["sector_gate_tier"], "neutral")
+        self.assertEqual(complete["sector_rs_rating"], 88)
+
+        unknown = annotate_sector("Not A Real Industry")
+        self.assertIsNone(unknown["sector_code"])
+        self.assertEqual(unknown["sector_gate_tier"], "unavailable")
+
     def test_sector_context_loader_selects_run_status(self) -> None:
         from app.services.market_context import load_sector_context_for_industries
 

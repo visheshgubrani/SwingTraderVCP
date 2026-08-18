@@ -242,3 +242,31 @@ class PaperAccountResetRequest(BaseModel):
     confirmation: Literal["CONFIRM_PAPER_RESET"]
     changed_by: str = Field(min_length=1, max_length=120)
     reason: str = Field(min_length=1, max_length=500)
+
+
+class ProposalBatchTriggerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scan_run_id: UUID | None = None
+
+
+class ProposalBatchTriggerResponse(BaseModel):
+    status: Literal["queued", "running", "paused"]
+    scan_run_id: UUID
+    as_of_date: dt.date | None = None
+    message: str
+
+
+class ProposalBatchStatusResponse(BaseModel):
+    scan_run_id: UUID | None = None
+    automation_run_id: UUID | None = None
+    status: Literal["idle", "running", "completed", "timed_out", "failed"] = "idle"
+    candidates_total: int = 0
+    candidates_processed: int = 0
+    proposals_generated: int = 0
+    proposals_rejected: int = 0
+    proposals_uncertain: int = 0
+    proposals_failed: int = 0
+    error_message: str | None = None
+    started_at: dt.datetime | None = None
+    completed_at: dt.datetime | None = None

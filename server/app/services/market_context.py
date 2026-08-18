@@ -30,7 +30,12 @@ from app.domain.p9_market_context import (
     rank_sector_strength,
     typical_turnover,
 )
-from app.domain.p9_sector_taxonomy import SECTORS, TAXONOMY_VERSION, sector_for_industry
+from app.domain.p9_sector_taxonomy import (
+    SECTORS,
+    TAXONOMY_VERSION,
+    annotate_sector,
+    sector_for_industry,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -660,39 +665,27 @@ async def load_sector_context_for_industries(
             {"reference_date": reference_date, "policy_id": policy["id"]},
         )
     ).mappings().one_or_none()
-    if run is None:
-        return str(policy["mode"]), {}
-    if run["status"] != "complete":
-        return str(policy["mode"]), {}
-    rows = (
-        await db.execute(
-            text(
-                """
-                SELECT id, sector_code, rs_rating, raw_tier, gate_tier
-                FROM sector_strength_results WHERE run_id = :run_id
-                """
-            ),
-            {"run_id": run["id"]},
-        )
-    ).mappings().all()
-    by_code = {str(row["sector_code"]): dict(row) for row in rows}
+    run_complete = run is not None and run["status"] == "complete"
+    by_code: dict[str, dict[str, Any]] = {}
+    if run_complete:
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT id, sector_code, rs_rating, raw_tier, gate_tier
+                    FROM sector_strength_results WHERE run_id = :run_id
+                    """
+                ),
+                {"run_id": run["id"]},
+            )
+        ).mappings().all()
+        by_code = {str(row["sector_code"]): dict(row) for row in rows}
     output: dict[str, dict[str, Any]] = {}
     for industry in industries:
         sector = sector_for_industry(industry)
-        if sector is None or sector.code not in by_code:
-            output[industry] = {
-                "sector_code": None,
-                "sector_tier": "unavailable",
-                "sector_rs_rating": None,
-                "sector_strength_result_id": None,
-            }
-            continue
-        row = by_code[sector.code]
-        output[industry] = {
-            "sector_code": sector.code,
-            "sector_tier": row["raw_tier"],
-            "sector_gate_tier": row["gate_tier"],
-            "sector_rs_rating": row["rs_rating"],
-            "sector_strength_result_id": row["id"],
-        }
+        output[industry] = annotate_sector(
+            industry,
+            run_complete=run_complete,
+            result=by_code.get(sector.code) if sector is not None else None,
+        )
     return str(policy["mode"]), output

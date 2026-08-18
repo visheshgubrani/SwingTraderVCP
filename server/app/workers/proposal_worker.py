@@ -522,9 +522,10 @@ async def run_eod_proposal_batch(
     ctx: dict[str, Any],
     scan_run_id: str,
     limit: int = 20,
+    manual: bool = False,
 ) -> dict[str, Any]:
     del ctx
-    if not settings.proposal_automation_enabled:
+    if not manual and not settings.proposal_automation_enabled:
         return {"status": "disabled", "scan_run_id": scan_run_id}
 
     async with async_session() as session:

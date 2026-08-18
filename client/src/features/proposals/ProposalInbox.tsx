@@ -1,16 +1,26 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import {
   AlertCircleIcon,
+  PlayIcon,
   SparklesIcon,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Spinner } from "@/components/ui/spinner"
+import {
+  defaultScanRunId,
+  productionScanRuns,
+  useScanRuns,
+} from "@/features/screener/api"
+import { ApiError } from "@/lib/api"
 import {
   useEntrySupervisorStatus,
   useCapacityConflicts,
   useResolveCapacityConflict,
   useTradeProposals,
+  useProposalBatch,
+  useTriggerProposalBatch,
   type TradeProposalItem,
 } from "./api"
 import { ProposalDetailModal } from "./ProposalDetailModal"
@@ -25,7 +35,33 @@ export function ProposalInbox() {
   const { data: supervisorStatus } = useEntrySupervisorStatus()
   const { data: conflicts = [] } = useCapacityConflicts()
   const resolveConflict = useResolveCapacityConflict()
+  const scanRuns = useScanRuns()
+  const latestScanId = defaultScanRunId(productionScanRuns(scanRuns.data))
+  const latestScan = productionScanRuns(scanRuns.data).find(
+    (run) => run.id === latestScanId,
+  )
+  const proposalBatch = useProposalBatch(latestScanId)
+  const triggerBatch = useTriggerProposalBatch()
   const supervisorActive = supervisorStatus?.status === "active"
+  const batchRunning =
+    proposalBatch.data?.status === "running" || triggerBatch.isPending
+  const batchMessage = useMemo(() => {
+    if (triggerBatch.error instanceof ApiError || triggerBatch.error instanceof Error) {
+      return triggerBatch.error.message
+    }
+    if (proposalBatch.data?.status === "running") {
+      return `Generating ${proposalBatch.data.candidates_processed}/${proposalBatch.data.candidates_total} · ${proposalBatch.data.proposals_generated} proposals`
+    }
+    if (proposalBatch.data?.status === "completed") {
+      return `Last batch: ${proposalBatch.data.proposals_generated} proposals from ${proposalBatch.data.candidates_processed} charts`
+    }
+    if (proposalBatch.data?.status === "timed_out" || proposalBatch.data?.status === "failed") {
+      return proposalBatch.data.error_message ?? `Last batch ${proposalBatch.data.status}`
+    }
+    return latestScan
+      ? `Latest scan ${latestScan.as_of_date ?? ""} · ${latestScan.passing_count} setups`
+      : "No completed personal scan yet"
+  }, [latestScan, proposalBatch.data, triggerBatch.error])
 
   const templateBadges: Record<string, string> = {
     single: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
@@ -47,13 +83,31 @@ export function ProposalInbox() {
               VCP Trade Proposals & Entry Supervisor
             </h1>
             <p className="text-[11px] text-muted-foreground">
-              Automated EOD scanner proposals requiring immutable operator approval before market entry.
+              Generate a serial Gemini batch from the latest scan, then approve or reject each immutable proposal.
             </p>
           </div>
         </div>
 
         {/* Live Supervisor Indicator */}
-        <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-1.5 text-[11px]">
+        <div className="flex items-center gap-3">
+          <div className="hidden max-w-72 truncate text-[10px] text-muted-foreground lg:block" title={batchMessage}>
+            {batchMessage}
+          </div>
+          <Button
+            className="h-8 gap-1.5 font-bold uppercase"
+            disabled={batchRunning || !latestScan || latestScan.status !== "succeeded"}
+            onClick={() => triggerBatch.mutate(latestScanId)}
+            size="sm"
+            type="button"
+          >
+            {batchRunning ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <PlayIcon className="size-3.5 fill-current" />
+            )}
+            {batchRunning ? "Generating" : "Generate proposals"}
+          </Button>
+          <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-1.5 text-[11px]">
           <div className="flex items-center gap-1.5">
             <span className={`h-2 w-2 rounded-full ${supervisorActive ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
             <span className="text-muted-foreground">Entry Supervisor:</span>
@@ -67,6 +121,7 @@ export function ProposalInbox() {
             <strong className="text-foreground">
               {supervisorStatus?.armed_legs_count ?? 0}
             </strong>
+          </div>
           </div>
         </div>
       </div>

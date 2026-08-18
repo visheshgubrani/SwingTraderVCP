@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 
 TAXONOMY_VERSION = "nifty_sector_taxonomy_v1"
@@ -67,6 +68,38 @@ def sector_for_industry(industry: object) -> SectorDefinition | None:
         return None
     code = INDUSTRY_TO_SECTOR.get(industry.strip())
     return SECTOR_BY_CODE.get(code) if code else None
+
+
+def annotate_sector(
+    industry: object,
+    *,
+    run_complete: bool = False,
+    result: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Map NSE industry to a sector code even when P9 strength is unavailable.
+
+    Gate/RS fields stay unavailable unless a complete 16-sector run produced a
+    result row. Incomplete rankings must not be treated as leading/lagging.
+    """
+    unavailable = {
+        "sector_code": None,
+        "sector_tier": "unavailable",
+        "sector_gate_tier": "unavailable",
+        "sector_rs_rating": None,
+        "sector_strength_result_id": None,
+    }
+    sector = sector_for_industry(industry)
+    if sector is None:
+        return unavailable
+    if not run_complete or result is None:
+        return {**unavailable, "sector_code": sector.code}
+    return {
+        "sector_code": sector.code,
+        "sector_tier": result.get("raw_tier") or "unavailable",
+        "sector_gate_tier": result.get("gate_tier") or "unavailable",
+        "sector_rs_rating": result.get("rs_rating"),
+        "sector_strength_result_id": result.get("id"),
+    }
 
 
 def validate_taxonomy() -> None:

@@ -261,7 +261,11 @@ export function ScannerTable({
                     <td className="px-3 py-2 text-center">{row.rs_rating}</td>
                     <td className="px-3 py-2 text-center">
                       <Badge
-                        title={`P9 contextual rank ${row.contextual_selection_rank ?? "—"}; technical rank remains #${row.rank}`}
+                        title={
+                          row.sector_code
+                            ? `P9 ${row.sector_code} · gate ${row.sector_gate_tier}; contextual rank ${row.contextual_selection_rank ?? "—"}; technical rank remains #${row.rank}`
+                            : `Industry is not in the 16-sector taxonomy. Gate ${row.sector_gate_tier}. Technical rank remains #${row.rank}`
+                        }
                         variant={row.sector_gate_tier === "lagging" || row.sector_gate_tier === "unavailable" ? "destructive" : row.sector_gate_tier === "leading" ? "default" : "outline"}
                       >
                         {row.sector_code ?? "unmapped"} · {row.sector_gate_tier}

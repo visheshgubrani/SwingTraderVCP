@@ -170,11 +170,35 @@ export interface PaperPortfolio {
   }>
 }
 
+export interface ProposalBatchStatus {
+  scan_run_id: string | null
+  automation_run_id: string | null
+  status: "idle" | "running" | "completed" | "timed_out" | "failed"
+  candidates_total: number
+  candidates_processed: number
+  proposals_generated: number
+  proposals_rejected: number
+  proposals_uncertain: number
+  proposals_failed: number
+  error_message: string | null
+  started_at: string | null
+  completed_at: string | null
+}
+
+export interface ProposalBatchTriggerResponse {
+  status: "queued" | "running" | "paused"
+  scan_run_id: string
+  as_of_date: string | null
+  message: string
+}
+
 const operationsKeys = {
   marketContext: ["automation", "market-context", "latest"] as const,
   stopStreak: (mode: "paper" | "live") => ["automation", "stop-streak", mode] as const,
   rollout: ["automation", "rollout"] as const,
   paperPortfolio: ["automation", "paper-portfolio"] as const,
+  proposalBatch: (scanRunId: string | null) =>
+    ["automation", "proposal-batch", scanRunId] as const,
 }
 
 export function useMarketContext() {
@@ -325,6 +349,45 @@ export function useTradeProposals(statusFilter: string = "pending_approval") {
         `/automation/proposals?status=${encodeURIComponent(statusFilter)}`,
       ),
     refetchInterval: 10000,
+  })
+}
+
+export function useProposalBatch(scanRunId: string | null) {
+  return useQuery<ProposalBatchStatus>({
+    queryKey: operationsKeys.proposalBatch(scanRunId),
+    queryFn: () => {
+      const query = scanRunId
+        ? `?scan_run_id=${encodeURIComponent(scanRunId)}`
+        : ""
+      return apiRequest<ProposalBatchStatus>(
+        `/automation/proposal-batches/latest${query}`,
+      )
+    },
+    staleTime: 1_000,
+    refetchInterval: (query) =>
+      query.state.data?.status === "running" ? 2_000 : 8_000,
+  })
+}
+
+export function useTriggerProposalBatch() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (scanRunId?: string | null) =>
+      apiRequest<ProposalBatchTriggerResponse>("/automation/proposal-batches", {
+        method: "POST",
+        body: JSON.stringify(
+          scanRunId ? { scan_run_id: scanRunId } : {},
+        ),
+      }),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({
+        queryKey: operationsKeys.proposalBatch(result.scan_run_id),
+      })
+      void queryClient.invalidateQueries({
+        queryKey: operationsKeys.proposalBatch(null),
+      })
+      void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
+    },
   })
 }
 

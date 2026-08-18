@@ -20,6 +20,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from sqlalchemy import text
 
+from app.config import settings
 from app.database import db_dep
 from app.services.execution_engine import publish_tick_subscriptions
 from app.schemas.proposals import (
@@ -35,6 +36,9 @@ from app.schemas.proposals import (
     StopStreakResponse,
     RolloutPromoteRequest,
     PaperAccountResetRequest,
+    ProposalBatchStatusResponse,
+    ProposalBatchTriggerRequest,
+    ProposalBatchTriggerResponse,
 )
 from app.services.p10_rollout import (
     RolloutBlockedError,
@@ -44,6 +48,7 @@ from app.services.p10_rollout import (
 )
 from app.services.paper_broker import PaperBrokerError, reset_paper_account
 from app.services.paper_portfolio import load_paper_portfolio
+from app.services.proposal_queue import enqueue_proposal_batch
 from app.services.risk_stop_streak import reset_stop_streak, synchronize_stop_streak
 
 
@@ -70,6 +75,205 @@ async def get_automation_run(
     if not row:
         raise HTTPException(status_code=404, detail="Automation run not found")
     return dict(row._mapping)
+
+
+def _proposal_batch_status(row: Any | None) -> ProposalBatchStatusResponse:
+    if row is None:
+        return ProposalBatchStatusResponse()
+    status = str(row["status"] or "idle")
+    if status not in {"running", "completed", "timed_out", "failed"}:
+        status = "failed"
+    return ProposalBatchStatusResponse(
+        scan_run_id=row["scan_run_id"],
+        automation_run_id=row["id"],
+        status=status,  # type: ignore[arg-type]
+        candidates_total=int(row["candidates_total"] or 0),
+        candidates_processed=int(row["candidates_processed"] or 0),
+        proposals_generated=int(row["proposals_generated"] or 0),
+        proposals_rejected=int(row["proposals_rejected"] or 0),
+        proposals_uncertain=int(row["proposals_uncertain"] or 0),
+        proposals_failed=int(row["proposals_failed"] or 0),
+        error_message=row["error_message"],
+        started_at=row["started_at"],
+        completed_at=row["completed_at"],
+    )
+
+
+@router.get("/proposal-batches/latest", response_model=ProposalBatchStatusResponse)
+async def get_latest_proposal_batch(
+    db: db_dep,
+    scan_run_id: Annotated[UUID | None, Query()] = None,
+) -> ProposalBatchStatusResponse:
+    """Return the newest proposal batch for a scan, or the newest batch overall."""
+    if scan_run_id is None:
+        stmt = text(
+            """
+            SELECT id, scan_run_id, status, candidates_total, candidates_processed,
+                   proposals_generated, proposals_rejected, proposals_uncertain,
+                   proposals_failed, error_message, started_at, completed_at
+            FROM automation_runs
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+        row = (await db.execute(stmt)).mappings().one_or_none()
+        return _proposal_batch_status(row)
+
+    stmt = text(
+        """
+        SELECT id, scan_run_id, status, candidates_total, candidates_processed,
+               proposals_generated, proposals_rejected, proposals_uncertain,
+               proposals_failed, error_message, started_at, completed_at
+        FROM automation_runs
+        WHERE scan_run_id = :scan_run_id
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+    )
+    row = (
+        await db.execute(stmt, {"scan_run_id": scan_run_id})
+    ).mappings().one_or_none()
+    return _proposal_batch_status(row)
+
+
+@router.post("/proposal-batches", response_model=ProposalBatchTriggerResponse)
+async def trigger_proposal_batch(
+    request: Request,
+    db: db_dep,
+    payload: ProposalBatchTriggerRequest | None = None,
+) -> ProposalBatchTriggerResponse:
+    """Queue a serial P10 proposal batch for a completed personal scan.
+
+    This is a queue-only trigger. The dedicated proposal worker still owns
+    inference; the HTTP request never renders charts or calls Gemini.
+    """
+    redis_pool = getattr(request.app.state, "redis", None)
+    if not redis_pool:
+        raise HTTPException(
+            status_code=500,
+            detail="Redis background queue connection not initialized on the server.",
+        )
+
+    paused = (
+        await db.execute(
+            text(
+                """
+                SELECT enabled FROM system_controls
+                WHERE control_key = 'proposal_processing_paused'
+                """
+            )
+        )
+    ).scalar_one_or_none()
+    if paused is None or bool(paused):
+        raise HTTPException(
+            status_code=409,
+            detail="Proposal processing is paused. Resume it before generating a batch.",
+        )
+
+    requested_id = payload.scan_run_id if payload is not None else None
+    if requested_id is None:
+        scan = (
+            await db.execute(
+                text(
+                    """
+                    SELECT id, status, as_of_date
+                    FROM scan_runs
+                    WHERE visibility = 'personal'
+                      AND triggered_by <> 'manual_shadow'
+                      AND status = 'succeeded'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
+            )
+        ).mappings().one_or_none()
+    else:
+        scan = (
+            await db.execute(
+                text(
+                    """
+                    SELECT id, status, as_of_date
+                    FROM scan_runs
+                    WHERE id = :scan_run_id
+                      AND visibility = 'personal'
+                      AND triggered_by <> 'manual_shadow'
+                    """
+                ),
+                {"scan_run_id": requested_id},
+            )
+        ).mappings().one_or_none()
+    if scan is None:
+        raise HTTPException(status_code=404, detail="No completed personal scan found.")
+    if scan["status"] != "succeeded":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scan {scan['id']} is {scan['status']}, not succeeded.",
+        )
+
+    running = (
+        await db.execute(
+            text(
+                """
+                SELECT id FROM automation_runs
+                WHERE scan_run_id = :scan_run_id AND status = 'running'
+                ORDER BY created_at DESC LIMIT 1
+                """
+            ),
+            {"scan_run_id": scan["id"]},
+        )
+    ).scalar_one_or_none()
+    if running is not None:
+        return ProposalBatchTriggerResponse(
+            status="running",
+            scan_run_id=scan["id"],
+            as_of_date=scan["as_of_date"],
+            message="A proposal batch is already running for this scan.",
+        )
+
+    candidate = (
+        await db.execute(
+            text(
+                """
+                SELECT COUNT(*) FROM screening_results
+                WHERE scan_run_id = :scan_run_id
+                  AND technical_passed = true
+                  AND result_rank IS NOT NULL
+                  AND (
+                      :p7_enabled = false
+                      OR COALESCE(
+                          (technical_metrics ->> 'fundamental_selected')::boolean,
+                          false
+                      ) = true
+                  )
+                """
+            ),
+            {
+                "scan_run_id": scan["id"],
+                "p7_enabled": settings.p7_fundamental_pass_enabled,
+            },
+        )
+    ).scalar_one()
+    if int(candidate or 0) == 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This scan has no proposal shortlist yet. Finish the technical "
+                "scan (and P7 selection, if enabled) first."
+            ),
+        )
+
+    queued = await enqueue_proposal_batch(redis_pool, str(scan["id"]), manual=True)
+    if not queued:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to enqueue the proposal batch on the P10 worker queue.",
+        )
+    return ProposalBatchTriggerResponse(
+        status="queued",
+        scan_run_id=scan["id"],
+        as_of_date=scan["as_of_date"],
+        message="Proposal generation queued. The dedicated worker will process the top 20 serially.",
+    )
 
 
 @router.get("/proposals")
@@ -582,6 +786,14 @@ async def get_latest_market_context(db: db_dep) -> MarketContextLatestResponse:
                         JOIN sector_strength_runs run ON run.id = result.run_id
                         WHERE run.market_context_policy_id = :policy_id
                           AND run.reference_eod_date = :reference_date
+                          AND run.id = (
+                              SELECT id FROM sector_strength_runs
+                              WHERE market_context_policy_id = :policy_id
+                                AND reference_eod_date = :reference_date
+                              ORDER BY CASE status WHEN 'complete' THEN 0 ELSE 1 END,
+                                       created_at DESC
+                              LIMIT 1
+                          )
                         ORDER BY result.ordinal_rank NULLS LAST, result.sector_code
                         """
                     ),

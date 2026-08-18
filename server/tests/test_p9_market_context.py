@@ -1,5 +1,6 @@
 from decimal import Decimal
 import csv
+import inspect
 from pathlib import Path
 import unittest
 
@@ -144,6 +145,15 @@ class P9MarketContextTests(unittest.TestCase):
         self.assertEqual([row["symbol"] for row in ordered], ["B", "A", "C"])
         ranks = {row["symbol"]: row["result_rank"] for row in ordered}
         self.assertEqual(ranks, {"A": 1, "B": 2, "C": 3})
+
+    def test_sector_context_loader_selects_run_status(self) -> None:
+        from app.services.market_context import load_sector_context_for_industries
+
+        source = inspect.getsource(load_sector_context_for_industries)
+        self.assertRegex(
+            source,
+            r"SELECT id,\s*status FROM sector_strength_runs",
+        )
 
 
 if __name__ == "__main__":

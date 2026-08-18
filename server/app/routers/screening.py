@@ -26,7 +26,10 @@ from app.services.fundamental_data import (
     validate_upstox_bundle,
 )
 from app.services.fundamental_llm import sanitize_provider_payload
-from app.services.fundamental_pass import p7_run_config
+from app.services.fundamental_pass import (
+    ensure_fundamental_survivors_selected,
+    p7_run_config,
+)
 from app.services.fundamental_rules import unresolved_scorecard_evidence
 from app.services.personal_scan import ensure_personal_scan
 from app.services.screening_config import TechnicalScreeningConfig
@@ -422,15 +425,18 @@ async def trigger_fundamental_pass(
         """
         UPDATE screening_results
         SET
-            llm_status = 'queued',
-            ai_status = 'queued'
+            fundamental_status = 'queued',
+            ai_status = 'queued',
+            llm_status = 'queued'
         WHERE
             scan_run_id = :run_id
             AND technical_passed = true
             AND COALESCE((technical_metrics ->> 'fundamental_selected')::boolean, false) = true
             AND (
                 :mode = 'refresh_stale'
-                OR llm_status IN ('failed', 'skipped', 'not_requested')
+                OR fundamental_status IN ('failed', 'skipped', 'not_requested', 'queued')
+                OR ai_status IN ('failed', 'skipped', 'not_requested', 'paused', 'budget_exhausted', 'queued')
+                OR llm_status IN ('failed', 'skipped', 'not_requested', 'queued')
             )
         """
     )
@@ -438,7 +444,10 @@ async def trigger_fundamental_pass(
     analysis_run_id = uuid.uuid4()
     queue_job_id = f"fundamental-pass:{run_id}:{analysis_run_id}"
 
-    await db.execute(reset_query, {"run_id": run_id, "mode": mode})
+    reset_res = await db.execute(reset_query, {"run_id": run_id, "mode": mode})
+    if getattr(reset_res, "rowcount", None) == 0:
+        await ensure_fundamental_survivors_selected(run_id, db=db)
+        await db.execute(reset_query, {"run_id": run_id, "mode": mode})
     await db.execute(
         text(
             """

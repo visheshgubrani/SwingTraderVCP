@@ -69,14 +69,14 @@ COMPOSE=(docker compose -f docker-compose.prod.yml --env-file .env.prod)
 "${COMPOSE[@]}" ps
 
 # 1) Fresh DB — apply full schema from the image
-"${COMPOSE[@]}" exec -T api cat db/schema.sql \
+"${COMPOSE[@]}" run --rm --no-deps -T api cat db/schema.sql \
   | "${COMPOSE[@]}" exec -T postgres \
       psql -v ON_ERROR_STOP=1 -U algo -d algo_trading
 
 # (Only if upgrading an older DB instead of a fresh volume — apply migrations in order)
-# for f in $("${COMPOSE[@]}" exec -T api sh -c 'ls db/migrations/*.sql | sort'); do
+# for f in $("${COMPOSE[@]}" run --rm --no-deps -T api sh -c 'ls db/migrations/*.sql | sort'); do
 #   echo "→ $f"
-#   "${COMPOSE[@]}" exec -T api cat "$f" \
+#   "${COMPOSE[@]}" run --rm --no-deps -T api cat "$f" \
 #     | "${COMPOSE[@]}" exec -T postgres \
 #         psql -v ON_ERROR_STOP=1 -U algo -d algo_trading
 # done

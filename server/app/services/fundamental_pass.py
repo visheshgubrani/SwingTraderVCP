@@ -97,11 +97,139 @@ def p7_run_config(
     }
 
 
-async def _load_survivors(scan_run_id: str) -> list[Survivor]:
-    async with async_session() as db:
-        result = await db.execute(
+from app.services.screening_ranker import apply_fundamental_industry_cap
+
+
+async def ensure_fundamental_survivors_selected(
+    scan_run_id: str | UUID,
+    *,
+    limit: int = 20,
+    industry_cap: int = 2,
+    db: AsyncSession | None = None,
+) -> int:
+    """Ensure at least up to `limit` candidates with industry caps are marked fundamental_selected."""
+    scan_id_str = str(scan_run_id)
+
+    async def _run(session: AsyncSession) -> int:
+        selected_res = await session.execute(
             text(
                 """
+                SELECT COUNT(*) FROM screening_results
+                WHERE scan_run_id = :scan_run_id
+                  AND technical_passed = true
+                  AND COALESCE((technical_metrics ->> 'fundamental_selected')::boolean, false) = true
+                """
+            ),
+            {"scan_run_id": scan_id_str},
+        )
+        try:
+            if hasattr(selected_res, "scalar_one_or_none"):
+                selected_count = int(selected_res.scalar_one_or_none() or 0)
+            elif hasattr(selected_res, "scalar_one"):
+                selected_count = int(selected_res.scalar_one() or 0)
+            else:
+                selected_count = 0
+        except (TypeError, ValueError):
+            selected_count = 0
+
+        if selected_count > 0:
+            return selected_count
+
+        candidates_res = await session.execute(
+            text(
+                """
+                SELECT s.id, s.instrument_id, s.result_rank, s.technical_metrics,
+                       i.symbol, i.metadata ->> 'industry' AS industry
+                FROM screening_results s
+                JOIN instruments i ON i.id = s.instrument_id
+                WHERE s.scan_run_id = :scan_run_id
+                  AND s.technical_passed = true
+                ORDER BY s.result_rank ASC NULLS LAST, s.created_at ASC
+                """
+            ),
+            {"scan_run_id": scan_id_str},
+        )
+        rows = candidates_res.all() if hasattr(candidates_res, "all") else []
+        if not rows:
+            return 0
+
+        candidates = [
+            {
+                "id": row.id,
+                "instrument_id": row.instrument_id,
+                "symbol": row.symbol,
+                "industry": row.industry,
+                "result_rank": row.result_rank,
+                "technical_metrics": dict(row.technical_metrics or {}),
+            }
+            for row in rows
+        ]
+
+        capped = apply_fundamental_industry_cap(
+            candidates,
+            limit=limit,
+            industry_cap=industry_cap,
+            enabled=True,
+        )
+
+        for item in capped:
+            tech_metrics = dict(item["technical_metrics"])
+            tech_metrics["fundamental_selected"] = item["fundamental_selected"]
+            tech_metrics["fundamental_selection_rank"] = item["fundamental_selection_rank"]
+            tech_metrics["fundamental_cap_exclusion_reason"] = item["fundamental_cap_exclusion_reason"]
+            tech_metrics["industry_key"] = item["industry_key"]
+            if "industry" not in tech_metrics and item.get("industry"):
+                tech_metrics["industry"] = item["industry"]
+
+            status = "queued" if item["fundamental_selected"] else "not_requested"
+            await session.execute(
+                text(
+                    """
+                    UPDATE screening_results
+                    SET technical_metrics = CAST(:technical_metrics AS jsonb),
+                        llm_status = :llm_status,
+                        fundamental_status = :fundamental_status,
+                        ai_status = :ai_status
+                    WHERE id = :result_id
+                    """
+                ),
+                {
+                    "result_id": item["id"],
+                    "technical_metrics": json.dumps(tech_metrics, separators=(",", ":")),
+                    "llm_status": status,
+                    "fundamental_status": status,
+                    "ai_status": status,
+                },
+            )
+        return sum(1 for item in capped if item["fundamental_selected"])
+
+    if db is not None:
+        return await _run(db)
+    async with async_session() as session:
+        result = await _run(session)
+        if hasattr(session, "commit"):
+            await session.commit()
+        return result
+
+
+async def _load_survivors(
+    scan_run_id: str,
+    *,
+    mode: str = "retry_incomplete",
+) -> list[Survivor]:
+    await ensure_fundamental_survivors_selected(scan_run_id)
+    async with async_session() as db:
+        if mode == "refresh_stale":
+            status_filter = "1=1"
+        else:
+            status_filter = """(
+                s.fundamental_status IN ('queued', 'running', 'failed', 'skipped', 'not_requested')
+                OR s.ai_status IN ('queued', 'running', 'failed', 'skipped', 'paused', 'budget_exhausted', 'not_requested')
+                OR s.llm_status IN ('queued', 'running', 'failed', 'skipped', 'not_requested')
+            )"""
+        result = await db.execute(
+            text(
+                f"""
                 SELECT s.id AS result_id, s.scan_run_id, s.instrument_id, i.isin,
                        i.symbol, i.name AS company_name,
                        i.metadata ->> 'industry' AS industry,
@@ -114,7 +242,7 @@ async def _load_survivors(scan_run_id: str) -> list[Survivor]:
                 WHERE s.scan_run_id = :scan_run_id
                   AND s.technical_passed = true
                   AND COALESCE((s.technical_metrics ->> 'fundamental_selected')::boolean, false) = true
-                  AND s.llm_status IN ('queued', 'failed', 'skipped')
+                  AND {status_filter}
                 ORDER BY fundamental_selection_rank ASC NULLS LAST,
                          s.result_rank ASC NULLS LAST, s.created_at ASC
                 LIMIT 20
@@ -122,6 +250,7 @@ async def _load_survivors(scan_run_id: str) -> list[Survivor]:
             ),
             {"scan_run_id": scan_run_id},
         )
+        rows = result.all() if hasattr(result, "all") else []
         return [
             Survivor(
                 result_id=row.result_id,
@@ -134,7 +263,7 @@ async def _load_survivors(scan_run_id: str) -> list[Survivor]:
                 as_of_date=row.as_of_date,
                 rank=int(row.fundamental_selection_rank or row.result_rank or 9999),
             )
-            for row in result.all()
+            for row in rows
         ]
 
 
@@ -1095,7 +1224,7 @@ async def run_fundamental_pass(
                 )
                 await _set_run(analysis_run_id, status="cancelled", completed=True, error="Fundamental processing is paused")
                 return {"status": "cancelled", "scan_run_id": scan_run_id}
-            survivors = await _load_survivors(scan_run_id)
+            survivors = await _load_survivors(scan_run_id, mode=mode)
             await _seed_items(analysis_run_id, survivors)
             await _set_run(analysis_run_id, status="running")
             llm_client = OpenRouterFundamentalClient(

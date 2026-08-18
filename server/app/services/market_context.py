@@ -651,7 +651,7 @@ async def load_sector_context_for_industries(
         await db.execute(
             text(
                 """
-                SELECT id FROM sector_strength_runs
+                SELECT id, status FROM sector_strength_runs
                 WHERE reference_eod_date = :reference_date
                   AND market_context_policy_id = :policy_id
                 ORDER BY created_at DESC LIMIT 1

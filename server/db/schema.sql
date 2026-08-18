@@ -1912,10 +1912,10 @@ VALUES
     ('NSE','INDEX','NIFTYMETAL','NIFTYMETAL-INDEX','NSE:NIFTYMETAL-INDEX','Nifty Metal',1,0.05,true,'{"role":"p9_sector_index","sector_code":"metal"}'::jsonb),
     ('NSE','INDEX','NIFTYOILANDGAS','NIFTYOILANDGAS-INDEX','NSE:NIFTYOILANDGAS-INDEX','Nifty Oil & Gas',1,0.05,true,'{"role":"p9_sector_index","sector_code":"oil_gas"}'::jsonb),
     ('NSE','INDEX','NIFTYPHARMA','NIFTYPHARMA-INDEX','NSE:NIFTYPHARMA-INDEX','Nifty Pharma',1,0.05,true,'{"role":"p9_sector_index","sector_code":"pharma"}'::jsonb),
-    ('NSE','INDEX','NIFTYPOWER','NIFTYPOWER-INDEX','NSE:NIFTYPOWER-INDEX','Nifty Power',1,0.05,true,'{"role":"p9_sector_index","sector_code":"power"}'::jsonb),
+    ('NSE','INDEX','NIFTYPOWER','NIFTYPOWER-INDEX','NSE:NIFTYENERGY-INDEX','Nifty Power',1,0.05,true,'{"role":"p9_sector_index","sector_code":"power"}'::jsonb),
     ('NSE','INDEX','NIFTYREALTY','NIFTYREALTY-INDEX','NSE:NIFTYREALTY-INDEX','Nifty Realty',1,0.05,true,'{"role":"p9_sector_index","sector_code":"realty"}'::jsonb),
     ('NSE','INDEX','NIFTYINFRA','NIFTYINFRA-INDEX','NSE:NIFTYINFRA-INDEX','Nifty Infrastructure',1,0.05,true,'{"role":"p9_sector_index","sector_code":"infrastructure"}'::jsonb),
-    ('NSE','INDEX','NIFTYSERVICESECTOR','NIFTYSERVICESECTOR-INDEX','NSE:NIFTYSERVICESECTOR-INDEX','Nifty Services Sector',1,0.05,true,'{"role":"p9_sector_index","sector_code":"services"}'::jsonb)
+    ('NSE','INDEX','NIFTYSERVICESECTOR','NIFTYSERVICESECTOR-INDEX','NSE:NIFTYSERVSECTOR-INDEX','Nifty Services Sector',1,0.05,true,'{"role":"p9_sector_index","sector_code":"services"}'::jsonb)
 ON CONFLICT (fyers_symbol) DO UPDATE SET
     active = true,
     metadata = instruments.metadata || EXCLUDED.metadata;

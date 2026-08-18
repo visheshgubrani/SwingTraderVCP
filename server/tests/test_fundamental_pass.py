@@ -33,6 +33,7 @@ from app.services.fundamental_pass import (
     _load_survivors,
     _start_ai_attempt,
     _store_annotation,
+    ensure_fundamental_survivors_selected,
 )
 from app.services.fundamental_rules import (
     score_balanced_sepa,
@@ -984,6 +985,101 @@ class FundamentalPassOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured_params["scan_run_id"], scan_run_id)
         self.assertEqual(captured_params["llm_status"], "skipped")
         self.assertEqual(captured_params["ai_status"], "paused")
+
+    async def test_ensure_fundamental_survivors_selected_backfills_unselected_candidates(self) -> None:
+        scan_run_id = str(uuid4())
+        cand1_id = uuid4()
+        cand2_id = uuid4()
+
+        class FakeCountResult:
+            def scalar_one_or_none(self):
+                return 0
+
+        class FakeCandidateRow:
+            def __init__(self, id, rank, sym, ind):
+                self.id = id
+                self.instrument_id = uuid4()
+                self.result_rank = rank
+                self.symbol = sym
+                self.industry = ind
+                self.technical_metrics = {}
+
+        class FakeCandidatesResult:
+            def all(self):
+                return [
+                    FakeCandidateRow(cand1_id, 1, "SYM1", "IT"),
+                    FakeCandidateRow(cand2_id, 2, "SYM2", "Banking"),
+                ]
+
+        executed_queries = []
+        executed_params = []
+
+        class FakeSession:
+            def __init__(self):
+                self.call_count = 0
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def execute(self, query, params=None):
+                self.call_count += 1
+                executed_queries.append(str(query))
+                executed_params.append(params)
+                if self.call_count == 1:
+                    return FakeCountResult()
+                elif self.call_count == 2:
+                    return FakeCandidatesResult()
+                return None
+
+            async def commit(self):
+                return None
+
+        with patch(
+            "app.services.fundamental_pass.async_session",
+            side_effect=FakeSession,
+        ):
+            selected_count = await ensure_fundamental_survivors_selected(scan_run_id)
+
+        self.assertEqual(selected_count, 2)
+        # Should have run count check, candidate load, and 2 updates
+        self.assertEqual(len(executed_queries), 4)
+        self.assertIn("UPDATE screening_results", executed_queries[2])
+        self.assertIn("UPDATE screening_results", executed_queries[3])
+
+    async def test_ensure_fundamental_survivors_selected_noop_when_already_selected(self) -> None:
+        scan_run_id = str(uuid4())
+
+        class FakeCountResult:
+            def scalar_one_or_none(self):
+                return 20
+
+        executed_queries = []
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def execute(self, query, _params=None):
+                executed_queries.append(str(query))
+                return FakeCountResult()
+
+            async def commit(self):
+                return None
+
+        with patch(
+            "app.services.fundamental_pass.async_session",
+            side_effect=FakeSession,
+        ):
+            selected_count = await ensure_fundamental_survivors_selected(scan_run_id)
+
+        self.assertEqual(selected_count, 20)
+        self.assertEqual(len(executed_queries), 1)
 
     async def test_survivor_loader_reads_persisted_technical_results_only(self) -> None:
         captured_sql = ""

@@ -28,10 +28,10 @@ SECTORS: tuple[SectorDefinition, ...] = (
     SectorDefinition("metal", "Nifty Metal", "NSE:NIFTYMETAL-INDEX"),
     SectorDefinition("oil_gas", "Nifty Oil & Gas", "NSE:NIFTYOILANDGAS-INDEX"),
     SectorDefinition("pharma", "Nifty Pharma", "NSE:NIFTYPHARMA-INDEX"),
-    SectorDefinition("power", "Nifty Power", "NSE:NIFTYPOWER-INDEX"),
+    SectorDefinition("power", "Nifty Power", "NSE:NIFTYENERGY-INDEX"),
     SectorDefinition("realty", "Nifty Realty", "NSE:NIFTYREALTY-INDEX"),
     SectorDefinition("infrastructure", "Nifty Infrastructure", "NSE:NIFTYINFRA-INDEX"),
-    SectorDefinition("services", "Nifty Services Sector", "NSE:NIFTYSERVICESECTOR-INDEX"),
+    SectorDefinition("services", "Nifty Services Sector", "NSE:NIFTYSERVSECTOR-INDEX"),
 )
 
 

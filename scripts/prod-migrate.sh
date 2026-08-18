@@ -44,15 +44,15 @@ cd "$ROOT_DIR"
 case "$MODE" in
   schema)
     echo "Applying db/schema.sql from api image ..."
-    "${COMPOSE[@]}" exec -T api cat db/schema.sql | psql_apply
+    "${COMPOSE[@]}" run --rm --no-deps -T api cat db/schema.sql | psql_apply
     ;;
   migrations)
     echo "Applying db/migrations/*.sql from api image ..."
-    mapfile -t files < <("${COMPOSE[@]}" exec -T api sh -c 'ls db/migrations/*.sql | sort')
+    mapfile -t files < <("${COMPOSE[@]}" run --rm --no-deps -T api sh -c 'ls db/migrations/*.sql | sort')
     for f in "${files[@]}"; do
       f="$(echo "$f" | tr -d '\r')"
       echo "→ $f"
-      "${COMPOSE[@]}" exec -T api cat "$f" | psql_apply
+      "${COMPOSE[@]}" run --rm --no-deps -T api cat "$f" | psql_apply
     done
     ;;
   *)

@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import {
   AlertCircleIcon,
   PlayIcon,
@@ -25,11 +26,13 @@ import {
 } from "./api"
 import { ProposalDetailModal } from "./ProposalDetailModal"
 import { MarketContextPanel } from "./MarketContextPanel"
+import { ProposalGenerationResults } from "./ProposalGenerationResults"
 
 export function ProposalInbox() {
   const [statusFilter, setStatusFilter] = useState<string>("pending_approval")
   const [selectedProposal, setSelectedProposal] = useState<TradeProposalItem | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
+  const queryClient = useQueryClient()
 
   const { data: proposals = [], isLoading, error } = useTradeProposals(statusFilter)
   const { data: supervisorStatus } = useEntrySupervisorStatus()
@@ -71,6 +74,24 @@ export function ProposalInbox() {
   const batchFailed =
     proposalBatch.data?.status === "timed_out" ||
     proposalBatch.data?.status === "failed"
+
+  const previousBatchRef = useRef<{ runId: string | null; status: string | null }>({
+    runId: null,
+    status: null,
+  })
+  useEffect(() => {
+    const runId = proposalBatch.data?.automation_run_id ?? null
+    const status = proposalBatch.data?.status ?? null
+    const previous = previousBatchRef.current
+    const terminal = status === "completed" || status === "timed_out" || status === "failed"
+    if (terminal && (previous.runId !== runId || previous.status !== status)) {
+      void queryClient.invalidateQueries({
+        queryKey: ["automation", "proposal-generation-results", runId],
+      })
+      void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
+    }
+    previousBatchRef.current = { runId, status }
+  }, [proposalBatch.data?.automation_run_id, proposalBatch.data?.status, queryClient])
 
   const templateBadges: Record<string, string> = {
     single: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
@@ -146,6 +167,10 @@ export function ProposalInbox() {
 
       <MarketContextPanel />
 
+      <ProposalGenerationResults
+        automationRunId={proposalBatch.data?.automation_run_id ?? null}
+      />
+
       {(supervisorStatus?.recent_allocation_events ?? [])
         .filter((event) => event.context_gate_reasons?.length)
         .slice(0, 3)
@@ -162,7 +187,7 @@ export function ProposalInbox() {
           { key: "pending_approval", label: "Pending Approval" },
           { key: "approved", label: "Approved" },
           { key: "expired_unapproved", label: "Expired" },
-          { key: "rejected", label: "Rejected" },
+          { key: "rejected", label: "Human rejected" },
           { key: "all", label: "All Proposals" },
         ].map((tab) => (
           <button
@@ -223,7 +248,13 @@ export function ProposalInbox() {
         ) : proposals.length === 0 ? (
           <div className="flex h-64 flex-col items-center justify-center gap-2 text-muted-foreground">
             <AlertCircleIcon className="h-8 w-8 text-muted-foreground/40" />
-            <p>No proposals found matching filter "{statusFilter}".</p>
+            <p>
+              {statusFilter === "pending_approval"
+                ? "No immutable proposals are waiting for your decision. Generate a batch to create the next review set."
+                : statusFilter === "rejected"
+                  ? "No proposals have been rejected by the operator yet. Model and Python rejections live in the generation ledger above."
+                  : `No immutable proposals found for ${statusFilter.replaceAll("_", " ")}.`}
+            </p>
           </div>
         ) : (
           <div className="rounded-lg border border-border/60 bg-card overflow-hidden">

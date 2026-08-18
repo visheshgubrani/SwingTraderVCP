@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session
+from app.services.canonical_ohlcv import compact_ohlcv_table
 from app.services.fundamental_llm import sanitize_provider_payload
 from app.services.openrouter_content import parse_openrouter_structured_content
 from app.services.screener import candle_trading_date
@@ -299,23 +300,6 @@ def frozen_ohlcv_from_payload(
         context_sessions=context_sessions,
         detail_sessions=detail_sessions,
     )
-
-
-def compact_ohlcv_table(candles: list[FrozenCandle]) -> str:
-    """Canonical OHLCV table for the prompt, with a Vol/50MA reference column."""
-    lines = ["Date,O,H,L,C,Vol,Vol/50MA"]
-    window: list[int] = []
-    for candle in candles:
-        if len(window) == 50:
-            window.pop(0)
-        average = sum(window) / len(window) if window else 0.0
-        ratio = round(candle.volume / average, 2) if average > 0 else 1.0
-        lines.append(
-            f"{candle.date.isoformat()},{candle.open:.2f},{candle.high:.2f},"
-            f"{candle.low:.2f},{candle.close:.2f},{candle.volume},{ratio}"
-        )
-        window.append(candle.volume)
-    return "\n".join(lines)
 
 
 async def freeze_result_ohlcv(

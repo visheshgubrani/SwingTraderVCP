@@ -36,6 +36,7 @@ from app.services.distributed_lease import (
 from app.services.proposal_generator import (
     GEOMETRY_VERSION,
     PROMPT_VERSION,
+    ProposalBuildResult,
     SCHEMA_VERSION,
     call_gemini_vision_for_proposal,
     compute_frozen_source_hash,
@@ -245,6 +246,8 @@ async def _finish_attempt(
     cost: float = 0,
     request_id: str | None = None,
     error: BaseException | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
 ) -> None:
     await session.execute(
         text(
@@ -265,8 +268,12 @@ async def _finish_attempt(
             "usage": json.dumps(usage or {}),
             "cost": Decimal(str(cost)),
             "request_id": request_id,
-            "error_type": type(error).__name__ if error else None,
-            "error_message": str(error)[:1000] if error else None,
+            "error_type": error_type or (type(error).__name__ if error else None),
+            "error_message": (
+                error_message[:1000]
+                if error_message is not None
+                else (str(error)[:1000] if error else None)
+            ),
         },
     )
     await session.commit()
@@ -449,6 +456,7 @@ async def process_proposal_candidate(
                     symbol=candidate.symbol,
                     context_png=charts.context_png,
                     detail_png=charts.detail_png,
+                    candles=candles,
                     model=settings.vcp_vision_model,
                     tick_size=tick_size,
                 ),
@@ -482,6 +490,15 @@ async def process_proposal_candidate(
         output_json = ai_output.model_dump(mode="json")
         if ai_output.verdict != "valid" or ai_output.contradicts_scanner:
             outcome: CandidateOutcome = "uncertain" if ai_output.verdict == "uncertain" else "rejected"
+            if ai_output.contradicts_scanner:
+                ai_error_type = "proposal_ai_contradicts_scanner"
+                ai_error_message = "Gemini marked the pattern as contradicting the scanner thesis."
+            elif ai_output.verdict == "uncertain":
+                ai_error_type = "proposal_ai_uncertain"
+                ai_error_message = "Gemini returned an uncertain pattern verdict."
+            else:
+                ai_error_type = "proposal_ai_invalid"
+                ai_error_message = f"Gemini returned verdict={ai_output.verdict!r}."
             async with async_session() as session:
                 await _finish_attempt(
                     session,
@@ -491,10 +508,12 @@ async def process_proposal_candidate(
                     usage=usage,
                     cost=cost,
                     request_id=request_id,
+                    error_type=ai_error_type,
+                    error_message=ai_error_message,
                 )
             return outcome
 
-        proposal = generate_trade_proposal_from_analysis(
+        build_result: ProposalBuildResult = generate_trade_proposal_from_analysis(
             symbol=candidate.symbol,
             as_of_date=as_of_date,
             screening_result_id=str(candidate.screening_result_id),
@@ -516,8 +535,7 @@ async def process_proposal_candidate(
             ),
             holidays=_holiday_dates(),
         )
-        if proposal is None:
-            validation_error = ValueError("Deterministic proposal validation rejected the AI output")
+        if not build_result.accepted:
             async with async_session() as session:
                 await _finish_attempt(
                     session,
@@ -527,7 +545,8 @@ async def process_proposal_candidate(
                     usage=usage,
                     cost=cost,
                     request_id=request_id,
-                    error=validation_error,
+                    error_type=build_result.rejection_code,
+                    error_message=build_result.rejection_message,
                 )
             return "rejected"
 
@@ -535,7 +554,7 @@ async def process_proposal_candidate(
             await _persist_proposal(
                 session,
                 automation_run_id=automation_run_id,
-                proposal=proposal,
+                proposal=build_result.proposal,
                 charts=charts,
                 request_id=request_id,
                 usage=usage,
@@ -655,6 +674,27 @@ async def run_eod_proposal_batch(
             outcome = "failed"
         counts[outcome] += 1
         processed += 1
+        async with async_session() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE automation_runs
+                    SET candidates_processed = :processed,
+                        proposals_generated = :generated,
+                        proposals_rejected = :rejected,
+                        proposals_uncertain = :uncertain,
+                        proposals_failed = :failed,
+                        updated_at = now()
+                    WHERE id = :run_id AND status = 'running'
+                    """
+                ),
+                {
+                    "run_id": automation_run_id,
+                    "processed": processed,
+                    **counts,
+                },
+            )
+            await session.commit()
         logger.info(
             "Proposal candidate %s outcome=%s (%s/%s)",
             candidate.symbol,

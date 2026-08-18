@@ -192,6 +192,61 @@ export interface ProposalBatchTriggerResponse {
   message: string
 }
 
+export type ProposalAttemptStatus =
+  | "running"
+  | "valid"
+  | "invalid"
+  | "uncertain"
+  | "failed"
+  | "timed_out"
+
+export interface ProposalGenerationAttempt {
+  id: string
+  automation_run_id: string
+  screening_result_id: string
+  instrument_id: string
+  symbol: string
+  attempt_number: number
+  status: ProposalAttemptStatus
+  source_hash: string
+  renderer_version: string
+  prompt_version: string
+  schema_version: string
+  geometry_version: string
+  model: string
+  risk_policy_version: number
+  context_image_hash: string
+  detail_image_hash: string
+  provider_request_id: string | null
+  provider_usage: Record<string, unknown>
+  provider_cost: number
+  structured_output: {
+    verdict?: "valid" | "invalid" | "uncertain"
+    confidence?: number
+    [key: string]: unknown
+  } | null
+  error_type: string | null
+  error_message: string | null
+  started_at: string
+  completed_at: string | null
+}
+
+export interface ProposalGenerationResults {
+  automation_run_id: string
+  scan_run_id: string
+  status: "running" | "completed" | "timed_out" | "failed"
+  candidates_total: number
+  candidates_processed: number
+  proposals_generated: number
+  proposals_rejected: number
+  proposals_uncertain: number
+  proposals_failed: number
+  error_message: string | null
+  started_at: string | null
+  completed_at: string | null
+  results: ProposalGenerationAttempt[]
+}
+
 const operationsKeys = {
   marketContext: ["automation", "market-context", "latest"] as const,
   stopStreak: (mode: "paper" | "live") => ["automation", "stop-streak", mode] as const,
@@ -199,6 +254,8 @@ const operationsKeys = {
   paperPortfolio: ["automation", "paper-portfolio"] as const,
   proposalBatch: (scanRunId: string | null) =>
     ["automation", "proposal-batch", scanRunId] as const,
+  proposalGenerationResults: (automationRunId: string | null) =>
+    ["automation", "proposal-generation-results", automationRunId] as const,
 }
 
 export function useMarketContext() {
@@ -369,6 +426,22 @@ export function useProposalBatch(scanRunId: string | null) {
   })
 }
 
+export function useProposalGenerationResults(automationRunId: string | null) {
+  return useQuery<ProposalGenerationResults>({
+    queryKey: operationsKeys.proposalGenerationResults(automationRunId),
+    queryFn: () => {
+      if (!automationRunId) throw new Error("No automation run ID provided")
+      return apiRequest<ProposalGenerationResults>(
+        `/automation/proposal-batches/${automationRunId}/generation-results`,
+      )
+    },
+    enabled: !!automationRunId,
+    staleTime: 1_000,
+    refetchInterval: (query) =>
+      query.state.data?.status === "running" ? 2_000 : 8_000,
+  })
+}
+
 export function useTriggerProposalBatch() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -387,6 +460,9 @@ export function useTriggerProposalBatch() {
         queryKey: operationsKeys.proposalBatch(null),
       })
       void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
+      void queryClient.invalidateQueries({
+        queryKey: ["automation", "proposal-generation-results"],
+      })
     },
   })
 }

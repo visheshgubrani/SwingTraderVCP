@@ -1,13 +1,63 @@
 import datetime as dt
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 from app.workers.proposal_worker import (
     cap_proposal_batch_limit,
     proposal_batch_deadline,
+    run_eod_proposal_batch,
 )
 
 
-class TestProposalBatchDeadline(unittest.TestCase):
+class FakeResult:
+    def __init__(self, *, rows=None, scalar=None):
+        self._rows = rows or []
+        self._scalar = scalar
+
+    def all(self):
+        return self._rows
+
+    def scalar_one(self):
+        return self._scalar
+
+    def scalar_one_or_none(self):
+        return self._scalar
+
+
+class FakeProposalBatchSession:
+    def __init__(self, candidate, automation_run_id):
+        self.candidate = candidate
+        self.automation_run_id = automation_run_id
+        self.sql: list[str] = []
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return None
+
+    async def execute(self, statement, params=None):
+        del params
+        sql = str(statement)
+        self.sql.append(sql)
+        if "SELECT enabled" in sql:
+            return FakeResult(scalar=False)
+        if "FROM screening_results" in sql:
+            return FakeResult(rows=[self.candidate])
+        if "INSERT INTO automation_runs" in sql:
+            return FakeResult(scalar=self.automation_run_id)
+        return FakeResult()
+
+    async def commit(self):
+        return None
+
+
+class TestProposalBatchDeadline(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.now = dt.datetime(2026, 8, 18, 17, 51, tzinfo=dt.timezone.utc)
         self.scan_completed_at = self.now - dt.timedelta(minutes=46)
@@ -52,3 +102,29 @@ class TestProposalBatchDeadline(unittest.TestCase):
         self.assertEqual(cap_proposal_batch_limit(20, 10), 10)
         self.assertEqual(cap_proposal_batch_limit(5, 10), 5)
         self.assertEqual(cap_proposal_batch_limit(50, 20), 20)
+
+    async def test_all_rejected_batch_completes_without_trade_proposal_rows(self) -> None:
+        candidate = SimpleNamespace(
+            symbol="NSE:EXAMPLE-EQ",
+            as_of_date=dt.date(2026, 8, 18),
+            scan_completed_at=self.now,
+        )
+        automation_run_id = uuid4()
+        fake_session = FakeProposalBatchSession(candidate, automation_run_id)
+        with (
+            patch("app.workers.proposal_worker.async_session", fake_session),
+            patch(
+                "app.workers.proposal_worker.process_proposal_candidate",
+                new=AsyncMock(return_value="rejected"),
+            ) as process_candidate,
+        ):
+            result = await run_eod_proposal_batch(
+                {}, str(uuid4()), limit=1, manual=True
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["counts"]["rejected"], 1)
+        process_candidate.assert_awaited_once()
+        self.assertFalse(
+            any("INSERT INTO trade_proposals" in sql for sql in fake_session.sql)
+        )

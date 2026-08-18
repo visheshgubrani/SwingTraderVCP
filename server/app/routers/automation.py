@@ -39,6 +39,7 @@ from app.schemas.proposals import (
     ProposalBatchStatusResponse,
     ProposalBatchTriggerRequest,
     ProposalBatchTriggerResponse,
+    ProposalGenerationResultsResponse,
 )
 from app.services.p10_rollout import (
     RolloutBlockedError,
@@ -277,6 +278,105 @@ async def trigger_proposal_batch(
             f"top {min(settings.proposal_batch_limit, 20)} serially."
         ),
     )
+
+
+@router.get(
+    "/proposal-batches/{automation_run_id}/generation-results",
+    response_model=ProposalGenerationResultsResponse,
+)
+async def get_proposal_generation_results(
+    automation_run_id: UUID,
+    db: db_dep,
+) -> ProposalGenerationResultsResponse:
+    """Return the latest audited attempt for every candidate in a batch."""
+    run = (
+        await db.execute(
+            text(
+                """
+                SELECT id, scan_run_id, status, candidates_total, candidates_processed,
+                       proposals_generated, proposals_rejected, proposals_uncertain,
+                       proposals_failed, error_message, started_at, completed_at
+                FROM automation_runs
+                WHERE id = :automation_run_id
+                """
+            ),
+            {"automation_run_id": automation_run_id},
+        )
+    ).mappings().one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Automation run not found")
+
+    attempts = (
+        await db.execute(
+            text(
+                """
+                SELECT DISTINCT ON (screening_result_id)
+                       id, automation_run_id, screening_result_id, instrument_id,
+                       symbol, attempt_number, status, source_hash, renderer_version,
+                       prompt_version, schema_version, geometry_version, model,
+                       risk_policy_version, context_image_hash, detail_image_hash,
+                       provider_request_id, provider_usage, provider_cost,
+                       structured_output, error_type, error_message, started_at,
+                       completed_at
+                FROM proposal_attempts
+                WHERE automation_run_id = :automation_run_id
+                ORDER BY screening_result_id, attempt_number DESC, started_at DESC
+                """
+            ),
+            {"automation_run_id": automation_run_id},
+        )
+    ).mappings().all()
+
+    status = str(run["status"] or "failed")
+    if status not in {"running", "completed", "timed_out", "failed"}:
+        status = "failed"
+    return ProposalGenerationResultsResponse(
+        automation_run_id=run["id"],
+        scan_run_id=run["scan_run_id"],
+        status=status,  # type: ignore[arg-type]
+        candidates_total=int(run["candidates_total"] or 0),
+        candidates_processed=int(run["candidates_processed"] or 0),
+        proposals_generated=int(run["proposals_generated"] or 0),
+        proposals_rejected=int(run["proposals_rejected"] or 0),
+        proposals_uncertain=int(run["proposals_uncertain"] or 0),
+        proposals_failed=int(run["proposals_failed"] or 0),
+        error_message=run["error_message"],
+        started_at=run["started_at"],
+        completed_at=run["completed_at"],
+        results=[dict(attempt) for attempt in attempts],
+    )
+
+
+@router.get(
+    "/proposal-batches/{automation_run_id}/generation-results/{attempt_id}/charts/{chart_type}"
+)
+async def get_proposal_generation_chart(
+    automation_run_id: UUID,
+    attempt_id: UUID,
+    chart_type: Literal["context", "detail"],
+    db: db_dep,
+) -> Response:
+    """Serve a stored generation-attempt chart without exposing proposal writes."""
+    column = "context_image" if chart_type == "context" else "detail_image"
+    row = (
+        await db.execute(
+            text(
+                f"""
+                SELECT {column} AS image
+                FROM proposal_attempts
+                WHERE id = :attempt_id
+                  AND automation_run_id = :automation_run_id
+                """
+            ),
+            {
+                "attempt_id": attempt_id,
+                "automation_run_id": automation_run_id,
+            },
+        )
+    ).mappings().one_or_none()
+    if row is None or row["image"] is None:
+        raise HTTPException(status_code=404, detail="Generation chart not found")
+    return Response(content=bytes(row["image"]), media_type="image/png")
 
 
 @router.get("/proposals")
@@ -1087,4 +1187,3 @@ async def reset_paper_portfolio(
     )
     await db.commit()
     return account
-

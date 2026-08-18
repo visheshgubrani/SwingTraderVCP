@@ -14,6 +14,7 @@ from app.domain.p10_sizing import EntryTemplate
 from app.schemas.proposals import GeminiVcpProposalOutput
 from app.services.proposal_renderer import RenderedProposalCharts
 from app.services.proposal_generator import (
+    build_proposal_vision_request,
     generate_trade_proposal_from_analysis,
     calculate_next_session_and_deadline,
     compute_proposal_hash,
@@ -51,7 +52,7 @@ class TestProposalGenerator(unittest.TestCase):
         )
 
         self.charts = RenderedProposalCharts(
-            renderer_version="p10_mplfinance_v2",
+            renderer_version="p10_mplfinance_v3",
             context_png=b"context",
             context_hash="context_hash_123",
             detail_png=b"detail",
@@ -82,12 +83,12 @@ class TestProposalGenerator(unittest.TestCase):
             contraction_anchors=[
                 {
                     "date": self.low_candle.date,
-                    "price": self.low_candle.low,
+                    "price": Decimal(str(self.low_candle.low)) + Decimal("0.01"),
                     "anchor_type": "contraction_low",
                 },
                 {
                     "date": self.resistance_candle.date,
-                    "price": self.resistance_candle.high,
+                    "price": Decimal(str(self.resistance_candle.high)) + Decimal("0.01"),
                     "anchor_type": "resistance",
                 },
             ],
@@ -115,14 +116,18 @@ class TestProposalGenerator(unittest.TestCase):
             generated_at=dt.datetime(2026, 8, 18, 8, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
         )
 
-        self.assertIsNotNone(proposal)
-        self.assertEqual(proposal["symbol"], "TESTSTOCK")
-        self.assertEqual(proposal["status"], "pending_approval")
-        self.assertEqual(proposal["entry_template"], "two_leg")
-        self.assertEqual(proposal["leg_count"], 2)
-        self.assertEqual(proposal["leg_risk_allocations"], [0.60, 0.40])
-        self.assertEqual(proposal["relative_volume_threshold"], Decimal("1.75"))
-        self.assertTrue(len(proposal["proposal_hash"]) == 64)
+        self.assertTrue(proposal.accepted)
+        self.assertEqual(proposal.proposal["symbol"], "TESTSTOCK")
+        self.assertEqual(proposal.proposal["status"], "pending_approval")
+        self.assertEqual(proposal.proposal["entry_template"], "two_leg")
+        self.assertEqual(proposal.proposal["leg_count"], 2)
+        self.assertEqual(proposal.proposal["leg_risk_allocations"], [0.60, 0.40])
+        self.assertEqual(proposal.proposal["relative_volume_threshold"], Decimal("1.75"))
+        self.assertEqual(
+            proposal.proposal["gemini_evidence"]["contraction_anchors"][0]["price"],
+            str(self.low_candle.low),
+        )
+        self.assertTrue(len(proposal.proposal["proposal_hash"]) == 64)
 
     def test_generate_trade_proposal_rejects_contradicting_or_invalid(self):
         ai_output = GeminiVcpProposalOutput(
@@ -163,7 +168,78 @@ class TestProposalGenerator(unittest.TestCase):
             model="google/gemini-3.7-flash",
             approved_risk_budget_amount=Decimal("1000"),
         )
-        self.assertIsNone(proposal)
+        self.assertFalse(proposal.accepted)
+        self.assertEqual(proposal.rejection_code, "proposal_ai_contradicts_scanner")
+
+    def test_anchor_outside_tolerance_has_stable_diagnostic(self):
+        tolerance = compute_atr14(self.candles) * Decimal("0.50")
+        ai_output = GeminiVcpProposalOutput(
+            verdict="valid",
+            contradicts_scanner=False,
+            confidence=0.8,
+            contraction_anchors=[
+                {
+                    "date": self.low_candle.date,
+                    "price": Decimal(str(self.low_candle.low)) + tolerance + Decimal("0.01"),
+                    "anchor_type": "contraction_low",
+                },
+                {
+                    "date": self.resistance_candle.date,
+                    "price": self.resistance_candle.high,
+                    "anchor_type": "resistance",
+                },
+            ],
+            pivot_price=self.pivot,
+            t1=self.targets[0],
+            t2=self.targets[1],
+            t3=self.targets[2],
+            entry_template=EntryTemplate.SINGLE,
+            base_tightness="solid",
+            dry_up_quality="supportive",
+            resistance_room="clear",
+            evidence_summary="Grounded test output.",
+        )
+        result = generate_trade_proposal_from_analysis(
+            symbol="TESTSTOCK",
+            as_of_date=dt.date(2026, 8, 17),
+            screening_result_id="res-123",
+            instrument_id="inst-123",
+            candles=self.candles,
+            ai_output=ai_output,
+            rendered_charts=self.charts,
+            model="google/gemini-3.7-flash",
+            approved_risk_budget_amount=Decimal("1000"),
+        )
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.rejection_code, "proposal_anchor_price_out_of_tolerance")
+        self.assertIn("contraction_low", result.rejection_message)
+        self.assertIn(str(self.low_candle.low), result.rejection_message)
+        self.assertIn(str(tolerance), result.rejection_message)
+
+
+class TestProposalVisionRequest(unittest.TestCase):
+    def test_request_contains_grounding_and_provider_controls(self):
+        candles = [
+            CandleData(
+                open=100.0, high=105.0, low=95.0, close=102.0,
+                volume=1000, date="2026-08-18",
+            )
+        ]
+        request = build_proposal_vision_request(
+            symbol="TESTSTOCK",
+            context_png_b64="context",
+            detail_png_b64="detail",
+            candles=candles,
+            model="google/gemini-3.7-flash",
+            tick_size=Decimal("0.05"),
+        )
+        content = request["messages"][1]["content"]
+        user_text = content[0]["text"]
+        self.assertIn("2026-08-18,100.00,105.00,95.00,102.00,1000,1.0", user_text)
+        self.assertIn("contraction_low.price", request["messages"][0]["content"])
+        self.assertEqual(request["provider"], {"require_parameters": True, "data_collection": "deny"})
+        self.assertEqual(request["reasoning"], {"effort": "high", "exclude": True})
+        self.assertFalse(request["stream"])
 
 
 class TestParseProposalOpenRouterResponse(unittest.TestCase):

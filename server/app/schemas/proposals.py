@@ -19,6 +19,9 @@ from app.domain.p10_sizing import EntryTemplate
 VerdictType = Literal["valid", "invalid", "uncertain"]
 DecisionType = Literal["approved", "rejected"]
 ProposalStatusType = Literal["pending_approval", "approved", "rejected", "expired_unapproved"]
+ProposalAttemptStatusType = Literal[
+    "running", "valid", "invalid", "uncertain", "failed", "timed_out"
+]
 
 
 class GeminiContractionAnchor(BaseModel):
@@ -270,3 +273,48 @@ class ProposalBatchStatusResponse(BaseModel):
     error_message: str | None = None
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
+
+
+class ProposalGenerationAttemptResponse(BaseModel):
+    """Latest audited provider/deterministic outcome for one shortlist candidate."""
+
+    id: UUID
+    automation_run_id: UUID
+    screening_result_id: UUID
+    instrument_id: UUID
+    symbol: str
+    attempt_number: int
+    status: ProposalAttemptStatusType
+    source_hash: str
+    renderer_version: str
+    prompt_version: str
+    schema_version: str
+    geometry_version: str
+    model: str
+    risk_policy_version: int
+    context_image_hash: str
+    detail_image_hash: str
+    provider_request_id: str | None = None
+    provider_usage: dict[str, Any] = Field(default_factory=dict)
+    provider_cost: Decimal = Decimal("0")
+    structured_output: dict[str, Any] | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+    started_at: dt.datetime
+    completed_at: dt.datetime | None = None
+
+
+class ProposalGenerationResultsResponse(BaseModel):
+    automation_run_id: UUID
+    scan_run_id: UUID
+    status: Literal["running", "completed", "timed_out", "failed"]
+    candidates_total: int
+    candidates_processed: int
+    proposals_generated: int
+    proposals_rejected: int
+    proposals_uncertain: int
+    proposals_failed: int
+    error_message: str | None = None
+    started_at: dt.datetime | None = None
+    completed_at: dt.datetime | None = None
+    results: list[ProposalGenerationAttemptResponse] = Field(default_factory=list)

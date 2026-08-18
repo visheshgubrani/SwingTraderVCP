@@ -27,7 +27,7 @@ import pandas as pd
 from app.domain.p10_geometry import CandleData, ChartGeometryAnchor
 
 
-RENDERER_VERSION = "p10_mplfinance_v2"
+RENDERER_VERSION = "p10_mplfinance_v3"
 CHART_WIDTH = 1280
 CHART_HEIGHT = 720
 CHART_DPI = 100
@@ -135,7 +135,12 @@ def render_detail_chart(
     stop_price: float | None = None,
     contraction_anchors: Sequence[ChartGeometryAnchor] = (),
 ) -> bytes:
-    """Renders 126-session annotated detail chart with contractions and pivot levels."""
+    """Render the detail chart with deterministic geometry and pivot only.
+
+    ``stop_price`` remains accepted for call-site compatibility, but the
+    structural stop is deliberately never drawn in the model-facing image.
+    """
+    del stop_price
     df = df_126.copy()
     ema21 = df["Close"].ewm(span=21, adjust=False).mean()
     sma50 = df["Close"].rolling(50).mean()
@@ -161,13 +166,13 @@ def render_detail_chart(
     )
 
     hlines_kwargs = {}
-    if pivot_price is not None and stop_price is not None:
+    if pivot_price is not None:
         hlines_kwargs = {
             "hlines": dict(
-                hlines=[pivot_price, stop_price],
-                colors=["#00e676", "#ff5252"],
-                linestyle=["-.", "--"],
-                linewidths=[1.5, 1.5],
+                hlines=[pivot_price],
+                colors=["#00e676"],
+                linestyle=["-."],
+                linewidths=[1.5],
             )
         }
 
@@ -187,12 +192,12 @@ def render_detail_chart(
         **hlines_kwargs,
     )
 
-    if pivot_price and stop_price:
+    if pivot_price is not None:
         ax = axes[0]
         ax.text(
             0.02,
             0.95,
-            f"Pivot: {pivot_price:.2f} | Stop: {stop_price:.2f}",
+            f"Pivot: {pivot_price:.2f}",
             transform=ax.transAxes,
             color="#ffffff",
             fontsize=10,

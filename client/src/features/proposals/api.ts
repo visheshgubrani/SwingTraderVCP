@@ -236,6 +236,7 @@ export interface ProposalGenerationAttempt {
   } | null
   error_type: string | null
   error_message: string | null
+  error_details: Record<string, unknown>
   started_at: string
   completed_at: string | null
 }

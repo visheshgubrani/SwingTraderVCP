@@ -309,6 +309,7 @@ class ProposalGenerationAttemptResponse(BaseModel):
     structured_output: dict[str, Any] | None = None
     error_type: str | None = None
     error_message: str | None = None
+    error_details: dict[str, Any] = Field(default_factory=dict)
     started_at: dt.datetime
     completed_at: dt.datetime | None = None
 

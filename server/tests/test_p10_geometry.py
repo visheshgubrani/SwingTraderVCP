@@ -1,9 +1,14 @@
+import datetime as dt
+import random
 import unittest
 from decimal import Decimal
 
 from app.domain.p10_geometry import (
     CandleData,
+    ValidatedPatternAnchor,
+    build_resistance_zones,
     compute_atr14,
+    ground_pivot_to_resistance_zones,
     snap_to_tick,
     calculate_structural_stop,
     calculate_chase_ceiling,
@@ -103,6 +108,126 @@ class TestP10Geometry(unittest.TestCase):
         )
         self.assertFalse(geom.is_valid)
         self.assertIn("exceeds maximum 8.0%", geom.rejection_reason)
+
+
+class TestPivotResistanceZones(unittest.TestCase):
+    def setUp(self) -> None:
+        start = dt.date(2026, 1, 1)
+        self.sessions = [start + dt.timedelta(days=index) for index in range(126)]
+
+    def anchor(
+        self,
+        session_index: int,
+        price: str,
+        anchor_type: str = "contraction_high",
+    ) -> ValidatedPatternAnchor:
+        return ValidatedPatternAnchor(
+            date=self.sessions[session_index],
+            price=Decimal(price),
+            anchor_type=anchor_type,
+        )
+
+    def test_complete_link_clusters_all_evidence_before_any_cap(self) -> None:
+        anchors = [
+            self.anchor(80 + index, str(4800 + index * 10))
+            for index in range(9)
+        ]
+        anchors.append(self.anchor(100, "4905"))
+
+        zones = build_resistance_zones(anchors, tolerance=Decimal("90"))
+
+        self.assertEqual(len(zones), 2)
+        self.assertEqual(len(zones[0].members), 9)
+        self.assertEqual(zones[0].low, Decimal("4800"))
+        self.assertEqual(zones[0].high, Decimal("4880"))
+        self.assertEqual(zones[0].median, Decimal("4840"))
+        self.assertEqual(zones[1].low, Decimal("4905"))
+
+    def test_supported_older_boundary_is_exact_and_reproducible(self) -> None:
+        supported_boundary = self.anchor(20, "4800", "resistance")
+        unsupported_boundary = self.anchor(21, "4400", "resistance")
+        anchors = [
+            supported_boundary,
+            unsupported_boundary,
+            self.anchor(30, "4300", "contraction_low"),
+            self.anchor(50, "4500", "contraction_low"),
+            self.anchor(80, "4830"),
+        ]
+
+        grounding = ground_pivot_to_resistance_zones(
+            pivot=Decimal("4810"),
+            anchors=anchors,
+            session_dates=self.sessions,
+            frozen_atr14=Decimal("100"),
+        )
+
+        self.assertTrue(grounding.is_grounded)
+        self.assertEqual(grounding.older_boundary_dates, (supported_boundary.date,))
+        self.assertIn(supported_boundary, grounding.eligible_anchors)
+        self.assertNotIn(unsupported_boundary, grounding.eligible_anchors)
+        self.assertEqual(grounding.tolerance, Decimal("50.00"))
+
+    def test_nearest_zone_tie_prefers_higher_and_ignores_input_order(self) -> None:
+        anchors = [
+            self.anchor(90, "100"),
+            self.anchor(91, "110"),
+        ]
+        shuffled = list(anchors)
+        random.Random(7).shuffle(shuffled)
+
+        first = ground_pivot_to_resistance_zones(
+            pivot=Decimal("105"),
+            anchors=anchors,
+            session_dates=self.sessions,
+            frozen_atr14=Decimal("4"),
+        )
+        second = ground_pivot_to_resistance_zones(
+            pivot=Decimal("105"),
+            anchors=shuffled,
+            session_dates=reversed(self.sessions),
+            frozen_atr14=Decimal("4"),
+        )
+
+        self.assertEqual(first.selected_zone, second.selected_zone)
+        self.assertEqual(first.selected_zone.low, Decimal("110"))
+        self.assertEqual(first.subreason, "outside_resistance_zone_tolerance")
+
+    def test_repeated_recent_higher_zone_is_audit_only(self) -> None:
+        anchors = [
+            self.anchor(90, "4490"),
+            self.anchor(91, "4510"),
+            self.anchor(100, "4800"),
+            self.anchor(101, "4820"),
+        ]
+
+        grounding = ground_pivot_to_resistance_zones(
+            pivot=Decimal("4500"),
+            anchors=anchors,
+            session_dates=self.sessions,
+            frozen_atr14=Decimal("100"),
+        )
+
+        self.assertTrue(grounding.is_grounded)
+        self.assertEqual(grounding.selected_zone.low, Decimal("4490"))
+        self.assertEqual(len(grounding.higher_zones), 1)
+        self.assertEqual(grounding.next_higher_distance, Decimal("300"))
+        self.assertEqual(grounding.next_higher_distance_atr, Decimal("3"))
+        self.assertIn("pivot_below_material_overhead_zone", grounding.audit_flags)
+
+    def test_old_unsupported_highs_do_not_ground_random_pivot(self) -> None:
+        grounding = ground_pivot_to_resistance_zones(
+            pivot=Decimal("4800"),
+            anchors=[
+                self.anchor(10, "4800", "resistance"),
+                self.anchor(20, "4400", "contraction_low"),
+            ],
+            session_dates=self.sessions,
+            frozen_atr14=Decimal("100"),
+        )
+
+        self.assertFalse(grounding.is_grounded)
+        self.assertEqual(grounding.subreason, "no_eligible_resistance_evidence")
+        self.assertEqual(grounding.zones, ())
 
 
 if __name__ == "__main__":

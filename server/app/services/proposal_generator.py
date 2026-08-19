@@ -24,6 +24,11 @@ from app.domain.p10_geometry import (
     compute_atr14,
     construct_and_validate_proposal,
     DEFAULT_TICK_SIZE,
+    ground_pivot_to_resistance_zones,
+    MAX_STOP_DISTANCE_PCT,
+    PivotResistanceGrounding,
+    ResistanceZone,
+    ValidatedPatternAnchor,
 )
 from app.domain.p10_sizing import TEMPLATE_CONFIG
 from app.schemas.proposals import GeminiVcpProposalOutput
@@ -36,7 +41,7 @@ logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
 PROMPT_VERSION = "p10_vcp_proposal_v4"
 SCHEMA_VERSION = "gemini_vcp_proposal_output_v3"
-GEOMETRY_VERSION = "p10_geometry_three_windows_v2"
+GEOMETRY_VERSION = "p10_geometry_resistance_zones_v3"
 
 
 GEMINI_PROPOSAL_SYSTEM_PROMPT = """You are a chart-pattern reader specializing in Mark Minervini's Volatility Contraction Pattern (VCP).
@@ -65,18 +70,137 @@ class ProposalBuildResult:
     proposal: dict[str, Any] | None
     rejection_code: str | None = None
     rejection_message: str | None = None
+    rejection_details: dict[str, Any] | None = None
 
     @property
     def accepted(self) -> bool:
         return self.proposal is not None
 
 
-def _rejected(code: str, message: str) -> ProposalBuildResult:
+def _rejected(
+    code: str,
+    message: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> ProposalBuildResult:
     return ProposalBuildResult(
         proposal=None,
         rejection_code=code,
         rejection_message=message,
+        rejection_details=details,
     )
+
+
+def _serialize_resistance_anchor(
+    anchor: ValidatedPatternAnchor,
+    *,
+    older_boundary_dates: set[dt.date],
+) -> dict[str, str]:
+    return {
+        "date": anchor.date.isoformat(),
+        "price": str(anchor.price),
+        "anchor_type": anchor.anchor_type,
+        "eligibility": (
+            "supported_older_base_boundary"
+            if anchor.date in older_boundary_dates
+            else "recent_60_sessions"
+        ),
+    }
+
+
+def _serialize_resistance_zone(
+    zone: ResistanceZone,
+    *,
+    older_boundary_dates: set[dt.date],
+) -> dict[str, Any]:
+    return {
+        "low": str(zone.low),
+        "high": str(zone.high),
+        "median": str(zone.median),
+        "most_recent_date": zone.most_recent_date.isoformat(),
+        "members": [
+            _serialize_resistance_anchor(
+                member,
+                older_boundary_dates=older_boundary_dates,
+            )
+            for member in zone.members
+        ],
+    }
+
+
+def _serialize_pivot_grounding(
+    grounding: PivotResistanceGrounding,
+) -> dict[str, Any]:
+    older_boundary_dates = set(grounding.older_boundary_dates)
+    return {
+        "rule_version": GEOMETRY_VERSION,
+        "frozen_atr14": str(grounding.frozen_atr14),
+        "zone_width_and_pivot_tolerance": str(grounding.tolerance),
+        "recent_session_count": 60,
+        "recent_start_date": grounding.recent_start_date.isoformat(),
+        "older_boundary_rule": (
+            "explicit resistance in detail window; at least two strictly later "
+            "contraction lows; strictly later recent high retest within 0.5xATR14"
+        ),
+        "eligible_anchors": [
+            _serialize_resistance_anchor(
+                anchor,
+                older_boundary_dates=older_boundary_dates,
+            )
+            for anchor in grounding.eligible_anchors
+        ],
+        "older_boundary_dates": [
+            boundary_date.isoformat()
+            for boundary_date in grounding.older_boundary_dates
+        ],
+        "zones": [
+            _serialize_resistance_zone(
+                zone,
+                older_boundary_dates=older_boundary_dates,
+            )
+            for zone in grounding.zones
+        ],
+        "selected_zone": (
+            _serialize_resistance_zone(
+                grounding.selected_zone,
+                older_boundary_dates=older_boundary_dates,
+            )
+            if grounding.selected_zone is not None
+            else None
+        ),
+        "higher_zones": [
+            _serialize_resistance_zone(
+                zone,
+                older_boundary_dates=older_boundary_dates,
+            )
+            for zone in grounding.higher_zones
+        ],
+        "boundary_distance": (
+            str(grounding.boundary_distance)
+            if grounding.boundary_distance is not None
+            else None
+        ),
+        "next_higher_zone_distance": {
+            "price": (
+                str(grounding.next_higher_distance)
+                if grounding.next_higher_distance is not None
+                else None
+            ),
+            "atr": (
+                str(grounding.next_higher_distance_atr)
+                if grounding.next_higher_distance_atr is not None
+                else None
+            ),
+            "percent": (
+                str(grounding.next_higher_distance_pct)
+                if grounding.next_higher_distance_pct is not None
+                else None
+            ),
+        },
+        "audit_flags": list(grounding.audit_flags),
+        "is_grounded": grounding.is_grounded,
+        "subreason": grounding.subreason,
+    }
 
 
 def proposal_prompt_hash(*, symbol: str, tick_size: Decimal) -> str:
@@ -327,6 +451,7 @@ def generate_trade_proposal_from_analysis(
 
     tolerance = atr14 * Decimal("0.50")
     validated_anchors: list[dict[str, Any]] = []
+    validated_pattern_anchors: list[ValidatedPatternAnchor] = []
     for anchor in ai_output.contraction_anchors:
         candle = frozen_dates.get(anchor.date)
         if candle is None:
@@ -352,26 +477,48 @@ def generate_trade_proposal_from_analysis(
                 "anchor_type": anchor.anchor_type,
             }
         )
+        validated_pattern_anchors.append(
+            ValidatedPatternAnchor(
+                date=anchor.date,
+                price=reference,
+                anchor_type=anchor.anchor_type,
+            )
+        )
 
     low_anchors = [
-        anchor for anchor in ai_output.contraction_anchors
+        anchor for anchor in validated_pattern_anchors
         if anchor.anchor_type == "contraction_low"
     ]
     final_low_anchor = max(low_anchors, key=lambda anchor: anchor.date)
     final_low_candle = frozen_dates[final_low_anchor.date]
     final_contraction_low = Decimal(str(final_low_candle.low))
 
-    resistance_anchors = [
-        anchor for anchor in ai_output.contraction_anchors
-        if anchor.anchor_type in {"resistance", "contraction_high"}
-    ]
-    latest_resistance = max(resistance_anchors, key=lambda anchor: anchor.date)
-    latest_resistance_candle = frozen_dates[latest_resistance.date]
-    latest_resistance_price = Decimal(str(latest_resistance_candle.high))
-    if abs(ai_output.pivot_price - latest_resistance_price) > tolerance:
+    pivot_grounding = ground_pivot_to_resistance_zones(
+        pivot=ai_output.pivot_price,
+        anchors=validated_pattern_anchors,
+        session_dates=tuple(sorted(frozen_dates)),
+        frozen_atr14=atr14,
+    )
+    pivot_grounding_payload = _serialize_pivot_grounding(pivot_grounding)
+    if not pivot_grounding.is_grounded:
+        selected_zone = pivot_grounding.selected_zone
+        message = (
+            "No eligible current-base resistance evidence remains after the "
+            "60-session recency and supported-boundary rules."
+            if selected_zone is None
+            else (
+                f"Pivot {ai_output.pivot_price} is {pivot_grounding.boundary_distance} "
+                f"from closest resistance zone {selected_zone.low}–{selected_zone.high}; "
+                f"maximum tolerance is {pivot_grounding.tolerance} (0.5× frozen ATR14)."
+            )
+        )
         return _rejected(
             "proposal_pivot_not_anchored",
-            f"Pivot {ai_output.pivot_price} is not within tolerance {tolerance} of latest resistance high {latest_resistance_price} on {latest_resistance.date.isoformat()}.",
+            message,
+            details={
+                "subreason": pivot_grounding.subreason,
+                "pivot_grounding": pivot_grounding_payload,
+            },
         )
 
     geom = construct_and_validate_proposal(
@@ -386,9 +533,61 @@ def generate_trade_proposal_from_analysis(
 
     if not geom.is_valid:
         logger.info(f"Symbol {symbol} proposal validation failed: {geom.rejection_reason}")
+        chase_ceiling_evaluated = (
+            geom.initial_stop > 0
+            and geom.stop_distance_pct <= MAX_STOP_DISTANCE_PCT
+        )
+        worst_entry_r = (
+            geom.chase_ceiling - geom.initial_stop
+            if chase_ceiling_evaluated
+            else None
+        )
         return _rejected(
             "proposal_geometry_invalid",
             geom.rejection_reason or "Deterministic proposal geometry validation failed.",
+            details={
+                "subreason": "deterministic_geometry_invalid",
+                "geometry_inputs": {
+                    "pivot_price": str(ai_output.pivot_price),
+                    "final_contraction_low": str(final_contraction_low),
+                    "final_contraction_low_date": final_low_anchor.date.isoformat(),
+                    "frozen_atr14": str(atr14),
+                    "calculated_initial_stop": str(geom.initial_stop),
+                    "stop_distance_pct": str(geom.stop_distance_pct),
+                    "calculated_chase_ceiling": (
+                        str(geom.chase_ceiling)
+                        if chase_ceiling_evaluated
+                        else None
+                    ),
+                    "worst_entry_r_distance": (
+                        str(worst_entry_r)
+                        if worst_entry_r is not None
+                        else None
+                    ),
+                    "target_r_multiples": (
+                        {
+                            "t1": str(
+                                (ai_output.t1 - geom.chase_ceiling)
+                                / worst_entry_r
+                            ),
+                            "t2": str(
+                                (ai_output.t2 - geom.chase_ceiling)
+                                / worst_entry_r
+                            ),
+                            "t3": str(
+                                (ai_output.t3 - geom.chase_ceiling)
+                                / worst_entry_r
+                            ),
+                        }
+                        if worst_entry_r is not None and worst_entry_r > 0
+                        else None
+                    ),
+                    "t1": str(ai_output.t1),
+                    "t2": str(ai_output.t2),
+                    "t3": str(ai_output.t3),
+                },
+                "pivot_grounding": pivot_grounding_payload,
+            },
         )
 
     entry_session, approval_deadline = calculate_next_session_and_deadline(
@@ -459,6 +658,7 @@ def generate_trade_proposal_from_analysis(
             "worst_entry_r_distance": str(geom.chase_ceiling - geom.initial_stop),
             "final_contraction_low": str(final_contraction_low),
             "anchor_merge_tolerance": str(tolerance),
+            "pivot_grounding": pivot_grounding_payload,
             "tick_size": str(tick_size),
         },
         "context_image_hash": rendered_charts.context_hash,

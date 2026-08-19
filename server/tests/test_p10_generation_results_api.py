@@ -56,7 +56,7 @@ class ProposalGenerationResultsApiTests(unittest.IsolatedAsyncioTestCase):
             "renderer_version": "p10_mplfinance_v3",
             "prompt_version": "p10_vcp_proposal_v3",
             "schema_version": "gemini_vcp_proposal_output_v3",
-            "geometry_version": "p10_geometry_three_windows_v2",
+            "geometry_version": "p10_geometry_resistance_zones_v3",
             "model": "google/gemini-3.7-flash",
             "risk_policy_version": 1,
             "context_image_hash": "context",
@@ -67,6 +67,9 @@ class ProposalGenerationResultsApiTests(unittest.IsolatedAsyncioTestCase):
             "structured_output": {"verdict": "valid", "confidence": 0.8},
             "error_type": "proposal_anchor_price_out_of_tolerance",
             "error_message": "contraction_low anchor on 2026-08-18 supplied 99; expected daily low 95; tolerance 1.0",
+            "error_details": {
+                "subreason": "outside_resistance_zone_tolerance",
+            },
             "started_at": now,
             "completed_at": now,
         }
@@ -84,9 +87,14 @@ class ProposalGenerationResultsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.proposals_rejected, 1)
         self.assertEqual(len(response.results), 1)
         self.assertEqual(response.results[0].error_type, "proposal_anchor_price_out_of_tolerance")
+        self.assertEqual(
+            response.results[0].error_details["subreason"],
+            "outside_resistance_zone_tolerance",
+        )
         attempts_sql = str(db.execute.await_args_list[1].args[0])
         self.assertIn("DISTINCT ON (screening_result_id)", attempts_sql)
         self.assertIn("attempt_number DESC", attempts_sql)
+        self.assertIn("error_details", attempts_sql)
 
     async def test_missing_run_is_not_exposed(self) -> None:
         db = AsyncMock()

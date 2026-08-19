@@ -6,6 +6,7 @@ chase ceiling, and target validation according to AGENTS.md §5.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Sequence
@@ -61,6 +62,285 @@ class DeterministicChartGeometry:
     resistance: Decimal
     final_contraction_low: Decimal
     initial_stop: Decimal
+
+
+@dataclass(frozen=True)
+class ValidatedPatternAnchor:
+    """A model anchor grounded to the exact frozen candle High or Low."""
+
+    date: dt.date
+    price: Decimal
+    anchor_type: str
+
+
+@dataclass(frozen=True)
+class ResistanceZone:
+    """A complete-link cluster of validated resistance observations."""
+
+    low: Decimal
+    high: Decimal
+    median: Decimal
+    members: tuple[ValidatedPatternAnchor, ...]
+
+    @property
+    def most_recent_date(self) -> dt.date:
+        return max(member.date for member in self.members)
+
+
+@dataclass(frozen=True)
+class PivotResistanceGrounding:
+    """Deterministic evidence and outcome for grounding one proposed pivot."""
+
+    frozen_atr14: Decimal
+    tolerance: Decimal
+    recent_start_date: dt.date
+    eligible_anchors: tuple[ValidatedPatternAnchor, ...]
+    older_boundary_dates: tuple[dt.date, ...]
+    zones: tuple[ResistanceZone, ...]
+    selected_zone: ResistanceZone | None
+    higher_zones: tuple[ResistanceZone, ...]
+    boundary_distance: Decimal | None
+    next_higher_distance: Decimal | None
+    next_higher_distance_atr: Decimal | None
+    next_higher_distance_pct: Decimal | None
+    audit_flags: tuple[str, ...]
+    is_grounded: bool
+    subreason: str | None
+
+
+def _anchor_key(anchor: ValidatedPatternAnchor) -> tuple[Decimal, dt.date, str]:
+    return (anchor.price, anchor.date, anchor.anchor_type)
+
+
+def _deduplicate_price_observations(
+    anchors: Sequence[ValidatedPatternAnchor],
+) -> list[ValidatedPatternAnchor]:
+    """Count one structural observation per candle date and exact price."""
+
+    observations: dict[tuple[dt.date, Decimal], ValidatedPatternAnchor] = {}
+    for anchor in anchors:
+        key = (anchor.date, anchor.price)
+        existing = observations.get(key)
+        if existing is None or (
+            anchor.anchor_type == "resistance"
+            and existing.anchor_type != "resistance"
+        ):
+            observations[key] = anchor
+    return sorted(observations.values(), key=_anchor_key)
+
+
+def _zone_for_members(
+    members: Sequence[ValidatedPatternAnchor],
+) -> ResistanceZone:
+    ordered = tuple(sorted(members, key=_anchor_key))
+    prices = [member.price for member in ordered]
+    midpoint = len(prices) // 2
+    median = (
+        prices[midpoint]
+        if len(prices) % 2
+        else (prices[midpoint - 1] + prices[midpoint]) / Decimal("2")
+    )
+    return ResistanceZone(
+        low=prices[0],
+        high=prices[-1],
+        median=median,
+        members=ordered,
+    )
+
+
+def build_resistance_zones(
+    anchors: Sequence[ValidatedPatternAnchor],
+    *,
+    tolerance: Decimal,
+) -> tuple[ResistanceZone, ...]:
+    """Cluster all supplied highs with complete-link width <= ``tolerance``."""
+
+    if tolerance < 0:
+        raise ValueError("Resistance-zone tolerance cannot be negative")
+    observations = _deduplicate_price_observations(anchors)
+    if not observations:
+        return ()
+
+    clusters: list[list[ValidatedPatternAnchor]] = []
+    current: list[ValidatedPatternAnchor] = []
+    for anchor in observations:
+        if current and anchor.price - current[0].price > tolerance:
+            clusters.append(current)
+            current = []
+        current.append(anchor)
+    if current:
+        clusters.append(current)
+    return tuple(_zone_for_members(cluster) for cluster in clusters)
+
+
+def resistance_zone_distance(pivot: Decimal, zone: ResistanceZone) -> Decimal:
+    """Return zero inside a zone, otherwise distance to its nearest boundary."""
+
+    if pivot < zone.low:
+        return zone.low - pivot
+    if pivot > zone.high:
+        return pivot - zone.high
+    return Decimal("0")
+
+
+def _zone_canonical_key(
+    zone: ResistanceZone,
+) -> tuple[tuple[Decimal, dt.date, str], ...]:
+    return tuple(_anchor_key(member) for member in zone.members)
+
+
+def ground_pivot_to_resistance_zones(
+    *,
+    pivot: Decimal,
+    anchors: Sequence[ValidatedPatternAnchor],
+    session_dates: Sequence[dt.date],
+    frozen_atr14: Decimal,
+    recent_session_count: int = 60,
+) -> PivotResistanceGrounding:
+    """Ground a pivot against current-base resistance zones.
+
+    ``frozen_atr14`` is calculated once at the proposal reference date. It is
+    deliberately not recomputed at each anchor date.
+    """
+
+    if pivot <= 0:
+        raise ValueError("Pivot must be positive")
+    if frozen_atr14 <= 0:
+        raise ValueError("Frozen ATR14 must be positive")
+    if recent_session_count <= 0:
+        raise ValueError("Recent session count must be positive")
+
+    detail_dates = sorted(set(session_dates))[-126:]
+    if not detail_dates:
+        raise ValueError("At least one frozen detail session is required")
+    recent_dates = detail_dates[-recent_session_count:]
+    recent_date_set = set(recent_dates)
+    detail_date_set = set(detail_dates)
+    recent_start_date = recent_dates[0]
+    tolerance = frozen_atr14 * Decimal("0.50")
+
+    detail_anchors = [
+        anchor for anchor in anchors if anchor.date in detail_date_set
+    ]
+    high_anchors = _deduplicate_price_observations(
+        [
+            anchor
+            for anchor in detail_anchors
+            if anchor.anchor_type in {"resistance", "contraction_high"}
+        ]
+    )
+    low_anchors = [
+        anchor
+        for anchor in detail_anchors
+        if anchor.anchor_type == "contraction_low"
+    ]
+    recent_highs = [
+        anchor for anchor in high_anchors if anchor.date in recent_date_set
+    ]
+
+    older_boundaries: list[ValidatedPatternAnchor] = []
+    for boundary in high_anchors:
+        if (
+            boundary.anchor_type != "resistance"
+            or boundary.date in recent_date_set
+        ):
+            continue
+        later_low_dates = {
+            anchor.date for anchor in low_anchors if anchor.date > boundary.date
+        }
+        retested = any(
+            recent_high.date > boundary.date
+            and abs(recent_high.price - boundary.price) <= tolerance
+            for recent_high in recent_highs
+        )
+        if len(later_low_dates) >= 2 and retested:
+            older_boundaries.append(boundary)
+
+    eligible = _deduplicate_price_observations(
+        [*recent_highs, *older_boundaries]
+    )
+    zones = build_resistance_zones(eligible, tolerance=tolerance)
+    if not zones:
+        return PivotResistanceGrounding(
+            frozen_atr14=frozen_atr14,
+            tolerance=tolerance,
+            recent_start_date=recent_start_date,
+            eligible_anchors=(),
+            older_boundary_dates=(),
+            zones=(),
+            selected_zone=None,
+            higher_zones=(),
+            boundary_distance=None,
+            next_higher_distance=None,
+            next_higher_distance_atr=None,
+            next_higher_distance_pct=None,
+            audit_flags=(),
+            is_grounded=False,
+            subreason="no_eligible_resistance_evidence",
+        )
+
+    selected = min(
+        zones,
+        key=lambda zone: (
+            resistance_zone_distance(pivot, zone),
+            -zone.high,
+            -zone.most_recent_date.toordinal(),
+            _zone_canonical_key(zone),
+        ),
+    )
+    boundary_distance = resistance_zone_distance(pivot, selected)
+    higher_zones = tuple(
+        sorted(
+            (zone for zone in zones if zone.low > selected.high),
+            key=lambda zone: (zone.low, zone.high, _zone_canonical_key(zone)),
+        )
+    )
+    next_higher_distance = (
+        max(Decimal("0"), higher_zones[0].low - pivot)
+        if higher_zones
+        else None
+    )
+    next_higher_distance_atr = (
+        next_higher_distance / frozen_atr14
+        if next_higher_distance is not None
+        else None
+    )
+    next_higher_distance_pct = (
+        next_higher_distance / pivot * Decimal("100")
+        if next_higher_distance is not None
+        else None
+    )
+    material_overhead = any(
+        len(zone.members) >= 2
+        and any(member.date in recent_date_set for member in zone.members)
+        for zone in higher_zones
+    )
+    grounded = boundary_distance <= tolerance
+    return PivotResistanceGrounding(
+        frozen_atr14=frozen_atr14,
+        tolerance=tolerance,
+        recent_start_date=recent_start_date,
+        eligible_anchors=tuple(
+            sorted(eligible, key=lambda anchor: (anchor.date, anchor.price, anchor.anchor_type))
+        ),
+        older_boundary_dates=tuple(
+            sorted(boundary.date for boundary in older_boundaries)
+        ),
+        zones=zones,
+        selected_zone=selected,
+        higher_zones=higher_zones,
+        boundary_distance=boundary_distance,
+        next_higher_distance=next_higher_distance,
+        next_higher_distance_atr=next_higher_distance_atr,
+        next_higher_distance_pct=next_higher_distance_pct,
+        audit_flags=(
+            ("pivot_below_material_overhead_zone",)
+            if grounded and material_overhead
+            else ()
+        ),
+        is_grounded=grounded,
+        subreason=None if grounded else "outside_resistance_zone_tolerance",
+    )
 
 
 def snap_to_tick(price: float | Decimal, tick_size: Decimal = DEFAULT_TICK_SIZE) -> Decimal:

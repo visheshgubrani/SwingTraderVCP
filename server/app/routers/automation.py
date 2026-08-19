@@ -415,8 +415,8 @@ async def get_proposal_generation_results(
                        prompt_version, schema_version, geometry_version, model,
                        risk_policy_version, context_image_hash, detail_image_hash,
                        provider_request_id, provider_usage, provider_cost,
-                       structured_output, error_type, error_message, started_at,
-                       completed_at
+                       structured_output, error_type, error_message, error_details,
+                       started_at, completed_at
                 FROM proposal_attempts
                 WHERE automation_run_id = :automation_run_id
                 ORDER BY screening_result_id, attempt_number DESC, started_at DESC

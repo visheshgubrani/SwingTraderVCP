@@ -187,7 +187,8 @@ async def _insert_attempt(
             )
             ON CONFLICT (automation_run_id, screening_result_id, attempt_number)
             DO UPDATE SET status = 'running', started_at = now(), completed_at = NULL,
-                          error_type = NULL, error_message = NULL
+                          error_type = NULL, error_message = NULL,
+                          error_details = '{}'::jsonb
             RETURNING id
             """
         ),
@@ -248,6 +249,7 @@ async def _finish_attempt(
     error: BaseException | None = None,
     error_type: str | None = None,
     error_message: str | None = None,
+    error_details: dict[str, Any] | None = None,
 ) -> None:
     await session.execute(
         text(
@@ -257,6 +259,7 @@ async def _finish_attempt(
                 provider_usage = CAST(:usage AS jsonb), provider_cost = :cost,
                 provider_request_id = :request_id,
                 error_type = :error_type, error_message = :error_message,
+                error_details = CAST(:error_details AS jsonb),
                 completed_at = now()
             WHERE id = :attempt_id
             """
@@ -269,6 +272,7 @@ async def _finish_attempt(
             "cost": Decimal(str(cost)),
             "request_id": request_id,
             "error_type": error_type or (type(error).__name__ if error else None),
+            "error_details": json.dumps(error_details or {}),
             "error_message": (
                 error_message[:1000]
                 if error_message is not None
@@ -536,6 +540,13 @@ async def process_proposal_candidate(
             holidays=_holiday_dates(),
         )
         if not build_result.accepted:
+            logger.info(
+                "Proposal candidate %s rejected code=%s subreason=%s detail=%s",
+                candidate.symbol,
+                build_result.rejection_code,
+                (build_result.rejection_details or {}).get("subreason"),
+                build_result.rejection_message,
+            )
             async with async_session() as session:
                 await _finish_attempt(
                     session,
@@ -547,6 +558,7 @@ async def process_proposal_candidate(
                     request_id=request_id,
                     error_type=build_result.rejection_code,
                     error_message=build_result.rejection_message,
+                    error_details=build_result.rejection_details,
                 )
             return "rejected"
 

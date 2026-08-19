@@ -260,6 +260,15 @@ class ProposalBatchTriggerResponse(BaseModel):
     message: str
 
 
+class ProposalSingleTriggerResponse(BaseModel):
+    status: Literal["queued"]
+    scan_run_id: UUID
+    screening_result_id: UUID
+    symbol: str
+    as_of_date: dt.date | None = None
+    message: str
+
+
 class ProposalBatchStatusResponse(BaseModel):
     scan_run_id: UUID | None = None
     automation_run_id: UUID | None = None

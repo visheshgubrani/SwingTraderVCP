@@ -5,9 +5,11 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from app.workers.proposal_worker import (
+    WorkerSettings,
     cap_proposal_batch_limit,
     proposal_batch_deadline,
     run_eod_proposal_batch,
+    run_single_proposal,
 )
 
 
@@ -24,6 +26,13 @@ class FakeResult:
 
     def scalar_one_or_none(self):
         return self._scalar
+
+    def one_or_none(self):
+        if not self._rows:
+            return None
+        if len(self._rows) > 1:
+            raise RuntimeError("Multiple rows")
+        return self._rows[0]
 
 
 class FakeProposalBatchSession:
@@ -103,6 +112,9 @@ class TestProposalBatchDeadline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cap_proposal_batch_limit(5, 10), 5)
         self.assertEqual(cap_proposal_batch_limit(50, 20), 20)
 
+    def test_proposal_worker_registers_single_stock_job(self) -> None:
+        self.assertIn(run_single_proposal, WorkerSettings.functions)
+
     async def test_all_rejected_batch_completes_without_trade_proposal_rows(self) -> None:
         candidate = SimpleNamespace(
             symbol="NSE:EXAMPLE-EQ",
@@ -128,3 +140,37 @@ class TestProposalBatchDeadline(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             any("INSERT INTO trade_proposals" in sql for sql in fake_session.sql)
         )
+
+    async def test_single_proposal_processes_only_the_requested_candidate(self) -> None:
+        scan_run_id = uuid4()
+        screening_result_id = uuid4()
+        candidate = SimpleNamespace(
+            screening_result_id=screening_result_id,
+            symbol="NSE:EXAMPLE-EQ",
+            as_of_date=dt.date(2026, 8, 18),
+            scan_completed_at=self.now,
+            scan_run_id=scan_run_id,
+        )
+        automation_run_id = uuid4()
+        fake_session = FakeProposalBatchSession(candidate, automation_run_id)
+        with (
+            patch("app.workers.proposal_worker.async_session", fake_session),
+            patch(
+                "app.workers.proposal_worker.process_proposal_candidate",
+                new=AsyncMock(return_value="rejected"),
+            ) as process_candidate,
+        ):
+            result = await run_single_proposal({}, str(screening_result_id))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["scan_run_id"], str(scan_run_id))
+        self.assertEqual(result["counts"]["rejected"], 1)
+        process_candidate.assert_awaited_once()
+        self.assertEqual(process_candidate.await_args.kwargs["candidate"], candidate)
+
+    async def test_single_proposal_returns_no_candidates_when_missing(self) -> None:
+        fake_session = FakeProposalBatchSession(None, uuid4())
+        with patch("app.workers.proposal_worker.async_session", fake_session):
+            result = await run_single_proposal({}, str(uuid4()))
+        self.assertEqual(result["status"], "no_candidates")
+

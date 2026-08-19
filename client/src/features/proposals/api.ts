@@ -192,6 +192,15 @@ export interface ProposalBatchTriggerResponse {
   message: string
 }
 
+export interface ProposalSingleTriggerResponse {
+  status: "queued"
+  scan_run_id: string
+  screening_result_id: string
+  symbol: string
+  as_of_date: string | null
+  message: string
+}
+
 export type ProposalAttemptStatus =
   | "running"
   | "valid"
@@ -452,6 +461,29 @@ export function useTriggerProposalBatch() {
           scanRunId ? { scan_run_id: scanRunId } : {},
         ),
       }),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({
+        queryKey: operationsKeys.proposalBatch(result.scan_run_id),
+      })
+      void queryClient.invalidateQueries({
+        queryKey: operationsKeys.proposalBatch(null),
+      })
+      void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
+      void queryClient.invalidateQueries({
+        queryKey: ["automation", "proposal-generation-results"],
+      })
+    },
+  })
+}
+
+export function useTriggerSingleProposal() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (screeningResultId: string) =>
+      apiRequest<ProposalSingleTriggerResponse>(
+        `/automation/screening-results/${screeningResultId}/proposals`,
+        { method: "POST" },
+      ),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({
         queryKey: operationsKeys.proposalBatch(result.scan_run_id),

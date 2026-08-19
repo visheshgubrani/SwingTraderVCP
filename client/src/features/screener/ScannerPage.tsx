@@ -9,6 +9,7 @@ import {
   LineChart,
   Play,
   Search,
+  Sparkles,
   XCircle,
 } from "lucide-react"
 import { useNavigate } from "react-router"
@@ -28,6 +29,7 @@ import {
 } from "@/components/ui/native-select"
 import { Spinner } from "@/components/ui/spinner"
 import { useAuthStatus } from "@/features/auth/api"
+import { useTriggerSingleProposal } from "@/features/proposals/api"
 import {
   defaultScanRunId,
   productionScanRuns,
@@ -68,6 +70,7 @@ export function ScannerPage() {
   const authStatus = useAuthStatus()
   const scanRuns = useScanRuns()
   const scanWorkflow = useScanWorkflow(authStatus.data)
+  const generateProposal = useTriggerSingleProposal()
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
@@ -223,6 +226,22 @@ export function ScannerPage() {
           </Button>
         </div>
       </div>
+
+      {(generateProposal.isError || generateProposal.isSuccess) && (
+        <div
+          className={
+            generateProposal.isError
+              ? "border-b border-rose-500/30 bg-rose-500/10 px-4 py-2 text-[11px] text-rose-200"
+              : "border-b border-border/60 bg-muted/20 px-4 py-2 text-[11px] text-muted-foreground"
+          }
+        >
+          {generateProposal.isError
+            ? generateProposal.error instanceof Error
+              ? generateProposal.error.message
+              : "Could not queue proposal generation."
+            : generateProposal.data?.message}
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b bg-card/60 px-4 py-2">
@@ -438,6 +457,34 @@ export function ScannerPage() {
                         >
                           <FlaskConical className="size-3" />
                           {row.vcp_vision ? "Review VCP" : "Analyze VCP"}
+                        </Button>
+                        <Button
+                          disabled={
+                            !row.fundamental_selected ||
+                            (generateProposal.isPending &&
+                              generateProposal.variables === row.id)
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            generateProposal.mutate(row.id)
+                          }}
+                          size="sm"
+                          title={
+                            row.fundamental_selected
+                              ? "Generate a P10 proposal for this stock only"
+                              : "Only the P10 shortlist (Top 20) can generate a proposal"
+                          }
+                          type="button"
+                          variant="outline"
+                          className="h-7 gap-1 px-2 text-[11px]"
+                        >
+                          {generateProposal.isPending &&
+                          generateProposal.variables === row.id ? (
+                            <Spinner data-icon="inline-start" />
+                          ) : (
+                            <Sparkles className="size-3" />
+                          )}
+                          Proposal
                         </Button>
                         <Button
                           onClick={(e) => {

@@ -40,6 +40,7 @@ from app.schemas.proposals import (
     ProposalBatchTriggerRequest,
     ProposalBatchTriggerResponse,
     ProposalGenerationResultsResponse,
+    ProposalSingleTriggerResponse,
 )
 from app.services.p10_rollout import (
     RolloutBlockedError,
@@ -49,7 +50,7 @@ from app.services.p10_rollout import (
 )
 from app.services.paper_broker import PaperBrokerError, reset_paper_account
 from app.services.paper_portfolio import load_paper_portfolio
-from app.services.proposal_queue import enqueue_proposal_batch
+from app.services.proposal_queue import enqueue_proposal_batch, enqueue_single_proposal
 from app.services.risk_stop_streak import reset_stop_streak, synchronize_stop_streak
 
 
@@ -276,6 +277,104 @@ async def trigger_proposal_batch(
         message=(
             "Proposal generation queued. The dedicated worker will process the "
             f"top {min(settings.proposal_batch_limit, 20)} serially."
+        ),
+    )
+
+
+@router.post(
+    "/screening-results/{result_id}/proposals",
+    response_model=ProposalSingleTriggerResponse,
+)
+async def trigger_single_proposal(
+    result_id: UUID,
+    request: Request,
+    db: db_dep,
+) -> ProposalSingleTriggerResponse:
+    """Queue P10 proposal generation for one personal shortlist stock.
+
+    Queue-only: the dedicated proposal worker still owns charts and Gemini.
+    """
+    redis_pool = getattr(request.app.state, "redis", None)
+    if not redis_pool:
+        raise HTTPException(
+            status_code=500,
+            detail="Redis background queue connection not initialized on the server.",
+        )
+
+    paused = (
+        await db.execute(
+            text(
+                """
+                SELECT enabled FROM system_controls
+                WHERE control_key = 'proposal_processing_paused'
+                """
+            )
+        )
+    ).scalar_one_or_none()
+    if paused is None or bool(paused):
+        raise HTTPException(
+            status_code=409,
+            detail="Proposal processing is paused. Resume it before generating a proposal.",
+        )
+
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT sr.id, sr.scan_run_id, sr.technical_passed, sr.result_rank,
+                       sr.technical_metrics, i.fyers_symbol AS symbol,
+                       r.status AS scan_status, r.visibility, r.triggered_by,
+                       r.as_of_date
+                FROM screening_results sr
+                JOIN instruments i ON i.id = sr.instrument_id
+                JOIN scan_runs r ON r.id = sr.scan_run_id
+                WHERE sr.id = :result_id
+                """
+            ),
+            {"result_id": result_id},
+        )
+    ).mappings().one_or_none()
+    if (
+        row is None
+        or row["visibility"] != "personal"
+        or row["triggered_by"] == "manual_shadow"
+    ):
+        raise HTTPException(status_code=404, detail="Screening result not found.")
+    if row["scan_status"] != "succeeded":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scan {row['scan_run_id']} is {row['scan_status']}, not succeeded.",
+        )
+    if not row["technical_passed"] or row["result_rank"] is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This stock is not on the ranked technical shortlist.",
+        )
+    metrics = row["technical_metrics"] or {}
+    if isinstance(metrics, str):
+        metrics = json.loads(metrics)
+    fundamental_selected = bool(metrics.get("fundamental_selected"))
+    if settings.p7_fundamental_pass_enabled and not fundamental_selected:
+        raise HTTPException(
+            status_code=409,
+            detail="Only the P10 shortlist (Top 20) can generate a live proposal.",
+        )
+
+    queued = await enqueue_single_proposal(redis_pool, str(row["id"]))
+    if not queued:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to enqueue the proposal on the P10 worker queue.",
+        )
+    return ProposalSingleTriggerResponse(
+        status="queued",
+        scan_run_id=row["scan_run_id"],
+        screening_result_id=row["id"],
+        symbol=row["symbol"],
+        as_of_date=row["as_of_date"],
+        message=(
+            f"Proposal generation queued for {row['symbol']}. "
+            "The dedicated worker will process this stock next."
         ),
     )
 

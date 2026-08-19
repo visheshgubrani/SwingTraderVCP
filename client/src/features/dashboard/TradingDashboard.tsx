@@ -8,6 +8,7 @@ import { TradingChart } from "@/features/chart/TradingChart"
 import { historicalKeys, useCandles, useSyncStatus } from "@/features/historical/api"
 import { OrderBookTable } from "@/features/orders/OrderBookTable"
 import { PositionsTable } from "@/features/positions/PositionsTable"
+import { useTriggerSingleProposal } from "@/features/proposals/api"
 import { ScannerTable } from "@/features/screener/ScannerTable"
 import {
   defaultScanRunId,
@@ -74,6 +75,7 @@ export function TradingDashboard() {
   const syncStatus = useSyncStatus()
   const scanRuns = useScanRuns()
   const scanWorkflow = useScanWorkflow(authStatus.data)
+  const generateProposal = useTriggerSingleProposal()
   const { ltpMap } = useMarketData()
   const visibleRuns = useMemo(
     () => productionScanRuns(scanRuns.data),
@@ -257,7 +259,7 @@ export function TradingDashboard() {
           </Button>
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
-          {bottomTab === "scanner" && <ScannerTable activeRun={activeRun} errorMessage={scanResults.error instanceof Error ? scanResults.error.message : null} isError={scanResults.isError} isLoading={scanResults.isLoading} isRunning={scanWorkflow.isBusy} items={scanResults.data ?? []} onAnalyzeVcp={setVisionResult} onPlanTrade={handleSelectResult} onRunScan={() => void scanWorkflow.start()} onRetry={() => void scanResults.refetch()} onSelectResult={handleSelectResult} onSelectRun={(runId) => { setSelectedRunId(runId); setSelectedResultId(null) }} runs={visibleRuns} selectedResultId={selectedResultId} selectedRunId={selectedRunId} workflowError={scanWorkflow.phase === "failed"} workflowMessage={scanWorkflow.message} />}
+          {bottomTab === "scanner" && <ScannerTable activeRun={activeRun} errorMessage={scanResults.error instanceof Error ? scanResults.error.message : null} generateProposalError={generateProposal.error instanceof Error ? generateProposal.error.message : null} generateProposalMessage={generateProposal.isSuccess ? generateProposal.data.message : null} generatingResultId={generateProposal.isPending ? generateProposal.variables ?? null : null} isError={scanResults.isError} isLoading={scanResults.isLoading} isRunning={scanWorkflow.isBusy} items={scanResults.data ?? []} onAnalyzeVcp={setVisionResult} onGenerateProposal={(result) => generateProposal.mutate(result.id)} onPlanTrade={handleSelectResult} onRunScan={() => void scanWorkflow.start()} onRetry={() => void scanResults.refetch()} onSelectResult={handleSelectResult} onSelectRun={(runId) => { setSelectedRunId(runId); setSelectedResultId(null) }} runs={visibleRuns} selectedResultId={selectedResultId} selectedRunId={selectedRunId} workflowError={scanWorkflow.phase === "failed"} workflowMessage={scanWorkflow.message} />}
           {bottomTab === "positions" && <PositionsTable positions={positions} />}
           {bottomTab === "orders" && <OrderBookTable orders={orderIntents} />}
           {bottomTab === "tradebook" && <TradebookView />}

@@ -2,6 +2,7 @@ import {
   FlaskConical,
   LineChart,
   Play,
+  Sparkles,
   XCircle,
 } from "lucide-react"
 
@@ -42,6 +43,10 @@ interface ScannerTableProps {
   onSelectResult: (result: ScanResult) => void
   onPlanTrade?: (result: ScanResult) => void
   onAnalyzeVcp?: (result: ScanResult) => void
+  onGenerateProposal?: (result: ScanResult) => void
+  generatingResultId?: string | null
+  generateProposalError?: string | null
+  generateProposalMessage?: string | null
   onRunScan: () => void
   onRetry: () => void
 }
@@ -81,6 +86,10 @@ export function ScannerTable({
   onSelectResult,
   onPlanTrade,
   onAnalyzeVcp,
+  onGenerateProposal,
+  generatingResultId = null,
+  generateProposalError = null,
+  generateProposalMessage = null,
   onRunScan,
   onRetry,
 }: ScannerTableProps) {
@@ -118,6 +127,22 @@ export function ScannerTable({
         </div>
 
         <div className="flex items-center gap-2">
+          {generateProposalMessage && (
+            <span
+              className="max-w-96 truncate text-muted-foreground"
+              title={generateProposalMessage}
+            >
+              {generateProposalMessage}
+            </span>
+          )}
+          {generateProposalError && (
+            <span
+              className="max-w-96 truncate text-destructive"
+              title={generateProposalError}
+            >
+              {generateProposalError}
+            </span>
+          )}
           {workflowMessage && (
             <span
               className={cn(
@@ -314,6 +339,31 @@ export function ScannerTable({
                           variant={row.vcp_vision ? "secondary" : "ghost"}
                         >
                           <FlaskConical data-icon="inline-start" />
+                        </Button>
+                        <Button
+                          disabled={
+                            !onGenerateProposal ||
+                            !row.fundamental_selected ||
+                            generatingResultId === row.id
+                          }
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onGenerateProposal?.(row)
+                          }}
+                          size="icon-sm"
+                          title={
+                            row.fundamental_selected
+                              ? "Generate a P10 proposal for this stock only"
+                              : "Only the P10 shortlist (Top 20) can generate a proposal"
+                          }
+                          type="button"
+                          variant="ghost"
+                        >
+                          {generatingResultId === row.id ? (
+                            <Spinner data-icon="inline-start" />
+                          ) : (
+                            <Sparkles data-icon="inline-start" />
+                          )}
                         </Button>
                         <Button
                           onClick={(event) => {

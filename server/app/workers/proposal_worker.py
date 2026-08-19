@@ -646,6 +646,103 @@ async def run_eod_proposal_batch(
         automation_run_id = str(run_result.scalar_one())
         await session.commit()
 
+    return await _process_automation_candidates(
+        automation_run_id=automation_run_id,
+        scan_run_id=scan_run_id,
+        candidates=candidates,
+        as_of_date=as_of_date,
+        deadline=deadline,
+        manual=manual,
+    )
+
+
+async def run_single_proposal(
+    ctx: dict[str, Any],
+    screening_result_id: str,
+) -> dict[str, Any]:
+    """Operator-triggered single-stock P10 generation on the serial worker."""
+    del ctx
+    async with async_session() as session:
+        if await _control_is_paused(session, "proposal_processing_paused"):
+            return {"status": "paused", "screening_result_id": screening_result_id}
+        result = await session.execute(
+            text(
+                """
+                SELECT sr.id AS screening_result_id, sr.instrument_id,
+                       i.fyers_symbol AS symbol, i.tick_size, i.lot_size,
+                       sr.result_rank, sr.technical_score, r.as_of_date,
+                       r.completed_at AS scan_completed_at, r.id AS scan_run_id
+                FROM screening_results sr
+                JOIN instruments i ON i.id = sr.instrument_id
+                JOIN scan_runs r ON r.id = sr.scan_run_id
+                WHERE sr.id = :screening_result_id
+                  AND r.visibility = 'personal'
+                  AND r.triggered_by <> 'manual_shadow'
+                  AND r.status = 'succeeded'
+                  AND sr.technical_passed = true
+                  AND sr.result_rank IS NOT NULL
+                  AND (
+                      :p7_enabled = false
+                      OR COALESCE(
+                          (sr.technical_metrics ->> 'fundamental_selected')::boolean,
+                          false
+                      ) = true
+                  )
+                """
+            ),
+            {
+                "screening_result_id": screening_result_id,
+                "p7_enabled": settings.p7_fundamental_pass_enabled,
+            },
+        )
+        candidate = result.one_or_none()
+        if candidate is None:
+            return {"status": "no_candidates", "screening_result_id": screening_result_id}
+        as_of_date = candidate.as_of_date
+        scan_completed_at = candidate.scan_completed_at
+        scan_run_id = str(candidate.scan_run_id)
+        if scan_completed_at is None:
+            raise RuntimeError("Proposal shortlist has no durable scan completion time")
+        now = dt.datetime.now(dt.timezone.utc)
+        deadline = proposal_batch_deadline(
+            scan_completed_at=scan_completed_at,
+            now=now,
+            budget_minutes=settings.proposal_batch_budget_minutes,
+            manual=True,
+        )
+        run_result = await session.execute(
+            text(
+                """
+                INSERT INTO automation_runs (
+                    scan_run_id, status, candidates_total, batch_deadline
+                ) VALUES (:scan_run_id, 'running', 1, :deadline)
+                RETURNING id
+                """
+            ),
+            {"scan_run_id": scan_run_id, "deadline": deadline},
+        )
+        automation_run_id = str(run_result.scalar_one())
+        await session.commit()
+
+    return await _process_automation_candidates(
+        automation_run_id=automation_run_id,
+        scan_run_id=scan_run_id,
+        candidates=[candidate],
+        as_of_date=as_of_date,
+        deadline=deadline,
+        manual=True,
+    )
+
+
+async def _process_automation_candidates(
+    *,
+    automation_run_id: str,
+    scan_run_id: str,
+    candidates: list[Any],
+    as_of_date: dt.date,
+    deadline: dt.datetime,
+    manual: bool,
+) -> dict[str, Any]:
     counts = {key: 0 for key in ("generated", "rejected", "uncertain", "failed", "timed_out")}
     processed = 0
     for index, candidate in enumerate(candidates):
@@ -794,7 +891,7 @@ async def worker_on_shutdown(ctx: dict[str, Any]) -> None:
 
 
 class WorkerSettings:
-    functions = [run_eod_proposal_batch, expire_unapproved_job]
+    functions = [run_eod_proposal_batch, run_single_proposal, expire_unapproved_job]
     cron_jobs = [
         cron(
             expire_unapproved_job,

@@ -31,3 +31,22 @@ async def enqueue_proposal_batch(
         _queue_name=settings.proposal_queue_name,
     )
     return job is not None
+
+
+async def enqueue_single_proposal(
+    redis: Any,
+    screening_result_id: str,
+) -> bool:
+    """Queue one shortlist candidate on the dedicated concurrency-1 worker.
+
+    Always treated as a manual operator action: a unique job id lets the same
+    stock be re-run after a prompt or geometry change without waiting for a
+    full top-N batch.
+    """
+    job = await redis.enqueue_job(
+        "run_single_proposal",
+        str(screening_result_id),
+        _job_id=f"p10-proposals:single:{screening_result_id}:{uuid4()}",
+        _queue_name=settings.proposal_queue_name,
+    )
+    return job is not None

@@ -6,14 +6,16 @@ from decimal import Decimal
 from app.domain.p10_geometry import (
     CandleData,
     ValidatedPatternAnchor,
+    adjust_chase_ceiling_for_t1_rr,
     build_resistance_zones,
     compute_atr14,
+    construct_and_validate_proposal,
+    entry_vwap_invalidates_t1_rr,
     ground_pivot_to_resistance_zones,
     snap_to_tick,
     calculate_structural_stop,
     calculate_chase_ceiling,
     validate_proposal_targets,
-    construct_and_validate_proposal,
 )
 
 
@@ -77,9 +79,9 @@ class TestP10Geometry(unittest.TestCase):
         self.assertTrue(valid)
         self.assertIsNone(reason)
 
-    def test_validate_proposal_targets_rejects_insufficient_rr(self):
+    def test_validate_proposal_targets_rejects_t1_below_one_r(self):
         pivot = Decimal("500.00")
-        stop = Decimal("475.00")  # pivot R = 25; worst-fill R = ceiling - stop = 35
+        stop = Decimal("475.00")
         ceiling = Decimal("510.00")
         t1 = Decimal("525.00")  # 15 above ceiling => 15/35 = 0.43R
         t2 = Decimal("570.00")
@@ -91,7 +93,6 @@ class TestP10Geometry(unittest.TestCase):
         self.assertIn("T1", reason)
         self.assertIn("0.43R", reason)
         self.assertIn("requires >= 1.0R", reason)
-        self.assertNotIn("15.00R", reason)
 
     def test_construct_and_validate_proposal_rejects_wide_stop(self):
         pivot = Decimal("500.00")
@@ -108,6 +109,104 @@ class TestP10Geometry(unittest.TestCase):
         )
         self.assertFalse(geom.is_valid)
         self.assertIn("exceeds maximum 8.0%", geom.rejection_reason)
+
+    def test_adjust_chase_ceiling_shrinks_to_preserve_one_r(self):
+        pivot = Decimal("100.00")
+        stop = Decimal("94.00")
+        t1 = Decimal("108.00")
+        base_ceiling = Decimal("102.00")
+        final = adjust_chase_ceiling_for_t1_rr(pivot, stop, t1, base_ceiling)
+        self.assertEqual(final, Decimal("101.00"))
+
+    def test_construct_shrinks_chase_when_t1_is_one_r_at_pivot_not_base(self):
+        # stop = 98 - 0.25*16 = 94; base ceiling = 100 + min(2, 3) = 102
+        geom = construct_and_validate_proposal(
+            pivot_price=Decimal("100.00"),
+            final_contraction_low=Decimal("98.00"),
+            t1=Decimal("108.00"),
+            t2=Decimal("113.20"),
+            t3=Decimal("119.40"),
+            atr14=Decimal("16.00"),
+        )
+        self.assertTrue(geom.is_valid, geom.rejection_reason)
+        self.assertEqual(geom.base_chase_ceiling, Decimal("102.00"))
+        self.assertEqual(geom.chase_ceiling, Decimal("101.00"))
+        self.assertEqual(geom.rr_adjusted_chase_ceiling, Decimal("101.00"))
+        self.assertEqual(geom.t1_r, Decimal("1"))
+        self.assertTrue(geom.t2_below_2r)
+        self.assertTrue(geom.t3_below_3r)
+        self.assertLess(geom.t2_r, Decimal("2"))
+        self.assertLess(geom.t3_r, Decimal("3"))
+
+    def test_construct_rejects_when_t1_fails_one_r_even_at_pivot(self):
+        geom = construct_and_validate_proposal(
+            pivot_price=Decimal("100.00"),
+            final_contraction_low=Decimal("98.00"),
+            t1=Decimal("105.00"),
+            t2=Decimal("110.00"),
+            t3=Decimal("115.00"),
+            atr14=Decimal("16.00"),
+        )
+        self.assertFalse(geom.is_valid)
+        self.assertIn("requires >= 1.0R", geom.rejection_reason)
+        self.assertEqual(geom.chase_ceiling, Decimal("100.00"))
+        self.assertLess(geom.r_at_pivot, Decimal("1"))
+
+    def test_construct_accepts_t2_t3_below_hard_rr_with_flags(self):
+        geom = construct_and_validate_proposal(
+            pivot_price=Decimal("100.00"),
+            final_contraction_low=Decimal("98.00"),
+            t1=Decimal("108.00"),
+            t2=Decimal("113.20"),
+            t3=Decimal("119.40"),
+            atr14=Decimal("16.00"),
+        )
+        self.assertTrue(geom.is_valid, geom.rejection_reason)
+        self.assertEqual(geom.t1_r, Decimal("1"))
+        self.assertAlmostEqual(float(geom.t2_r), 1.74, places=2)
+        self.assertAlmostEqual(float(geom.t3_r), 2.63, places=2)
+        self.assertTrue(geom.t2_below_2r)
+        self.assertTrue(geom.t3_below_3r)
+
+    def test_construct_rejects_unordered_targets(self):
+        geom = construct_and_validate_proposal(
+            pivot_price=Decimal("100.00"),
+            final_contraction_low=Decimal("98.00"),
+            t1=Decimal("108.00"),
+            t2=Decimal("107.00"),
+            t3=Decimal("119.40"),
+            atr14=Decimal("16.00"),
+        )
+        self.assertFalse(geom.is_valid)
+        self.assertIn("strictly ordered", geom.rejection_reason)
+
+    def test_construct_allows_chase_equal_to_pivot_when_one_r_forbids_chase(self):
+        # T1 = 2*pivot - stop = 106 is exactly 1R at pivot.
+        geom = construct_and_validate_proposal(
+            pivot_price=Decimal("100.00"),
+            final_contraction_low=Decimal("98.00"),
+            t1=Decimal("106.00"),
+            t2=Decimal("110.00"),
+            t3=Decimal("114.00"),
+            atr14=Decimal("16.00"),
+        )
+        self.assertTrue(geom.is_valid, geom.rejection_reason)
+        self.assertEqual(geom.chase_ceiling, Decimal("100.00"))
+        self.assertEqual(geom.base_chase_ceiling, Decimal("102.00"))
+        self.assertEqual(geom.t1_r, Decimal("1"))
+
+    def test_entry_vwap_invalidates_only_t1_one_r(self):
+        t1 = Decimal("108.00")
+        stop = Decimal("94.00")
+        self.assertTrue(
+            entry_vwap_invalidates_t1_rr(t1, Decimal("102.00"), stop)
+        )
+        self.assertFalse(
+            entry_vwap_invalidates_t1_rr(t1, Decimal("101.00"), stop)
+        )
+        self.assertFalse(
+            entry_vwap_invalidates_t1_rr(t1, Decimal("94.00"), stop)
+        )
 
 
 class TestPivotResistanceZones(unittest.TestCase):

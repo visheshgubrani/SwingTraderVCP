@@ -19,6 +19,18 @@ interface ProposalDetailModalProps {
   onOpenChange: (open: boolean) => void
 }
 
+function asFiniteNumber(value: unknown): number | null {
+  if (value == null || value === "") return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function formatR(value: unknown): string | null {
+  const parsed = asFiniteNumber(value)
+  if (parsed == null) return null
+  return `${parsed.toFixed(2)}R`
+}
+
 export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDetailModalProps) {
   const [notes] = useState("")
   const recordDecision = useRecordProposalDecision()
@@ -28,6 +40,14 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
 
   if (!proposal) return null
   const activeProposal = detail ?? proposal
+  const geometry = activeProposal.geometry ?? {}
+  const t1R = formatR(geometry.t1_r)
+  const t2R = formatR(geometry.t2_r)
+  const t3R = formatR(geometry.t3_r)
+  const baseCeiling = asFiniteNumber(geometry.base_chase_ceiling)
+  const lockedCeiling = Number(activeProposal.chase_ceiling)
+  const ceilingTightened =
+    baseCeiling != null && Number.isFinite(lockedCeiling) && baseCeiling > lockedCeiling
 
   const isPending = activeProposal.status === "pending_approval"
   const isApproved = activeProposal.status === "approved"
@@ -92,7 +112,12 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
               <div className="text-[10px] text-muted-foreground uppercase">Pivot Entry</div>
               <div className="text-sm font-bold text-foreground">₹{Number(activeProposal.pivot_price).toFixed(2)}</div>
-              <div className="text-[9px] text-muted-foreground">Ceiling: ₹{Number(activeProposal.chase_ceiling).toFixed(2)}</div>
+              <div className="text-[9px] text-muted-foreground">Ceiling: ₹{lockedCeiling.toFixed(2)}</div>
+              {ceilingTightened && baseCeiling != null && (
+                <div className="text-[9px] text-amber-400">
+                  Tightened from ₹{baseCeiling.toFixed(2)} to keep T1 ≥ 1R
+                </div>
+              )}
             </div>
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
               <div className="text-[10px] text-muted-foreground uppercase">Structural Stop</div>
@@ -100,9 +125,28 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
               <div className="text-[9px] text-rose-400/80">-{Number(activeProposal.stop_distance_pct).toFixed(2)}% Risk</div>
             </div>
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
-              <div className="text-[10px] text-muted-foreground uppercase">Target 1 (1R)</div>
+              <div className="text-[10px] text-muted-foreground uppercase">Target 1</div>
               <div className="text-sm font-bold text-emerald-400">₹{Number(activeProposal.t1).toFixed(2)}</div>
-              <div className="text-[9px] text-muted-foreground">T2: ₹{Number(activeProposal.t2).toFixed(2)} | T3: ₹{Number(activeProposal.t3).toFixed(2)}</div>
+              <div className="text-[9px] text-muted-foreground">{t1R ? `${t1R} at ceiling` : "Structural objective"}</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
+              <div className="text-[10px] text-muted-foreground uppercase">Target 2</div>
+              <div className="text-sm font-bold text-foreground">₹{Number(activeProposal.t2).toFixed(2)}</div>
+              <div className="text-[9px] text-muted-foreground">{t2R ?? "Structural objective"}</div>
+              {geometry.t2_below_2r && (
+                <div className="text-[9px] text-amber-400">Below 2R — audit flag, not a reject</div>
+              )}
+            </div>
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
+              <div className="text-[10px] text-muted-foreground uppercase">Target 3</div>
+              <div className="text-sm font-bold text-foreground">₹{Number(activeProposal.t3).toFixed(2)}</div>
+              <div className="text-[9px] text-muted-foreground">{t3R ?? "Structural objective"}</div>
+              {geometry.t3_below_3r && (
+                <div className="text-[9px] text-amber-400">Below 3R — audit flag, not a reject</div>
+              )}
             </div>
           </div>
 

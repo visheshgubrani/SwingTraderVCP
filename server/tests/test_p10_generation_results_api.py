@@ -56,7 +56,7 @@ class ProposalGenerationResultsApiTests(unittest.IsolatedAsyncioTestCase):
             "renderer_version": "p10_mplfinance_v3",
             "prompt_version": "p10_vcp_proposal_v3",
             "schema_version": "gemini_vcp_proposal_output_v3",
-            "geometry_version": "p10_geometry_resistance_zones_v3",
+            "geometry_version": "p10_geometry_rr_adjusted_chase_v4",
             "model": "google/gemini-3.7-flash",
             "risk_policy_version": 1,
             "context_image_hash": "context",

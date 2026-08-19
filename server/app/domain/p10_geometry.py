@@ -47,6 +47,16 @@ class ProposalGeometry:
     r_distance: Decimal
     is_valid: bool
     rejection_reason: str | None = None
+    base_chase_ceiling: Decimal | None = None
+    rr_adjusted_chase_ceiling: Decimal | None = None
+    r_at_pivot: Decimal | None = None
+    r_at_base_chase_ceiling: Decimal | None = None
+    final_r_at_chase_ceiling: Decimal | None = None
+    t1_r: Decimal | None = None
+    t2_r: Decimal | None = None
+    t3_r: Decimal | None = None
+    t2_below_2r: bool = False
+    t3_below_3r: bool = False
 
 
 @dataclass(frozen=True)
@@ -481,9 +491,10 @@ def calculate_chase_ceiling(
     initial_stop: Decimal,
     tick_size: Decimal = DEFAULT_TICK_SIZE,
 ) -> tuple[Decimal, Decimal]:
-    """Maximum acceptable entry = pivot + min(2% of pivot, 0.5 * (pivot - initial_stop)).
-    
-    Returns (chase_ceiling, r_distance).
+    """Base maximum acceptable entry = pivot + min(2% of pivot, 0.5 * (pivot - initial_stop)).
+
+    Returns (base_chase_ceiling, pivot_r_distance). R:R may later shrink this
+    ceiling so T1 still provides at least 1R at the worst allowed fill.
     """
     r_distance = pivot - initial_stop
     if r_distance <= 0:
@@ -496,6 +507,68 @@ def calculate_chase_ceiling(
     return floor_to_tick(raw_ceiling, tick_size), r_distance
 
 
+def _r_multiple(target: Decimal, entry: Decimal, stop: Decimal) -> Decimal | None:
+    risk = entry - stop
+    if risk <= 0:
+        return None
+    return (target - entry) / risk
+
+
+def adjust_chase_ceiling_for_t1_rr(
+    pivot: Decimal,
+    initial_stop: Decimal,
+    t1: Decimal,
+    base_ceiling: Decimal,
+    tick_size: Decimal = DEFAULT_TICK_SIZE,
+) -> Decimal:
+    """Shrink the base chase ceiling so T1 still provides at least 1R.
+
+    `max_entry_for_1R = (T1 + SL) / 2`. Never raise the ceiling, and never go
+    below pivot; a pivot that still fails 1R is rejected by the caller.
+    """
+    max_entry = floor_to_tick((t1 + initial_stop) / Decimal("2"), tick_size)
+    final = min(base_ceiling, max_entry)
+    if final < pivot:
+        return pivot
+    return final
+
+
+def entry_vwap_invalidates_t1_rr(
+    t1: Decimal,
+    entry_vwap: Decimal,
+    current_stop: Decimal,
+) -> bool:
+    """True when actual fill VWAP makes T1 provide less than 1R."""
+    r_distance = entry_vwap - current_stop
+    return r_distance > 0 and (t1 - entry_vwap) < r_distance
+
+
+def _rr_audit_fields(
+    pivot: Decimal,
+    initial_stop: Decimal,
+    base_ceiling: Decimal,
+    final_ceiling: Decimal,
+    t1: Decimal,
+    t2: Decimal,
+    t3: Decimal,
+) -> dict[str, Decimal | bool | None]:
+    t1_r = _r_multiple(t1, final_ceiling, initial_stop)
+    t2_r = _r_multiple(t2, final_ceiling, initial_stop)
+    t3_r = _r_multiple(t3, final_ceiling, initial_stop)
+    return {
+        "base_chase_ceiling": base_ceiling,
+        "rr_adjusted_chase_ceiling": final_ceiling,
+        "r_at_pivot": _r_multiple(t1, pivot, initial_stop),
+        "r_at_base_chase_ceiling": _r_multiple(t1, base_ceiling, initial_stop),
+        "final_r_at_chase_ceiling": t1_r,
+        "t1_r": t1_r,
+        "t2_r": t2_r,
+        "t3_r": t3_r,
+        "t2_below_2r": t2_r is not None and t2_r < Decimal("2"),
+        "t3_below_3r": t3_r is not None and t3_r < Decimal("3"),
+    }
+
+
 def validate_proposal_targets(
     pivot: Decimal,
     initial_stop: Decimal,
@@ -505,16 +578,11 @@ def validate_proposal_targets(
     t3: Decimal,
     tick_size: Decimal = DEFAULT_TICK_SIZE,
 ) -> tuple[bool, str | None]:
-    """Validates targets conservatively against chase ceiling and stop:
-    - T1 >= chase_ceiling + 1.0 * R (providing at least 1R from chase ceiling)
-    - T2 >= chase_ceiling + 2.0 * R (providing at least 2R from chase ceiling)
-    - T3 >= chase_ceiling + 3.0 * R (providing at least 3R from chase ceiling)
-    - Strictly ordered: chase_ceiling < T1 < T2 < T3
-    - Tick snapped and valid.
+    """Validate structural targets against the final chase ceiling.
+
+    T1 must provide at least 1R from the (possibly R:R-shrunk) ceiling.
+    T2/T3 must be strictly ordered and tick-valid; they are not hard 2R/3R gates.
     """
-    # The approved entry can fill anywhere through the chase ceiling.  The
-    # conservative unit of risk is therefore worst-entry minus stop, not
-    # pivot minus stop.
     r = chase_ceiling - initial_stop
     if r <= 0:
         return False, "Initial stop is at or above pivot price"
@@ -523,22 +591,16 @@ def validate_proposal_targets(
     if stop_pct > MAX_STOP_DISTANCE_PCT:
         return False, f"Stop distance {stop_pct:.2f}% exceeds maximum allowable 8.0%"
 
-    if not (pivot < chase_ceiling <= t1 < t2 < t3):
-        return False, f"Targets must be strictly ordered: pivot ({pivot}) < ceiling ({chase_ceiling}) <= T1 ({t1}) < T2 ({t2}) < T3 ({t3})"
+    if not (pivot <= chase_ceiling < t1 < t2 < t3):
+        return False, (
+            f"Targets must be strictly ordered: pivot ({pivot}) <= ceiling "
+            f"({chase_ceiling}) < T1 ({t1}) < T2 ({t2}) < T3 ({t3})"
+        )
 
-    # Conservative R:R check from chase ceiling
     r1 = t1 - chase_ceiling
-    r2 = t2 - chase_ceiling
-    r3 = t3 - chase_ceiling
-
     if r1 < r:
         return False, f"T1 ({t1}) provides {r1 / r:.2f}R from chase ceiling, requires >= 1.0R"
-    if r2 < Decimal("2.0") * r:
-        return False, f"T2 ({t2}) provides {r2 / r:.2f}R from chase ceiling, requires >= 2.0R"
-    if r3 < Decimal("3.0") * r:
-        return False, f"T3 ({t3}) provides {r3 / r:.2f}R from chase ceiling, requires >= 3.0R"
 
-    # Tick validity
     for name, target in [("T1", t1), ("T2", t2), ("T3", t3), ("Pivot", pivot), ("Stop", initial_stop)]:
         snapped = snap_to_tick(target, tick_size)
         if target != snapped:
@@ -586,7 +648,7 @@ def construct_and_validate_proposal(
             )
 
     stop = calculate_structural_stop(final_contraction_low, atr14, tick_size)
-    
+
     if stop >= pivot:
         return ProposalGeometry(
             atr14=atr14,
@@ -620,7 +682,13 @@ def construct_and_validate_proposal(
             rejection_reason=f"Stop distance {stop_dist_pct:.2f}% exceeds maximum 8.0%",
         )
 
-    ceiling, _ = calculate_chase_ceiling(pivot, stop, tick_size)
+    base_ceiling, _ = calculate_chase_ceiling(pivot, stop, tick_size)
+    ceiling = adjust_chase_ceiling_for_t1_rr(
+        pivot, stop, dec_t1, base_ceiling, tick_size
+    )
+    rr_fields = _rr_audit_fields(
+        pivot, stop, base_ceiling, ceiling, dec_t1, dec_t2, dec_t3
+    )
     valid, reason = validate_proposal_targets(
         pivot=pivot,
         initial_stop=stop,
@@ -643,4 +711,5 @@ def construct_and_validate_proposal(
         r_distance=r_distance,
         is_valid=valid,
         rejection_reason=reason,
+        **rr_fields,
     )

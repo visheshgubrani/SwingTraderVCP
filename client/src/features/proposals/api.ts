@@ -41,8 +41,22 @@ export interface TradeProposalItem {
     contraction_anchors?: Array<{ date: string; price?: number; evidence?: string }>
   }
   geometry: {
-    atr14?: number
-    r_distance?: number
+    atr14?: number | string
+    r_distance?: number | string
+    pivot_r_distance?: string
+    worst_entry_r_distance?: string
+    base_chase_ceiling?: string
+    rr_adjusted_chase_ceiling?: string
+    r_at_pivot?: string
+    r_at_base_chase_ceiling?: string
+    final_r_at_chase_ceiling?: string
+    t1_r?: string
+    t2_r?: string
+    t3_r?: string
+    t2_below_2r?: boolean
+    t3_below_3r?: boolean
+    tick_size?: string
+    final_contraction_low?: string
   }
   context_image_hash: string | null
   detail_image_hash: string | null

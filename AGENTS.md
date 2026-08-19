@@ -342,11 +342,18 @@ persist or display provider `reasoning_details`. Only `verdict=valid` with
 
 - Initial structural stop = final-contraction low minus `0.25×ATR14`, snapped
   to the instrument tick. Reject stop distance above 8%.
-- Planned entry = pivot. Maximum acceptable entry (chase ceiling) =
-  `pivot + min(2% of pivot, 0.5 × (pivot - initial_stop))`.
-- Validate T1/T2/T3 conservatively from the chase ceiling and stop: at least
-  1R/2R/3R respectively, strictly ordered, positive, and tick-valid. Python
-  never repairs an AI target; one invalid target means no proposal.
+- Planned entry = pivot. The base chase ceiling is
+  `pivot + min(2% of pivot, 0.5 × (pivot - initial_stop))`, floored to tick.
+- Gemini's T1/T2/T3 are structural chart objectives. Python never repairs an
+  AI target.
+- Python may only shrink the chase ceiling so T1 still provides at least 1R
+  at the final ceiling: `max_entry_for_1R = (T1 + initial_stop) / 2`, then
+  `chase_ceiling = min(base_ceiling, floor_to_tick(max_entry_for_1R))`, never
+  below pivot. Reject only if even pivot cannot achieve 1R to T1, or if
+  prices fail tick or order checks
+  (`pivot <= chase_ceiling < T1 < T2 < T3`).
+- Persist T1/T2/T3 R multiples at the final chase ceiling. T2 below 2R or T3
+  below 3R is an audit/quality flag, not a rejection.
 - Gemini selects the template; Python maps it to maximum approved-risk shares:
 
 | Template | Risk by leg | Required relative volume |
@@ -543,9 +550,10 @@ lots for staged exits.
 
 - Use market/MPP for entries. Refuse submission when the fresh reference price
   is above the approved chase ceiling.
-- If actual entry VWAP exceeds the chase ceiling or makes the approved minimum
-  R:R invalid, send one idempotent full `invalid_fill_exit`. This is a thesis-
-  changing fill failure, not routine overshoot handling.
+- If actual entry VWAP exceeds the chase ceiling or makes T1 provide less
+  than 1R from that VWAP, send one idempotent full `invalid_fill_exit`. This
+  is a thesis-changing fill failure, not routine overshoot handling. T2/T3
+  R multiples do not invalidate a fill.
 - Otherwise calculate actual combined position risk and every notional cap.
 - First solve the common stop required to return risk to budget. For a long,
   the approved structural tightening corridor runs from the current stop up to
@@ -853,11 +861,13 @@ the phase table above is authoritative going forward.
 - Golden charts/source hashes: identical frozen inputs and versions generate
   identical packets; changed renderer/geometry versions cannot silently reuse.
 - Gemini schema: reject extra/missing fields, money fields, invalid anchors,
-  unsnappable dates, bad templates, unordered targets, and insufficient R:R.
-- Pure rules: geometry, ATR/tick snapping, chase ceiling, all template/relative-
-  volume mappings, Hold/Base/EMA21, add expiry, 25/25/25/25 apportionment, stop
-  ratchets, daily-loss accounting, P9 market/sector classification, and the
-  consecutive-stop circuit breaker.
+  unsnappable dates, bad templates, unordered targets, and T1 that cannot
+  provide 1R even at pivot.
+- Pure rules: geometry, ATR/tick snapping, chase ceiling including R:R
+  shrinkage to preserve 1R to T1, T2/T3 below 2R/3R accepted with flags, all
+  template/relative-volume mappings, Hold/Base/EMA21, add expiry,
+  25/25/25/25 apportionment, stop ratchets, daily-loss accounting, P9
+  market/sector classification, and the consecutive-stop circuit breaker.
 - Five-minute replay: first-15-minute exclusion, robust profile, two-bar
   confirmation, stale volume, reconciliation drift, lost capacity, and fresh
   re-trigger behavior.

@@ -41,6 +41,7 @@ from app.domain.p10_geometry import (
     CandleData,
     calculate_chase_ceiling,
     compute_atr14,
+    entry_vwap_invalidates_t1_rr,
 )
 from app.domain.p10_triggers import (
     DailySessionBar,
@@ -1631,14 +1632,10 @@ async def recheck_filled_entry_risk(redis: aioredis.Redis) -> int:
                     cluster_limit,
                 ),
             )
-            r_distance = vwap - current_stop
-            rr_invalid = (
-                r_distance > 0
-                and (
-                    Decimal(row["t1"]) - vwap < r_distance
-                    or Decimal(row["t2"]) - vwap < Decimal("2") * r_distance
-                    or Decimal(row["t3"]) - vwap < Decimal("3") * r_distance
-                )
+            rr_invalid = entry_vwap_invalidates_t1_rr(
+                t1=Decimal(row["t1"]),
+                entry_vwap=vwap,
+                current_stop=current_stop,
             )
             generation = int(
                 (

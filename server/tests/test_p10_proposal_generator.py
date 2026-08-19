@@ -135,6 +135,66 @@ class TestProposalGenerator(unittest.TestCase):
         )
         self.assertTrue(len(proposal.proposal["proposal_hash"]) == 64)
 
+    def test_generate_trade_proposal_accepts_structural_t2_t3_below_hard_rr(self):
+        atr14 = compute_atr14(self.candles)
+        stop = calculate_structural_stop(Decimal(str(self.low_candle.low)), atr14)
+        base_chase, _ = calculate_chase_ceiling(self.pivot, stop)
+        t1 = (self.pivot * 2) - stop
+        t2 = t1 + Decimal("0.50")
+        t3 = t1 + Decimal("1.00")
+        ai_output = GeminiVcpProposalOutput(
+            verdict="valid",
+            contradicts_scanner=False,
+            confidence=0.85,
+            contraction_anchors=[
+                {
+                    "date": self.low_candle.date,
+                    "price": self.low_candle.low,
+                    "anchor_type": "contraction_low",
+                },
+                {
+                    "date": self.resistance_candle.date,
+                    "price": self.resistance_candle.high,
+                    "anchor_type": "resistance",
+                },
+            ],
+            pivot_price=self.pivot,
+            t1=t1,
+            t2=t2,
+            t3=t3,
+            entry_template=EntryTemplate.TWO_LEG,
+            base_tightness="solid",
+            dry_up_quality="drying_up",
+            resistance_room="clear",
+            evidence_summary="Structural targets with T2/T3 below historic 2R/3R gates.",
+        )
+
+        proposal = generate_trade_proposal_from_analysis(
+            symbol="TESTSTOCK",
+            as_of_date=dt.date(2026, 8, 17),
+            screening_result_id="res-123",
+            instrument_id="inst-123",
+            candles=self.candles,
+            ai_output=ai_output,
+            rendered_charts=self.charts,
+            model="google/gemini-3.7-flash",
+            approved_risk_budget_amount=Decimal("1000"),
+            generated_at=dt.datetime(2026, 8, 18, 8, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+        )
+
+        self.assertTrue(proposal.accepted, proposal.rejection_message)
+        self.assertEqual(proposal.proposal["chase_ceiling"], self.pivot)
+        geometry = proposal.proposal["geometry"]
+        self.assertEqual(Decimal(geometry["base_chase_ceiling"]), base_chase)
+        self.assertEqual(Decimal(geometry["rr_adjusted_chase_ceiling"]), self.pivot)
+        self.assertEqual(Decimal(geometry["t1_r"]), Decimal("1"))
+        self.assertTrue(geometry["t2_below_2r"])
+        self.assertTrue(geometry["t3_below_3r"])
+        self.assertEqual(
+            proposal.proposal["geometry_version"],
+            "p10_geometry_rr_adjusted_chase_v4",
+        )
+
     def test_generate_trade_proposal_rejects_contradicting_or_invalid(self):
         ai_output = GeminiVcpProposalOutput(
             verdict="invalid",

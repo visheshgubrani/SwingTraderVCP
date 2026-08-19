@@ -27,6 +27,7 @@ from app.domain.p10_geometry import (
     ground_pivot_to_resistance_zones,
     MAX_STOP_DISTANCE_PCT,
     PivotResistanceGrounding,
+    ProposalGeometry,
     ResistanceZone,
     ValidatedPatternAnchor,
 )
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
 PROMPT_VERSION = "p10_vcp_proposal_v4"
 SCHEMA_VERSION = "gemini_vcp_proposal_output_v3"
-GEOMETRY_VERSION = "p10_geometry_resistance_zones_v3"
+GEOMETRY_VERSION = "p10_geometry_rr_adjusted_chase_v4"
 
 
 GEMINI_PROPOSAL_SYSTEM_PROMPT = """You are a chart-pattern reader specializing in Mark Minervini's Volatility Contraction Pattern (VCP).
@@ -200,6 +201,36 @@ def _serialize_pivot_grounding(
         "audit_flags": list(grounding.audit_flags),
         "is_grounded": grounding.is_grounded,
         "subreason": grounding.subreason,
+    }
+
+
+def _decimal_str(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _serialize_rr_audit(geom: ProposalGeometry) -> dict[str, Any]:
+    return {
+        "base_chase_ceiling": _decimal_str(geom.base_chase_ceiling),
+        "rr_adjusted_chase_ceiling": _decimal_str(geom.rr_adjusted_chase_ceiling),
+        "r_at_pivot": _decimal_str(geom.r_at_pivot),
+        "r_at_base_chase_ceiling": _decimal_str(geom.r_at_base_chase_ceiling),
+        "final_r_at_chase_ceiling": _decimal_str(geom.final_r_at_chase_ceiling),
+        "t1_r": _decimal_str(geom.t1_r),
+        "t2_r": _decimal_str(geom.t2_r),
+        "t3_r": _decimal_str(geom.t3_r),
+        "t2_below_2r": geom.t2_below_2r,
+        "t3_below_3r": geom.t3_below_3r,
+        "target_r_multiples": (
+            {
+                "t1": _decimal_str(geom.t1_r),
+                "t2": _decimal_str(geom.t2_r),
+                "t3": _decimal_str(geom.t3_r),
+            }
+            if geom.t1_r is not None
+            else None
+        ),
     }
 
 
@@ -542,6 +573,7 @@ def generate_trade_proposal_from_analysis(
             if chase_ceiling_evaluated
             else None
         )
+        rr_audit = _serialize_rr_audit(geom) if chase_ceiling_evaluated else {}
         return _rejected(
             "proposal_geometry_invalid",
             geom.rejection_reason or "Deterministic proposal geometry validation failed.",
@@ -564,27 +596,10 @@ def generate_trade_proposal_from_analysis(
                         if worst_entry_r is not None
                         else None
                     ),
-                    "target_r_multiples": (
-                        {
-                            "t1": str(
-                                (ai_output.t1 - geom.chase_ceiling)
-                                / worst_entry_r
-                            ),
-                            "t2": str(
-                                (ai_output.t2 - geom.chase_ceiling)
-                                / worst_entry_r
-                            ),
-                            "t3": str(
-                                (ai_output.t3 - geom.chase_ceiling)
-                                / worst_entry_r
-                            ),
-                        }
-                        if worst_entry_r is not None and worst_entry_r > 0
-                        else None
-                    ),
                     "t1": str(ai_output.t1),
                     "t2": str(ai_output.t2),
                     "t3": str(ai_output.t3),
+                    **rr_audit,
                 },
                 "pivot_grounding": pivot_grounding_payload,
             },
@@ -660,6 +675,7 @@ def generate_trade_proposal_from_analysis(
             "anchor_merge_tolerance": str(tolerance),
             "pivot_grounding": pivot_grounding_payload,
             "tick_size": str(tick_size),
+            **_serialize_rr_audit(geom),
         },
         "context_image_hash": rendered_charts.context_hash,
         "detail_image_hash": rendered_charts.detail_hash,

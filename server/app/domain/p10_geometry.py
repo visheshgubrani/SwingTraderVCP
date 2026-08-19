@@ -252,11 +252,11 @@ def validate_proposal_targets(
     r3 = t3 - chase_ceiling
 
     if r1 < r:
-        return False, f"T1 ({t1}) provides {r1:.2f}R from chase ceiling, requires >= 1.0R ({r:.2f})"
+        return False, f"T1 ({t1}) provides {r1 / r:.2f}R from chase ceiling, requires >= 1.0R"
     if r2 < Decimal("2.0") * r:
-        return False, f"T2 ({t2}) provides {r2 / r:.2f}R from chase ceiling, requires >= 2.0R ({2 * r:.2f})"
+        return False, f"T2 ({t2}) provides {r2 / r:.2f}R from chase ceiling, requires >= 2.0R"
     if r3 < Decimal("3.0") * r:
-        return False, f"T3 ({t3}) provides {r3 / r:.2f}R from chase ceiling, requires >= 3.0R ({3 * r:.2f})"
+        return False, f"T3 ({t3}) provides {r3 / r:.2f}R from chase ceiling, requires >= 3.0R"
 
     # Tick validity
     for name, target in [("T1", t1), ("T2", t2), ("T3", t3), ("Pivot", pivot), ("Stop", initial_stop)]:

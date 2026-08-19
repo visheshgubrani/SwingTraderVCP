@@ -236,7 +236,11 @@ class TestProposalVisionRequest(unittest.TestCase):
         content = request["messages"][1]["content"]
         user_text = content[0]["text"]
         self.assertIn("2026-08-18,100.00,105.00,95.00,102.00,1000,1.0", user_text)
-        self.assertIn("contraction_low.price", request["messages"][0]["content"])
+        system_prompt = request["messages"][0]["content"]
+        self.assertIn("contraction_low.price", system_prompt)
+        self.assertIn("measured-move / prior-swing / overhead-room", system_prompt)
+        self.assertIn("Do not set t1 at the pivot, the breakout tick, or the first nearby resistance", system_prompt)
+        self.assertIn("t1 < t2 < t3", system_prompt)
         self.assertEqual(request["provider"], {"require_parameters": True, "data_collection": "deny"})
         self.assertEqual(request["reasoning"], {"effort": "high", "exclude": True})
         self.assertFalse(request["stream"])

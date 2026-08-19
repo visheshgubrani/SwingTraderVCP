@@ -34,7 +34,7 @@ from app.services.proposal_renderer import RenderedProposalCharts
 
 logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
-PROMPT_VERSION = "p10_vcp_proposal_v3"
+PROMPT_VERSION = "p10_vcp_proposal_v4"
 SCHEMA_VERSION = "gemini_vcp_proposal_output_v3"
 GEOMETRY_VERSION = "p10_geometry_three_windows_v2"
 
@@ -47,7 +47,7 @@ Your task is to identify whether a high-conviction Volatility Contraction Patter
 Requirements:
 1. Verdict: 'valid' only if there is a clear prior uptrend, sequential contracting waves (2 to 4 contractions), volume dry-up near the pivot, and overhead resistance room. Otherwise 'invalid' or 'uncertain'.
 2. Contradicts Scanner: true if your chart read contradicts a constructive VCP breakout thesis.
-3. The OHLCV table is authoritative for exact dated prices. Every cited date must appear in it and on the detail chart. For an anchor, use the exact candle field: contraction_low.price is that date's daily Low; contraction_high.price and resistance.price are that date's daily High. Do not estimate anchor prices from pixels or use Close for an anchor. Identify the exact pivot breakout price and exactly 3 technical target prices (t1, t2, t3). All prices must align to the instrument tick shown in the request.
+3. The OHLCV table is authoritative for exact dated prices. Every cited date must appear in it and on the detail chart. For an anchor, use the exact candle field: contraction_low.price is that date's daily Low; contraction_high.price and resistance.price are that date's daily High. Do not estimate anchor prices from pixels or use Close for an anchor. Identify the exact pivot breakout price and exactly 3 strictly increasing, tick-aligned technical targets t1 < t2 < t3. Those targets are successive upside measured-move / prior-swing / overhead-room objectives in the prior-uptrend direction. Do not set t1 at the pivot, the breakout tick, or the first nearby resistance just above the base high. t1 must be a full last-contraction measured move or a prior major swing high with clear overhead room; t2 and t3 must be further expansions of that same upside structure. All prices must align to the instrument tick shown in the request.
 4. Entry Template: Choose the appropriate entry template based on pattern tightness and conviction:
    - 'single' (Tightest bases with maximum conviction, single leg entry)
    - 'two_leg' (Standard VCP base, 2-leg entry)

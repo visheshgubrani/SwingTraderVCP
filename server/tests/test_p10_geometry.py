@@ -74,15 +74,19 @@ class TestP10Geometry(unittest.TestCase):
 
     def test_validate_proposal_targets_rejects_insufficient_rr(self):
         pivot = Decimal("500.00")
-        stop = Decimal("475.00")  # R = 25
+        stop = Decimal("475.00")  # pivot R = 25; worst-fill R = ceiling - stop = 35
         ceiling = Decimal("510.00")
-        t1 = Decimal("525.00")  # Only 15 from ceiling (< 25)
+        t1 = Decimal("525.00")  # 15 above ceiling => 15/35 = 0.43R
         t2 = Decimal("570.00")
         t3 = Decimal("600.00")
 
         valid, reason = validate_proposal_targets(pivot, stop, ceiling, t1, t2, t3)
         self.assertFalse(valid)
+        self.assertIsNotNone(reason)
         self.assertIn("T1", reason)
+        self.assertIn("0.43R", reason)
+        self.assertIn("requires >= 1.0R", reason)
+        self.assertNotIn("15.00R", reason)
 
     def test_construct_and_validate_proposal_rejects_wide_stop(self):
         pivot = Decimal("500.00")

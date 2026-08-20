@@ -1,14 +1,16 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useNavigate, useParams } from "react-router"
 import {
   ArrowLeftIcon,
   CheckCircle2Icon,
   CrosshairIcon,
   CalculatorIcon,
+  Edit3Icon,
   LayersIcon,
-  LockIcon,
   Maximize2Icon,
+  RotateCcwIcon,
   ShieldAlertIcon,
+  SlidersIcon,
   SparklesIcon,
   TargetIcon,
   TrendingUpIcon,
@@ -18,11 +20,13 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import {
   useTradeProposal,
   useRecordProposalDecision,
   useP10Rollout,
+  type DecisionPayload,
 } from "./api"
 
 function asFiniteNumber(value: unknown): number | null {
@@ -44,10 +48,31 @@ export function ProposalDetailPage() {
   const [activeChartTab, setActiveChartTab] = useState<"both" | "detail" | "context">("both")
   const [imageModal, setImageModal] = useState<string | null>(null)
 
+  // Interactive Level Customizer State
+  const [customPivot, setCustomPivot] = useState<string>("")
+  const [customStop, setCustomStop] = useState<string>("")
+  const [customT1, setCustomT1] = useState<string>("")
+  const [customT2, setCustomT2] = useState<string>("")
+  const [customT3, setCustomT3] = useState<string>("")
+  const [customTemplate, setCustomTemplate] = useState<string>("")
+  const [customLeg2Price, setCustomLeg2Price] = useState<string>("")
+  const [isCustomizing, setIsCustomizing] = useState<boolean>(false)
+
   const { data: proposal, isLoading, error } = useTradeProposal(proposalId ?? null)
   const recordDecision = useRecordProposalDecision()
   const rollout = useP10Rollout()
   const approvalsAllowed = rollout.data?.approvals_allowed === true
+
+  useEffect(() => {
+    if (proposal && !customPivot) {
+      setCustomPivot(String(proposal.pivot_price))
+      setCustomStop(String(proposal.initial_stop))
+      setCustomT1(String(proposal.t1))
+      setCustomT2(String(proposal.t2))
+      setCustomT3(String(proposal.t3))
+      setCustomTemplate(proposal.entry_template)
+    }
+  }, [proposal])
 
   if (isLoading) {
     return (
@@ -90,16 +115,53 @@ export function ProposalDetailPage() {
 
   const isPending = proposal.status === "pending_approval"
   const isApproved = proposal.status === "approved"
+  const activePivot = customPivot ? Number(customPivot) : Number(proposal.pivot_price)
+  const activeStop = customStop ? Number(customStop) : Number(proposal.initial_stop)
+  const activeT1 = customT1 ? Number(customT1) : Number(proposal.t1)
+  const activeT2 = customT2 ? Number(customT2) : Number(proposal.t2)
+  const activeT3 = customT3 ? Number(customT3) : Number(proposal.t3)
+
+  const liveStopDistPct = activePivot > 0 && activeStop > 0 ? ((activePivot - activeStop) / activePivot) * 100 : 0
+  const liveRDistance = activePivot - activeStop
+  const liveT1R = liveRDistance > 0 && activeT1 > activePivot ? ((activeT1 - activePivot) / liveRDistance).toFixed(2) : null
+  const liveT2R = liveRDistance > 0 && activeT2 > activePivot ? ((activeT2 - activePivot) / liveRDistance).toFixed(2) : null
+  const liveT3R = liveRDistance > 0 && activeT3 > activePivot ? ((activeT3 - activePivot) / liveRDistance).toFixed(2) : null
+  const riskBudget = Number(proposal.approved_risk_budget_amount ?? 0)
+  const liveShares = liveRDistance > 0 && riskBudget > 0 ? Math.floor(riskBudget / liveRDistance) : 0
 
   const handleDecision = async (decision: "approved" | "rejected") => {
     try {
+      const payload: DecisionPayload = {
+        decision,
+        expected_proposal_hash: proposal.proposal_hash,
+        notes: notes.trim() || undefined,
+      }
+      if (decision === "approved" && isCustomizing) {
+        if (customPivot && Number(customPivot) !== Number(proposal.pivot_price)) {
+          payload.adjusted_pivot_price = Number(customPivot)
+        }
+        if (customStop && Number(customStop) !== Number(proposal.initial_stop)) {
+          payload.adjusted_initial_stop = Number(customStop)
+        }
+        if (customT1 && Number(customT1) !== Number(proposal.t1)) {
+          payload.adjusted_t1 = Number(customT1)
+        }
+        if (customT2 && Number(customT2) !== Number(proposal.t2)) {
+          payload.adjusted_t2 = Number(customT2)
+        }
+        if (customT3 && Number(customT3) !== Number(proposal.t3)) {
+          payload.adjusted_t3 = Number(customT3)
+        }
+        if (customTemplate && customTemplate !== proposal.entry_template) {
+          payload.adjusted_entry_template = customTemplate as any
+        }
+        if (customLeg2Price) {
+          payload.adjusted_leg2_price = Number(customLeg2Price)
+        }
+      }
       await recordDecision.mutateAsync({
         id: proposal.id,
-        payload: {
-          decision,
-          expected_proposal_hash: proposal.proposal_hash,
-          notes: notes.trim() || undefined,
-        },
+        payload,
       })
     } catch (err: any) {
       alert(`Decision error: ${err.message}`)
@@ -109,6 +171,7 @@ export function ProposalDetailPage() {
   const templateColors: Record<string, string> = {
     single: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
     two_leg: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    two_leg_staged: "bg-cyan-500/10 text-cyan-400 border-cyan-500/20",
     three_leg_front: "bg-purple-500/10 text-purple-400 border-purple-500/20",
     three_leg_balanced: "bg-amber-500/10 text-amber-400 border-amber-500/20",
   }
@@ -254,28 +317,220 @@ export function ProposalDetailPage() {
           </div>
         </div>
 
-        {/* Approval Action Box */}
+        {/* Interactive Customizer & Human Approval Checkpoint */}
         {isPending && (
-          <div className="rounded-xl border border-primary/30 bg-primary/5 p-4 shadow-sm">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="rounded-xl border border-primary/40 bg-card p-4 shadow-sm space-y-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-border/50 pb-3">
               <div>
                 <div className="flex items-center gap-2 text-sm font-bold text-foreground">
-                  <LockIcon className="h-4 w-4 text-primary" />
-                  Human Approval Checkpoint
+                  <SlidersIcon className="h-4 w-4 text-primary" />
+                  Interactive Trade Plan & Price Levels
                 </div>
-                <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-muted-foreground">
-                  Approval arms <strong>Leg 1</strong> for session <strong>{proposal.entry_session_date}</strong>.
-                  Accepts a maximum risk budget of <strong className="text-foreground">₹{Number(proposal.approved_risk_budget_amount ?? 0).toFixed(2)}</strong>.
-                  Exact quantity is sized from live broker equity at trigger time under PG advisory lock.
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Review AI suggested levels, or fine-tune Entry (Cheat Pivot vs Base Breakout), Stop Loss, and Targets before arming automated execution.
                 </p>
                 {!approvalsAllowed && (
-                  <p className="mt-2 text-[10px] text-amber-400">
+                  <p className="mt-1 text-[10px] text-amber-400">
                     Shadow stage active: Review or reject only. Promote rollout stage to Paper before approving live trades.
                   </p>
                 )}
               </div>
 
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex items-center gap-2">
+                <Button
+                  variant={isCustomizing ? "default" : "outline"}
+                  size="xs"
+                  className="gap-1.5"
+                  onClick={() => setIsCustomizing(!isCustomizing)}
+                >
+                  <Edit3Icon className="h-3 w-3" />
+                  {isCustomizing ? "Customizing Active" : "Customize Levels"}
+                </Button>
+                {isCustomizing && (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="gap-1 text-muted-foreground hover:text-foreground"
+                    onClick={() => {
+                      setCustomPivot(String(proposal.pivot_price))
+                      setCustomStop(String(proposal.initial_stop))
+                      setCustomT1(String(proposal.t1))
+                      setCustomT2(String(proposal.t2))
+                      setCustomT3(String(proposal.t3))
+                      setCustomTemplate(proposal.entry_template)
+                      setCustomLeg2Price("")
+                      setIsCustomizing(false)
+                    }}
+                  >
+                    <RotateCcwIcon className="h-3 w-3" /> Reset to AI
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {/* Customizer Form Grid */}
+            {isCustomizing && (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 bg-muted/10 p-3 rounded-lg border border-border/40">
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
+                    Leg 1 Entry Pivot (₹)
+                  </label>
+                  <Input
+                    type="number"
+                    step="0.05"
+                    value={customPivot}
+                    onChange={(e) => setCustomPivot(e.target.value)}
+                    className="h-8 font-mono text-xs"
+                    placeholder="Pivot price"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[10px] uppercase font-semibold text-muted-foreground">
+                      Initial Stop Loss (₹)
+                    </label>
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const p = Number(customPivot) || Number(proposal.pivot_price)
+                          setCustomStop((p * 0.995).toFixed(2))
+                        }}
+                        className="text-[9px] px-1 py-0.5 rounded bg-muted hover:bg-muted/80 text-muted-foreground"
+                      >
+                        -0.5%
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const p = Number(customPivot) || Number(proposal.pivot_price)
+                          setCustomStop((p * 0.99).toFixed(2))
+                        }}
+                        className="text-[9px] px-1 py-0.5 rounded bg-muted hover:bg-muted/80 text-muted-foreground"
+                      >
+                        -1.0%
+                      </button>
+                    </div>
+                  </div>
+                  <Input
+                    type="number"
+                    step="0.05"
+                    value={customStop}
+                    onChange={(e) => setCustomStop(e.target.value)}
+                    className="h-8 font-mono text-xs"
+                    placeholder="Stop loss price"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
+                    Execution Template
+                  </label>
+                  <select
+                    value={customTemplate}
+                    onChange={(e) => setCustomTemplate(e.target.value)}
+                    className="w-full h-8 rounded-md border border-input bg-background px-2 text-xs font-mono text-foreground"
+                  >
+                    <option value="single">Single Leg (100%)</option>
+                    <option value="two_leg_staged">2-Leg Staged (Cheat 50% + Breakout 50%)</option>
+                    <option value="two_leg">2-Leg Standard (60% / 40%)</option>
+                    <option value="three_leg_front">3-Leg Front (50% / 30% / 20%)</option>
+                    <option value="three_leg_balanced">3-Leg Balanced (40% / 30% / 30%)</option>
+                  </select>
+                </div>
+
+                {customTemplate === "two_leg_staged" && (
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-semibold text-muted-foreground">
+                      Leg 2 Breakout Add (₹)
+                    </label>
+                    <Input
+                      type="number"
+                      step="0.05"
+                      value={customLeg2Price}
+                      onChange={(e) => setCustomLeg2Price(e.target.value)}
+                      className="h-8 font-mono text-xs"
+                      placeholder="Base Breakout price"
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
+                    Target 1 (₹)
+                  </label>
+                  <Input
+                    type="number"
+                    step="0.05"
+                    value={customT1}
+                    onChange={(e) => setCustomT1(e.target.value)}
+                    className="h-8 font-mono text-xs"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
+                    Target 2 (₹)
+                  </label>
+                  <Input
+                    type="number"
+                    step="0.05"
+                    value={customT2}
+                    onChange={(e) => setCustomT2(e.target.value)}
+                    className="h-8 font-mono text-xs"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
+                    Target 3 (₹)
+                  </label>
+                  <Input
+                    type="number"
+                    step="0.05"
+                    value={customT3}
+                    onChange={(e) => setCustomT3(e.target.value)}
+                    className="h-8 font-mono text-xs"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Live Metrics Feedback */}
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-muted/20 p-3 rounded-lg border border-border/30 text-[11px]">
+              <div className="flex items-center gap-4">
+                <div>
+                  <span className="text-muted-foreground">Stop Distance: </span>
+                  <strong className={Number(liveStopDistPct) <= 8 && Number(liveStopDistPct) > 0 ? "text-emerald-400" : "text-destructive"}>
+                    {Number(liveStopDistPct).toFixed(2)}%
+                  </strong>
+                  {Number(liveStopDistPct) > 8 && (
+                    <span className="ml-1 text-[10px] text-destructive">(Exceeds 8% limit!)</span>
+                  )}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Est. Position Sizing: </span>
+                  <strong className="text-foreground">{liveShares} shares</strong>
+                  <span className="text-muted-foreground"> (~₹{(liveShares * Number(activePivot)).toLocaleString("en-IN")})</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">T1 R:R: </span>
+                  <strong className={Number(liveT1R ?? 0) >= 1 ? "text-emerald-400" : "text-amber-400"}>
+                    {liveT1R ? `${liveT1R}R` : "—"}
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">T2: </span>
+                  <strong className="text-foreground">{liveT2R ? `${liveT2R}R` : "—"}</strong>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">T3: </span>
+                  <strong className="text-foreground">{liveT3R ? `${liveT3R}R` : "—"}</strong>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
                 <Button
                   variant="destructive"
                   size="sm"
@@ -289,10 +544,11 @@ export function ProposalDetailPage() {
                   variant="default"
                   size="sm"
                   className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold"
-                  disabled={recordDecision.isPending || !approvalsAllowed}
+                  disabled={recordDecision.isPending || !approvalsAllowed || Number(liveStopDistPct) > 8 || Number(liveStopDistPct) <= 0}
                   onClick={() => handleDecision("approved")}
                 >
-                  <CheckCircle2Icon className="mr-1.5 h-3.5 w-3.5" /> Approve & Arm Leg 1
+                  <CheckCircle2Icon className="mr-1.5 h-3.5 w-3.5" />
+                  {isCustomizing ? "Approve & Arm Custom Plan" : "Approve & Arm Leg 1"}
                 </Button>
               </div>
             </div>

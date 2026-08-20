@@ -73,6 +73,7 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
   const templateColors: Record<string, string> = {
     single: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
     two_leg: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    two_leg_staged: "bg-cyan-500/10 text-cyan-400 border-cyan-500/20",
     three_leg_front: "bg-purple-500/10 text-purple-400 border-purple-500/20",
     three_leg_balanced: "bg-amber-500/10 text-amber-400 border-amber-500/20",
   }

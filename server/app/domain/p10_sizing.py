@@ -16,6 +16,7 @@ from app.domain.p10_geometry import DEFAULT_TICK_SIZE, floor_to_tick
 class EntryTemplate(str, Enum):
     SINGLE = "single"
     TWO_LEG = "two_leg"
+    TWO_LEG_STAGED = "two_leg_staged"
     THREE_LEG_FRONT = "three_leg_front"
     THREE_LEG_BALANCED = "three_leg_balanced"
 
@@ -29,6 +30,11 @@ TEMPLATE_CONFIG = {
     EntryTemplate.TWO_LEG: {
         "leg_allocations": [Decimal("0.60"), Decimal("0.40")],
         "relative_volume_threshold": Decimal("1.75"),
+        "leg_count": 2,
+    },
+    EntryTemplate.TWO_LEG_STAGED: {
+        "leg_allocations": [Decimal("0.50"), Decimal("0.50")],
+        "relative_volume_threshold": Decimal("1.50"),
         "leg_count": 2,
     },
     EntryTemplate.THREE_LEG_FRONT: {

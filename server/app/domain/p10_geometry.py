@@ -67,11 +67,24 @@ class ChartGeometryAnchor:
 
 
 @dataclass(frozen=True)
+class VcpContractionWave:
+    index: int
+    high_date: str
+    high_price: Decimal
+    low_date: str
+    low_price: Decimal
+    depth_pct: Decimal
+
+
+@dataclass(frozen=True)
 class DeterministicChartGeometry:
     anchors: tuple[ChartGeometryAnchor, ...]
     resistance: Decimal
     final_contraction_low: Decimal
     initial_stop: Decimal
+    cheat_pivot: Decimal | None = None
+    cheat_stop: Decimal | None = None
+    contractions: tuple[VcpContractionWave, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -402,75 +415,144 @@ def compute_atr14(candles: Sequence[CandleData]) -> Decimal:
     return Decimal(str(round(atr, 4)))
 
 
+def detect_vcp_swings_and_contractions(
+    candles: Sequence[CandleData],
+    *,
+    lookback_sessions: int = 60,
+    fractal_k: int = 2,
+    tick_size: Decimal = DEFAULT_TICK_SIZE,
+) -> tuple[tuple[ChartGeometryAnchor, ...], tuple[VcpContractionWave, ...], Decimal, Decimal, Decimal | None, Decimal | None]:
+    """Detect dynamic VCP swing peaks/troughs and contracting waves.
+
+    Identifies the base peak and following alternating contractions (C1, C2, C3)
+    with contracting depths and micro/cheat pivots.
+    """
+    detail = list(candles[-lookback_sessions:]) if len(candles) >= lookback_sessions else list(candles)
+    n = len(detail)
+    if n < 5:
+        return (), (), Decimal("0"), Decimal("0"), None, None
+
+    # Base peak in the lookback window
+    peak_idx = max(range(n), key=lambda i: detail[i].high)
+    base_high = detail[peak_idx]
+
+    # Track alternating swings starting from base_high
+    swings: list[tuple[str, str, float, int]] = [("H", str(base_high.date), float(base_high.high), peak_idx)]
+    curr_type = "H"
+
+    for i in range(peak_idx + 1, n):
+        is_high = True
+        is_low = True
+        for j in range(max(0, i - fractal_k), min(n, i + fractal_k + 1)):
+            if j != i:
+                if detail[j].high > detail[i].high:
+                    is_high = False
+                if detail[j].low < detail[i].low:
+                    is_low = False
+
+        if is_low and curr_type == "H":
+            swings.append(("L", str(detail[i].date), float(detail[i].low), i))
+            curr_type = "L"
+        elif is_low and curr_type == "L":
+            if detail[i].low < swings[-1][2]:
+                swings[-1] = ("L", str(detail[i].date), float(detail[i].low), i)
+        elif is_high and curr_type == "L":
+            swings.append(("H", str(detail[i].date), float(detail[i].high), i))
+            curr_type = "H"
+        elif is_high and curr_type == "H":
+            if detail[i].high > swings[-1][2]:
+                swings[-1] = ("H", str(detail[i].date), float(detail[i].high), i)
+
+    # Check unclosed pullback at the end of the window
+    if curr_type == "H" and n - 1 > swings[-1][3]:
+        min_idx = min(range(swings[-1][3] + 1, n), key=lambda i: detail[i].low)
+        swings.append(("L", str(detail[min_idx].date), float(detail[min_idx].low), min_idx))
+
+    # Form contraction pairs
+    contractions_list: list[VcpContractionWave] = []
+    for idx in range(0, len(swings) - 1, 2):
+        if idx + 1 < len(swings):
+            h_type, h_date, h_price, _ = swings[idx]
+            l_type, l_date, l_price, _ = swings[idx + 1]
+            if h_type == "H" and l_type == "L" and h_price > 0:
+                depth = (h_price - l_price) / h_price * 100.0
+                contractions_list.append(
+                    VcpContractionWave(
+                        index=len(contractions_list) + 1,
+                        high_date=h_date,
+                        high_price=Decimal(str(h_price)),
+                        low_date=l_date,
+                        low_price=Decimal(str(l_price)),
+                        depth_pct=Decimal(str(round(depth, 2))),
+                    )
+                )
+
+    # Convert swings to anchors
+    anchors_list: list[ChartGeometryAnchor] = []
+    for idx, (s_type, s_date, s_price, _) in enumerate(swings):
+        if idx == 0:
+            a_type = "resistance"
+        elif s_type == "H":
+            a_type = "contraction_high"
+        else:
+            a_type = "contraction_low"
+        anchors_list.append(
+            ChartGeometryAnchor(
+                date=s_date,
+                price=Decimal(str(s_price)),
+                anchor_type=a_type,
+            )
+        )
+
+    # Determine pivots and stops
+    resistance = floor_to_tick(Decimal(str(base_high.high)), tick_size)
+    low_swings = [s for s in swings if s[0] == "L"]
+    final_low_val = low_swings[-1][2] if low_swings else detail[-1].low
+    final_low = Decimal(str(final_low_val))
+
+    cheat_pivot: Decimal | None = None
+    cheat_stop: Decimal | None = None
+    if len(contractions_list) >= 2:
+        # Micro/cheat pivot is the high of the final contraction wave if lower than major resistance
+        last_c = contractions_list[-1]
+        if last_c.high_price < resistance:
+            cheat_pivot = floor_to_tick(last_c.high_price, tick_size)
+            cheat_stop = last_c.low_price
+
+    return tuple(anchors_list), tuple(contractions_list), resistance, final_low, cheat_pivot, cheat_stop
+
+
 def derive_chart_geometry(
     candles: Sequence[CandleData],
     *,
     tick_size: Decimal = DEFAULT_TICK_SIZE,
 ) -> DeterministicChartGeometry:
-    """Derive reproducible chart annotations without model involvement.
-
-    The detail window's final 60 sessions are split into three ordered swing
-    windows.  Dated extrema are merged when their prices are within 0.5 ATR14.
-    These anchors guide the visual read; proposal validity still requires the
-    model's dated anchors to snap back to frozen OHLCV.
-    """
+    """Derive reproducible chart annotations without model involvement."""
     if len(candles) < 60:
         raise ValueError("Need at least 60 candles to derive chart geometry")
     if any(candle.date is None for candle in candles[-60:]):
         raise ValueError("Dated candles are required to derive chart geometry")
 
     atr14 = compute_atr14(candles)
-    tolerance = atr14 * Decimal("0.50")
-    detail = list(candles[-60:])
-    raw: list[ChartGeometryAnchor] = []
-    for start in (0, 20, 40):
-        window = detail[start:start + 20]
-        high = max(window, key=lambda candle: candle.high)
-        low = min(window, key=lambda candle: candle.low)
-        raw.extend(
-            (
-                ChartGeometryAnchor(
-                    date=str(high.date),
-                    price=Decimal(str(high.high)),
-                    anchor_type="contraction_high",
-                ),
-                ChartGeometryAnchor(
-                    date=str(low.date),
-                    price=Decimal(str(low.low)),
-                    anchor_type="contraction_low",
-                ),
-            )
-        )
-
-    merged: list[ChartGeometryAnchor] = []
-    for anchor in sorted(raw, key=lambda item: (item.date, item.anchor_type)):
-        merge_index = next(
-            (
-                index
-                for index in range(len(merged) - 1, -1, -1)
-                if merged[index].anchor_type == anchor.anchor_type
-                and abs(merged[index].price - anchor.price) <= tolerance
-            ),
-            None,
-        )
-        if merge_index is None:
-            merged.append(anchor)
-        else:
-            # Prefer the later dated observation for a merged price zone.
-            merged[merge_index] = anchor
-    merged.sort(key=lambda anchor: (anchor.date, anchor.anchor_type))
-
-    final_window = detail[-20:]
-    resistance = floor_to_tick(
-        Decimal(str(max(candle.high for candle in final_window))),
-        tick_size,
+    anchors, contractions, resistance, final_low, cheat_pivot, cheat_stop = (
+        detect_vcp_swings_and_contractions(candles, tick_size=tick_size)
     )
-    final_low = Decimal(str(min(candle.low for candle in final_window)))
+
+    initial_stop = calculate_structural_stop(final_low, atr14, tick_size)
+    calculated_cheat_stop = (
+        calculate_structural_stop(cheat_stop, atr14, tick_size)
+        if cheat_stop is not None
+        else None
+    )
+
     return DeterministicChartGeometry(
-        anchors=tuple(merged),
+        anchors=anchors,
         resistance=resistance,
         final_contraction_low=final_low,
-        initial_stop=calculate_structural_stop(final_low, atr14, tick_size),
+        initial_stop=initial_stop,
+        cheat_pivot=cheat_pivot,
+        cheat_stop=calculated_cheat_stop,
+        contractions=contractions,
     )
 
 

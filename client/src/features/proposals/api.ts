@@ -19,7 +19,7 @@ export interface TradeProposalItem {
   geometry_version: string
   model: string
   confidence: number
-  entry_template: "single" | "two_leg" | "three_leg_front" | "three_leg_balanced"
+  entry_template: "single" | "two_leg" | "two_leg_staged" | "three_leg_front" | "three_leg_balanced"
   pivot_price: number
   initial_stop: number
   stop_distance_pct: number
@@ -180,6 +180,13 @@ export interface DecisionPayload {
   decision: "approved" | "rejected"
   expected_proposal_hash: string
   notes?: string
+  adjusted_pivot_price?: number
+  adjusted_initial_stop?: number
+  adjusted_t1?: number
+  adjusted_t2?: number
+  adjusted_t3?: number
+  adjusted_entry_template?: "single" | "two_leg" | "two_leg_staged" | "three_leg_front" | "three_leg_balanced"
+  adjusted_leg2_price?: number
 }
 
 export interface CapacityConflict {

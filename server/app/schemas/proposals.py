@@ -76,6 +76,13 @@ class ProposalDecisionRequest(BaseModel):
     decision: DecisionType
     expected_proposal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     notes: str | None = Field(default=None, max_length=2000)
+    adjusted_pivot_price: Decimal | None = Field(default=None, gt=0)
+    adjusted_initial_stop: Decimal | None = Field(default=None, gt=0)
+    adjusted_t1: Decimal | None = Field(default=None, gt=0)
+    adjusted_t2: Decimal | None = Field(default=None, gt=0)
+    adjusted_t3: Decimal | None = Field(default=None, gt=0)
+    adjusted_entry_template: EntryTemplate | None = None
+    adjusted_leg2_price: Decimal | None = Field(default=None, gt=0)
 
 
 class TradeProposalDetailResponse(BaseModel):

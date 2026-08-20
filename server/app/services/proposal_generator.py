@@ -24,6 +24,7 @@ from app.domain.p10_geometry import (
     compute_atr14,
     construct_and_validate_proposal,
     DEFAULT_TICK_SIZE,
+    derive_chart_geometry,
     ground_pivot_to_resistance_zones,
     MAX_STOP_DISTANCE_PCT,
     PivotResistanceGrounding,
@@ -31,7 +32,7 @@ from app.domain.p10_geometry import (
     ResistanceZone,
     ValidatedPatternAnchor,
 )
-from app.domain.p10_sizing import TEMPLATE_CONFIG
+from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
 from app.schemas.proposals import GeminiVcpProposalOutput
 from app.services.canonical_ohlcv import compact_ohlcv_table
 from app.services.openrouter_content import parse_openrouter_structured_content
@@ -53,9 +54,10 @@ Your task is to identify whether a high-conviction Volatility Contraction Patter
 Requirements:
 1. Verdict: 'valid' only if there is a clear prior uptrend, sequential contracting waves (2 to 4 contractions), volume dry-up near the pivot, and overhead resistance room. Otherwise 'invalid' or 'uncertain'.
 2. Contradicts Scanner: true if your chart read contradicts a constructive VCP breakout thesis.
-3. The OHLCV table is authoritative for exact dated prices. Every cited date must appear in it and on the detail chart. For an anchor, use the exact candle field: contraction_low.price is that date's daily Low; contraction_high.price and resistance.price are that date's daily High. Do not estimate anchor prices from pixels or use Close for an anchor. Identify the exact pivot breakout price and exactly 3 strictly increasing, tick-aligned technical targets t1 < t2 < t3. Those targets are successive upside measured-move / prior-swing / overhead-room objectives in the prior-uptrend direction. Do not set t1 at the pivot, the breakout tick, or the first nearby resistance just above the base high. t1 must be a full last-contraction measured move or a prior major swing high with clear overhead room; t2 and t3 must be further expansions of that same upside structure. All prices must align to the instrument tick shown in the request.
+3. The OHLCV table is authoritative for exact dated prices. Every cited date must appear in it and on the detail chart. For an anchor, use the exact candle field: contraction_low.price is that date's daily Low; contraction_high.price and resistance.price are that date's daily High. Do not estimate anchor prices from pixels or use Close for an anchor. Identify the exact pivot breakout price and exactly 3 strictly increasing, tick-aligned technical targets t1 < t2 < t3. Those targets are successive upside measured-move / prior-swing / overhead-room objectives in the prior-uptrend direction. Do not set t1 at the pivot, the breakout tick, or the first nearby resistance just above the base high. t1 must be a full last-contraction measured move or a prior major swing high with clear overhead room; t2 and t3 must be further expansions of that same upside structure. If there are 3 contractions (C1, C2, C3) and C3 forms a tight micro-consolidation, you may set pivot_price to the clearance of C3 high (the cheat pivot) with two_leg_staged template. All prices must align to the instrument tick shown in the request.
 4. Entry Template: Choose the appropriate entry template based on pattern tightness and conviction:
    - 'single' (Tightest bases with maximum conviction, single leg entry)
+   - 'two_leg_staged' (Staged entry: 50% on C3 micro/cheat pivot clearance, 50% on Base breakout)
    - 'two_leg' (Standard VCP base, 2-leg entry)
    - 'three_leg_front' (Front-loaded 3-leg entry for large liquid setups)
    - 'three_leg_balanced' (Balanced 3-leg entry for wider contractions)
@@ -686,6 +688,25 @@ def generate_trade_proposal_from_analysis(
         atr14=atr14,
         tick_size=tick_size,
     )
+
+    if not geom.is_valid and ai_output.entry_template == EntryTemplate.TWO_LEG_STAGED:
+        dyn_geom = derive_chart_geometry(candles, tick_size=tick_size)
+        if dyn_geom.cheat_pivot and dyn_geom.cheat_stop:
+            cheat_geom = construct_and_validate_proposal(
+                pivot_price=dyn_geom.cheat_pivot,
+                final_contraction_low=dyn_geom.final_contraction_low,
+                t1=ai_output.t1,
+                t2=ai_output.t2,
+                t3=ai_output.t3,
+                atr14=atr14,
+                tick_size=tick_size,
+            )
+            if cheat_geom.is_valid:
+                geom = cheat_geom
+                ai_output = ai_output.model_copy(update={
+                    "pivot_price": dyn_geom.cheat_pivot,
+                    "entry_template": EntryTemplate.TWO_LEG_STAGED,
+                })
 
     if not geom.is_valid:
         logger.info(f"Symbol {symbol} proposal validation failed: {geom.rejection_reason}")

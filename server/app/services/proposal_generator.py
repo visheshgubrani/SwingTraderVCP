@@ -234,6 +234,131 @@ def _serialize_rr_audit(geom: ProposalGeometry) -> dict[str, Any]:
     }
 
 
+def _serialize_calculation_basis(
+    *,
+    geom: ProposalGeometry,
+    ai_output: GeminiVcpProposalOutput,
+    final_contraction_low: Decimal,
+    final_low_anchor: ValidatedPatternAnchor,
+    atr14: Decimal,
+    tolerance: Decimal,
+    pivot_grounding_payload: dict[str, Any],
+    tmpl: EntryTemplate,
+    tmpl_info: dict[str, Any],
+    risk_per_trade_pct: Decimal,
+    approved_risk_budget_amount: Decimal | None,
+    risk_policy_version: int,
+    tick_size: Decimal,
+) -> dict[str, Any]:
+    chase_tightened = (
+        geom.base_chase_ceiling is not None
+        and geom.chase_ceiling < geom.base_chase_ceiling
+    )
+    stop_dist = geom.pivot_price - geom.initial_stop
+    chase_margin = geom.chase_ceiling - geom.pivot_price
+    chase_pct = (
+        round((chase_margin / geom.pivot_price) * Decimal("100"), 2)
+        if geom.pivot_price > 0
+        else Decimal("0")
+    )
+    selected_zone = pivot_grounding_payload.get("selected_zone") or {}
+
+    return {
+        "pivot": {
+            "pivot_price": str(geom.pivot_price),
+            "grounding_status": "grounded" if pivot_grounding_payload.get("is_grounded") else "ungrounded",
+            "selected_zone_low": selected_zone.get("low"),
+            "selected_zone_high": selected_zone.get("high"),
+            "selected_zone_median": selected_zone.get("median"),
+            "selected_zone_recent_date": selected_zone.get("most_recent_date"),
+            "boundary_distance": str(pivot_grounding_payload.get("boundary_distance")),
+            "tolerance_atr": str(tolerance),
+            "tolerance_rule": "0.50x ATR14 anchor merge tolerance",
+            "basis": (
+                f"Pivot ₹{geom.pivot_price} grounded to resistance zone "
+                f"₹{selected_zone.get('low', '-')}..₹{selected_zone.get('high', '-')} "
+                f"within {tolerance} tolerance (0.5xATR14)."
+            ),
+        },
+        "stop_loss": {
+            "initial_stop": str(geom.initial_stop),
+            "final_contraction_low": str(final_contraction_low),
+            "final_contraction_low_date": final_low_anchor.date.isoformat(),
+            "atr14": str(atr14),
+            "stop_buffer_multiplier": "0.25",
+            "stop_buffer_amount": str(atr14 * Decimal("0.25")),
+            "stop_distance": str(stop_dist),
+            "stop_distance_pct": str(geom.stop_distance_pct),
+            "max_allowed_stop_pct": "8.00",
+            "formula": f"Final contraction low (₹{final_contraction_low}) - 0.25xATR14 (₹{atr14 * Decimal('0.25'):.2f}), snapped to tick",
+            "basis": (
+                f"Structural SL set at ₹{geom.initial_stop} (-{geom.stop_distance_pct}% from pivot) "
+                f"anchored to contraction low ₹{final_contraction_low} on {final_low_anchor.date.isoformat()} "
+                f"with 0.25xATR14 buffer."
+            ),
+        },
+        "entry_chase": {
+            "pivot_entry": str(geom.pivot_price),
+            "base_chase_ceiling": _decimal_str(geom.base_chase_ceiling),
+            "rr_adjusted_chase_ceiling": _decimal_str(geom.rr_adjusted_chase_ceiling),
+            "final_chase_ceiling": str(geom.chase_ceiling),
+            "ceiling_tightened_for_1r": chase_tightened,
+            "max_chase_margin": str(chase_margin),
+            "max_chase_pct": str(chase_pct),
+            "worst_entry_r_distance": str(geom.chase_ceiling - geom.initial_stop),
+            "formula": "min(pivot + min(2% of pivot, 0.5xStopDistance), (T1 + initial_stop) / 2) floored to tick",
+            "basis": (
+                f"Entry trigger at pivot ₹{geom.pivot_price}. Max allowable chase ceiling ₹{geom.chase_ceiling} "
+                f"(+{chase_pct}% / ₹{chase_margin}) "
+                + (f"[Tightened from base ceiling ₹{geom.base_chase_ceiling} to guarantee T1 >= 1R]" if chase_tightened else "[Guarantees T1 >= 1R at ceiling]")
+            ),
+        },
+        "targets": {
+            "t1": {
+                "price": str(geom.t1),
+                "r_at_ceiling": _decimal_str(geom.t1_r),
+                "r_at_pivot": _decimal_str(geom.r_at_pivot),
+                "min_required_r": "1.00",
+                "objective": "Primary structural objective / last-contraction measured move",
+            },
+            "t2": {
+                "price": str(geom.t2),
+                "r_at_ceiling": _decimal_str(geom.t2_r),
+                "below_2r_flag": geom.t2_below_2r,
+                "objective": "Secondary structural expansion objective",
+            },
+            "t3": {
+                "price": str(geom.t3),
+                "r_at_ceiling": _decimal_str(geom.t3_r),
+                "below_3r_flag": geom.t3_below_3r,
+                "objective": "Major trend swing objective / runner target",
+            },
+            "basis": (
+                f"T1=₹{geom.t1} ({geom.t1_r}R at ceiling, {geom.r_at_pivot}R at pivot), "
+                f"T2=₹{geom.t2} ({geom.t2_r}R), T3=₹{geom.t3} ({geom.t3_r}R) strictly increasing."
+            ),
+        },
+        "sizing_and_risk": {
+            "entry_template": tmpl.value,
+            "leg_count": tmpl_info["leg_count"],
+            "leg_risk_allocations": [float(x) for x in tmpl_info["leg_allocations"]],
+            "relative_volume_threshold": float(tmpl_info["relative_volume_threshold"]),
+            "risk_per_trade_pct": str(risk_per_trade_pct * Decimal("100")),
+            "approved_risk_budget_amount": str(approved_risk_budget_amount) if approved_risk_budget_amount is not None else None,
+            "risk_policy_version": risk_policy_version,
+            "base_tightness": ai_output.base_tightness,
+            "dry_up_quality": ai_output.dry_up_quality,
+            "resistance_room": ai_output.resistance_room,
+            "basis": (
+                f"{tmpl.value.upper()} template: {tmpl_info['leg_count']} leg(s) "
+                f"with allocations {[float(x)*100 for x in tmpl_info['leg_allocations']]}% "
+                f"requiring RVOL >= {tmpl_info['relative_volume_threshold']}x on breakout. "
+                f"Max approved risk budget ₹{approved_risk_budget_amount or 0}."
+            ),
+        },
+    }
+
+
 def proposal_prompt_hash(*, symbol: str, tick_size: Decimal) -> str:
     user_text = (
         f"Evaluate the VCP pattern for {symbol}. Instrument tick size is "
@@ -630,6 +755,56 @@ def generate_trade_proposal_from_analysis(
     )
     live_eligible = completed_at.astimezone(IST_TZ) <= live_cutoff
 
+    calc_basis = _serialize_calculation_basis(
+        geom=geom,
+        ai_output=ai_output,
+        final_contraction_low=final_contraction_low,
+        final_low_anchor=final_low_anchor,
+        atr14=atr14,
+        tolerance=tolerance,
+        pivot_grounding_payload=pivot_grounding_payload,
+        tmpl=tmpl,
+        tmpl_info=tmpl_info,
+        risk_per_trade_pct=risk_per_trade_pct,
+        approved_risk_budget_amount=approved_risk_budget_amount,
+        risk_policy_version=risk_policy_version,
+        tick_size=tick_size,
+    )
+
+    selected_zone = pivot_grounding_payload.get("selected_zone") or {}
+    logger.info(
+        "[Proposal Built] Symbol %s -> ATR14=%s | Pivot=₹%s (zone: ₹%s..₹%s, dist=%s, tol=%s) | "
+        "SL=₹%s (final low ₹%s on %s - 0.25*ATR14=₹%s, risk=%s%%) | "
+        "Ceiling=₹%s (base=₹%s, 1R_cap=₹%s) | "
+        "Targets: T1=₹%s (%sR), T2=₹%s (%sR), T3=₹%s (%sR) | "
+        "Template=%s (%s legs, RVOL>=%sx, max budget=₹%s)",
+        symbol,
+        atr14,
+        geom.pivot_price,
+        selected_zone.get("low", "-"),
+        selected_zone.get("high", "-"),
+        pivot_grounding_payload.get("boundary_distance"),
+        tolerance,
+        geom.initial_stop,
+        final_contraction_low,
+        final_low_anchor.date.isoformat(),
+        atr14 * Decimal("0.25"),
+        geom.stop_distance_pct,
+        geom.chase_ceiling,
+        geom.base_chase_ceiling,
+        geom.rr_adjusted_chase_ceiling,
+        geom.t1,
+        geom.t1_r,
+        geom.t2,
+        geom.t2_r,
+        geom.t3,
+        geom.t3_r,
+        tmpl.value,
+        tmpl_info["leg_count"],
+        tmpl_info["relative_volume_threshold"],
+        approved_risk_budget_amount,
+    )
+
     locked_plan: dict[str, Any] = {
         "screening_result_id": screening_result_id,
         "instrument_id": instrument_id,
@@ -674,6 +849,7 @@ def generate_trade_proposal_from_analysis(
             "final_contraction_low": str(final_contraction_low),
             "anchor_merge_tolerance": str(tolerance),
             "pivot_grounding": pivot_grounding_payload,
+            "calculation_basis": calc_basis,
             "tick_size": str(tick_size),
             **_serialize_rr_audit(geom),
         },

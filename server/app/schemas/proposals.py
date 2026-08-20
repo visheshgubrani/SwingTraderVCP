@@ -284,6 +284,25 @@ class ProposalBatchStatusResponse(BaseModel):
     completed_at: dt.datetime | None = None
 
 
+class ProposalRunSummaryResponse(BaseModel):
+    id: UUID
+    scan_run_id: UUID
+    status: Literal["running", "completed", "timed_out", "failed", "idle"]
+    candidates_total: int
+    candidates_processed: int
+    proposals_generated: int
+    proposals_rejected: int
+    proposals_uncertain: int
+    proposals_failed: int
+    run_type: Literal["batch", "single"]
+    single_symbol: str | None = None
+    as_of_date: dt.date | None = None
+    error_message: str | None = None
+    started_at: dt.datetime
+    completed_at: dt.datetime | None = None
+    created_at: dt.datetime
+
+
 class ProposalGenerationAttemptResponse(BaseModel):
     """Latest audited provider/deterministic outcome for one shortlist candidate."""
 

@@ -38,7 +38,7 @@ export interface TradeProposalItem {
     dry_up_quality: string
     resistance_room: string
     evidence_summary: string
-    contraction_anchors?: Array<{ date: string; price?: number; evidence?: string }>
+    contraction_anchors?: Array<{ date: string; price?: number | string; anchor_type?: string; evidence?: string }>
   }
   geometry: {
     atr14?: number | string
@@ -57,6 +57,96 @@ export interface TradeProposalItem {
     t3_below_3r?: boolean
     tick_size?: string
     final_contraction_low?: string
+    anchor_merge_tolerance?: string
+    pivot_grounding?: {
+      is_grounded: boolean
+      boundary_distance?: string | null
+      tolerance?: string
+      subreason?: string | null
+      selected_zone?: {
+        low: string
+        high: string
+        median: string
+        most_recent_date: string
+        members?: Array<{ date: string; price: string; anchor_type: string }>
+      } | null
+      eligible_anchors?: Array<{ date: string; price: string; anchor_type: string; eligibility: string }>
+      audit_flags?: string[]
+    }
+    calculation_basis?: {
+      pivot: {
+        pivot_price: string
+        grounding_status: string
+        selected_zone_low?: string
+        selected_zone_high?: string
+        selected_zone_median?: string
+        selected_zone_recent_date?: string
+        boundary_distance?: string | null
+        tolerance_atr: string
+        tolerance_rule: string
+        basis: string
+      }
+      stop_loss: {
+        initial_stop: string
+        final_contraction_low: string
+        final_contraction_low_date: string
+        atr14: string
+        stop_buffer_multiplier: string
+        stop_buffer_amount: string
+        stop_distance: string
+        stop_distance_pct: string
+        max_allowed_stop_pct: string
+        formula: string
+        basis: string
+      }
+      entry_chase: {
+        pivot_entry: string
+        base_chase_ceiling?: string | null
+        rr_adjusted_chase_ceiling?: string | null
+        final_chase_ceiling: string
+        ceiling_tightened_for_1r: boolean
+        max_chase_margin: string
+        max_chase_pct: string
+        worst_entry_r_distance: string
+        formula: string
+        basis: string
+      }
+      targets: {
+        t1: {
+          price: string
+          r_at_ceiling?: string | null
+          r_at_pivot?: string | null
+          min_required_r: string
+          objective: string
+        }
+        t2: {
+          price: string
+          r_at_ceiling?: string | null
+          below_2r_flag?: boolean
+          objective: string
+        }
+        t3: {
+          price: string
+          r_at_ceiling?: string | null
+          below_3r_flag?: boolean
+          objective: string
+        }
+        basis: string
+      }
+      sizing_and_risk: {
+        entry_template: string
+        leg_count: number
+        leg_risk_allocations: number[]
+        relative_volume_threshold: number
+        risk_per_trade_pct: string
+        approved_risk_budget_amount?: string | null
+        risk_policy_version: number
+        base_tightness: string
+        dry_up_quality: string
+        resistance_room: string
+        basis: string
+      }
+    }
   }
   context_image_hash: string | null
   detail_image_hash: string | null
@@ -271,11 +361,31 @@ export interface ProposalGenerationResults {
   results: ProposalGenerationAttempt[]
 }
 
+export interface ProposalRunSummary {
+  id: string
+  scan_run_id: string
+  status: "running" | "completed" | "timed_out" | "failed" | "idle"
+  candidates_total: number
+  candidates_processed: number
+  proposals_generated: number
+  proposals_rejected: number
+  proposals_uncertain: number
+  proposals_failed: number
+  run_type: "batch" | "single"
+  single_symbol: string | null
+  as_of_date: string | null
+  error_message: string | null
+  started_at: string
+  completed_at: string | null
+  created_at: string
+}
+
 const operationsKeys = {
   marketContext: ["automation", "market-context", "latest"] as const,
   stopStreak: (mode: "paper" | "live") => ["automation", "stop-streak", mode] as const,
   rollout: ["automation", "rollout"] as const,
   paperPortfolio: ["automation", "paper-portfolio"] as const,
+  proposalBatches: ["automation", "proposal-batches"] as const,
   proposalBatch: (scanRunId: string | null) =>
     ["automation", "proposal-batch", scanRunId] as const,
   proposalGenerationResults: (automationRunId: string | null) =>
@@ -422,12 +532,45 @@ export function useEnforceMarketContext() {
   })
 }
 
-export function useTradeProposals(statusFilter: string = "pending_approval") {
+export function useProposalBatches(limit: number = 30) {
+  return useQuery<ProposalRunSummary[]>({
+    queryKey: [...operationsKeys.proposalBatches, limit],
+    queryFn: () =>
+      apiRequest<ProposalRunSummary[]>(
+        `/automation/proposal-batches?limit=${limit}`,
+      ),
+    refetchInterval: 5000,
+  })
+}
+
+export function useTradeProposals(
+  statusFilter: string = "pending_approval",
+  options?: {
+    automationRunId?: string | null
+    symbol?: string | null
+    asOfDate?: string | null
+    limit?: number
+  },
+) {
+  const queryParams = new URLSearchParams()
+  if (statusFilter) queryParams.set("status", statusFilter)
+  if (options?.symbol) queryParams.set("symbol", options.symbol)
+  if (options?.automationRunId) queryParams.set("automation_run_id", options.automationRunId)
+  if (options?.asOfDate) queryParams.set("as_of_date", options.asOfDate)
+  if (options?.limit) queryParams.set("limit", String(options.limit))
+
   return useQuery<TradeProposalItem[]>({
-    queryKey: ["trade-proposals", statusFilter],
+    queryKey: [
+      "trade-proposals",
+      statusFilter,
+      options?.symbol,
+      options?.automationRunId,
+      options?.asOfDate,
+      options?.limit,
+    ],
     queryFn: () =>
       apiRequest<TradeProposalItem[]>(
-        `/automation/proposals?status=${encodeURIComponent(statusFilter)}`,
+        `/automation/proposals?${queryParams.toString()}`,
       ),
     refetchInterval: 10000,
   })

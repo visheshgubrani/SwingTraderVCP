@@ -1,13 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react"
+import { useNavigate } from "react-router"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   AlertCircleIcon,
+  ChevronDownIcon,
+  HistoryIcon,
   PlayIcon,
+  SearchIcon,
   SparklesIcon,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import {
   defaultScanRunId,
@@ -21,20 +26,21 @@ import {
   useResolveCapacityConflict,
   useTradeProposals,
   useProposalBatch,
+  useProposalBatches,
   useTriggerProposalBatch,
-  type TradeProposalItem,
 } from "./api"
-import { ProposalDetailModal } from "./ProposalDetailModal"
 import { MarketContextPanel } from "./MarketContextPanel"
 import { ProposalGenerationResults } from "./ProposalGenerationResults"
 
 export function ProposalInbox() {
+  const navigate = useNavigate()
   const [statusFilter, setStatusFilter] = useState<string>("pending_approval")
-  const [selectedProposal, setSelectedProposal] = useState<TradeProposalItem | null>(null)
-  const [detailOpen, setDetailOpen] = useState(false)
+  const [symbolSearch, setSymbolSearch] = useState<string>("")
+  const [selectedRunId, setSelectedRunId] = useState<string>("latest")
+  const [showMarketContext, setShowMarketContext] = useState<boolean>(false)
   const queryClient = useQueryClient()
 
-  const { data: proposals = [], isLoading, error } = useTradeProposals(statusFilter)
+  const { data: pastRuns = [] } = useProposalBatches(30)
   const { data: supervisorStatus } = useEntrySupervisorStatus()
   const { data: conflicts = [] } = useCapacityConflicts()
   const resolveConflict = useResolveCapacityConflict()
@@ -45,6 +51,30 @@ export function ProposalInbox() {
   )
   const proposalBatch = useProposalBatch(latestScanId)
   const triggerBatch = useTriggerProposalBatch()
+
+  const effectiveRunId = useMemo(() => {
+    if (selectedRunId === "latest") {
+      return proposalBatch.data?.automation_run_id ?? (pastRuns[0]?.id ?? null)
+    }
+    if (selectedRunId === "all") {
+      return null
+    }
+    return selectedRunId
+  }, [selectedRunId, proposalBatch.data?.automation_run_id, pastRuns])
+
+  const proposalQueryParams = useMemo(() => ({
+    symbol: symbolSearch.trim() || null,
+    automationRunId: selectedRunId !== "all" && selectedRunId !== "latest" ? selectedRunId : null,
+  }), [symbolSearch, selectedRunId])
+
+  const { data: rawProposals = [], isLoading, error } = useTradeProposals(statusFilter, proposalQueryParams)
+
+  const proposals = useMemo(() => {
+    if (!symbolSearch.trim()) return rawProposals
+    const query = symbolSearch.trim().toUpperCase()
+    return rawProposals.filter((p) => p.symbol.toUpperCase().includes(query))
+  }, [rawProposals, symbolSearch])
+
   const supervisorActive = supervisorStatus?.status === "active"
   const batchRunning =
     proposalBatch.data?.status === "running" || triggerBatch.isPending
@@ -71,6 +101,7 @@ export function ProposalInbox() {
       ? `Latest scan ${latestScan.as_of_date ?? ""} · ${latestScan.passing_count} setups`
       : "No completed personal scan yet"
   }, [latestScan, proposalBatch.data, triggerBatch.error])
+
   const batchFailed =
     proposalBatch.data?.status === "timed_out" ||
     proposalBatch.data?.status === "failed"
@@ -89,6 +120,7 @@ export function ProposalInbox() {
         queryKey: ["automation", "proposal-generation-results", runId],
       })
       void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
+      void queryClient.invalidateQueries({ queryKey: ["automation", "proposal-batches"] })
     }
     previousBatchRef.current = { runId, status }
   }, [proposalBatch.data?.automation_run_id, proposalBatch.data?.status, queryClient])
@@ -103,7 +135,7 @@ export function ProposalInbox() {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background font-mono text-xs text-foreground">
       {/* Top Header & Supervisor Monitor */}
-      <div className="flex shrink-0 items-center justify-between border-b border-border/80 bg-card/60 px-4 py-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/80 bg-card/60 px-4 py-3">
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary">
             <SparklesIcon className="h-4 w-4" />
@@ -113,19 +145,20 @@ export function ProposalInbox() {
               VCP Trade Proposals & Entry Supervisor
             </h1>
             <p className="text-[11px] text-muted-foreground">
-              Generate a serial Gemini batch from the latest scan, then approve or reject each immutable proposal.
+              Screening → serial Gemini pattern analysis → human decision → deterministic execution.
             </p>
           </div>
         </div>
 
-        {/* Live Supervisor Indicator */}
-        <div className="flex items-center gap-3">
+        {/* Action Controls & Supervisor Indicator */}
+        <div className="flex flex-wrap items-center gap-3">
           <div
-            className="max-w-80 truncate text-[10px] text-muted-foreground"
+            className="max-w-72 truncate text-[10px] text-muted-foreground hidden lg:block"
             title={batchMessage}
           >
             {batchMessage}
           </div>
+
           <Button
             className="h-8 gap-1.5 font-bold uppercase"
             disabled={batchRunning || !latestScan || latestScan.status !== "succeeded"}
@@ -138,23 +171,21 @@ export function ProposalInbox() {
             ) : (
               <PlayIcon className="size-3.5 fill-current" />
             )}
-            {batchRunning ? "Generating" : "Generate proposals"}
+            {batchRunning ? "Generating" : "Generate batch"}
           </Button>
+
           <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-1.5 text-[11px]">
-          <div className="flex items-center gap-1.5">
-            <span className={`h-2 w-2 rounded-full ${supervisorActive ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
-            <span className="text-muted-foreground">Entry Supervisor:</span>
-            <span className={supervisorActive ? "font-bold text-emerald-400" : "font-bold text-rose-400"}>
-              {supervisorActive ? "ACTIVE" : "INACTIVE"}
-            </span>
-          </div>
-          <span className="text-muted-foreground/50">|</span>
-          <div className="text-muted-foreground">
-            Armed Legs:{" "}
-            <strong className="text-foreground">
-              {supervisorStatus?.armed_legs_count ?? 0}
-            </strong>
-          </div>
+            <div className="flex items-center gap-1.5">
+              <span className={`h-2 w-2 rounded-full ${supervisorActive ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
+              <span className="text-muted-foreground">Supervisor:</span>
+              <span className={supervisorActive ? "font-bold text-emerald-400" : "font-bold text-rose-400"}>
+                {supervisorActive ? "ACTIVE" : "INACTIVE"}
+              </span>
+            </div>
+            <span className="text-muted-foreground/50">|</span>
+            <div className="text-muted-foreground">
+              Armed: <strong className="text-foreground">{supervisorStatus?.armed_legs_count ?? 0}</strong>
+            </div>
           </div>
         </div>
       </div>
@@ -165,191 +196,243 @@ export function ProposalInbox() {
         </div>
       ) : null}
 
-      <MarketContextPanel />
-
-      <ProposalGenerationResults
-        automationRunId={proposalBatch.data?.automation_run_id ?? null}
-      />
-
-      {(supervisorStatus?.recent_allocation_events ?? [])
-        .filter((event) => event.context_gate_reasons?.length)
-        .slice(0, 3)
-        .map((event) => (
-          <div key={event.id} className="mx-4 mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10px] text-amber-200">
-            Allocation {event.event_type.replaceAll("_", " ")} · {event.market_context_mode ?? "breaker"} · {event.context_gate_reasons.join(", ")}
-            {event.context_adjusted_risk_ceiling !== null && ` · ceiling ₹${Number(event.context_adjusted_risk_ceiling).toFixed(2)}`}
-          </div>
-        ))}
-
-      {/* Filter Tabs */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-card/30 px-4 py-2">
-        {[
-          { key: "pending_approval", label: "Pending Approval" },
-          { key: "approved", label: "Approved" },
-          { key: "expired_unapproved", label: "Expired" },
-          { key: "rejected", label: "Human rejected" },
-          { key: "all", label: "All Proposals" },
-        ].map((tab) => (
-          <button
-            key={tab.key}
-            onClick={() => setStatusFilter(tab.key)}
-            className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${
-              statusFilter === tab.key
-                ? "bg-primary text-primary-foreground shadow-sm"
-                : "text-muted-foreground hover:bg-muted/30 hover:text-foreground"
-            }`}
+      {/* Main Scrollable Viewport */}
+      <div className="flex-1 overflow-y-auto min-h-0 p-4 space-y-4">
+        {/* Toggleable Market Context Panel */}
+        <div className="flex items-center justify-between">
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => setShowMarketContext(!showMarketContext)}
+            className="text-[11px] text-muted-foreground hover:text-foreground"
           >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+            <ChevronDownIcon className={`mr-1 h-3.5 w-3.5 transition-transform ${showMarketContext ? "" : "-rotate-90"}`} />
+            {showMarketContext ? "Hide Market Context" : "Show Market Context & Sector Gates"}
+          </Button>
+        </div>
 
-      {conflicts.map((conflict) => (
-        <div key={conflict.id} className="mx-4 mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <div>
-              <div className="font-semibold text-amber-300">Capacity tie needs your decision</div>
-              <div className="text-[10px] text-muted-foreground">Choose one immutable proposal or skip all. The signal expires quickly.</div>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={resolveConflict.isPending}
-              onClick={() => resolveConflict.mutate({ id: conflict.id, chosenLegId: null })}
+        {showMarketContext && <MarketContextPanel />}
+
+        {/* History / Run Selector Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-card/60 p-3">
+          <div className="flex items-center gap-2">
+            <HistoryIcon className="h-4 w-4 text-primary" />
+            <span className="font-semibold text-foreground">Generation Run History:</span>
+            <select
+              value={selectedRunId}
+              onChange={(e) => setSelectedRunId(e.target.value)}
+              className="rounded-md border border-border bg-background px-2.5 py-1 text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             >
-              Skip all
-            </Button>
+              <option value="latest">Latest Batch / Run</option>
+              <option value="all">All Historical Proposals</option>
+              {pastRuns.map((run) => {
+                const label = run.run_type === "single"
+                  ? `Single Stock: ${run.single_symbol ?? "Single"} · ${run.status.toUpperCase()} (${new Date(run.created_at).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit" })})`
+                  : `Batch (${run.candidates_total} charts) · ${run.proposals_generated} Gen · ${run.status.toUpperCase()} (${new Date(run.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" })})`
+                return (
+                  <option key={run.id} value={run.id}>
+                    {label}
+                  </option>
+                )
+              })}
+            </select>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {conflict.candidates.map((candidate) => (
-              <Button
-                key={candidate.leg_id}
-                size="sm"
-                disabled={resolveConflict.isPending}
-                onClick={() => resolveConflict.mutate({ id: conflict.id, chosenLegId: candidate.leg_id })}
-              >
-                Select {candidate.symbol} L{candidate.leg_index} · {(Number(candidate.confidence) * 100).toFixed(0)}% · {Number(candidate.conservative_rr).toFixed(2)}R
-              </Button>
-            ))}
+
+          <div className="text-[10px] text-muted-foreground">
+            {selectedRunId === "latest" ? "Showing most recent batch" : selectedRunId === "all" ? "Showing all proposals" : "Viewing historical run"}
           </div>
         </div>
-      ))}
 
-      {/* Main Proposal Table / Content */}
-      <div className="flex-1 overflow-auto p-4">
-        {isLoading ? (
-          <div className="flex h-64 items-center justify-center text-muted-foreground">
-            Loading proposals...
+        {/* Generation Ledger (Candidate Attempts) */}
+        <ProposalGenerationResults
+          automationRunId={effectiveRunId}
+        />
+
+        {(supervisorStatus?.recent_allocation_events ?? [])
+          .filter((event) => event.context_gate_reasons?.length)
+          .slice(0, 2)
+          .map((event) => (
+            <div key={event.id} className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10px] text-amber-200">
+              Allocation {event.event_type.replaceAll("_", " ")} · {event.market_context_mode ?? "breaker"} · {event.context_gate_reasons.join(", ")}
+              {event.context_adjusted_risk_ceiling !== null && ` · ceiling ₹${Number(event.context_adjusted_risk_ceiling).toFixed(2)}`}
+            </div>
+          ))}
+
+        {conflicts.map((conflict) => (
+          <div key={conflict.id} className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold text-amber-300">Capacity tie needs your decision</div>
+                <div className="text-[10px] text-muted-foreground">Choose one immutable proposal or skip all. The signal expires quickly.</div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={resolveConflict.isPending}
+                onClick={() => resolveConflict.mutate({ id: conflict.id, chosenLegId: null })}
+              >
+                Skip all
+              </Button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {conflict.candidates.map((candidate) => (
+                <Button
+                  key={candidate.leg_id}
+                  size="sm"
+                  disabled={resolveConflict.isPending}
+                  onClick={() => resolveConflict.mutate({ id: conflict.id, chosenLegId: candidate.leg_id })}
+                >
+                  Select {candidate.symbol} L{candidate.leg_index} · {(Number(candidate.confidence) * 100).toFixed(0)}% · {Number(candidate.conservative_rr).toFixed(2)}R
+                </Button>
+              ))}
+            </div>
           </div>
-        ) : error ? (
-          <div className="flex h-64 items-center justify-center text-rose-400">
-            Error loading trade proposals
+        ))}
+
+        {/* Proposals List Section Header & Filters */}
+        <div className="space-y-3 pt-2">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { key: "pending_approval", label: "Pending Approval" },
+                { key: "approved", label: "Approved" },
+                { key: "expired_unapproved", label: "Expired" },
+                { key: "rejected", label: "Human Rejected" },
+                { key: "all", label: "All Proposals" },
+              ].map((tab) => (
+                <button
+                  key={tab.key}
+                  onClick={() => setStatusFilter(tab.key)}
+                  className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                    statusFilter === tab.key
+                      ? "bg-primary text-primary-foreground shadow-sm font-bold"
+                      : "text-muted-foreground hover:bg-muted/30 hover:text-foreground"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Symbol Search Bar */}
+            <div className="relative w-48 sm:w-64">
+              <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+              <Input
+                type="text"
+                placeholder="Search symbol..."
+                value={symbolSearch}
+                onChange={(e) => setSymbolSearch(e.target.value)}
+                className="h-8 pl-8 text-xs font-mono"
+              />
+            </div>
           </div>
-        ) : proposals.length === 0 ? (
-          <div className="flex h-64 flex-col items-center justify-center gap-2 text-muted-foreground">
-            <AlertCircleIcon className="h-8 w-8 text-muted-foreground/40" />
-            <p>
-              {statusFilter === "pending_approval"
-                ? "No immutable proposals are waiting for your decision. Generate a batch to create the next review set."
-                : statusFilter === "rejected"
-                  ? "No proposals have been rejected by the operator yet. Model and Python rejections live in the generation ledger above."
-                  : `No immutable proposals found for ${statusFilter.replaceAll("_", " ")}.`}
-            </p>
-          </div>
-        ) : (
-          <div className="rounded-lg border border-border/60 bg-card overflow-hidden">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-border/60 bg-muted/30 text-[10px] text-muted-foreground uppercase tracking-wider">
-                  <th className="py-2.5 px-3 font-semibold">Symbol</th>
-                  <th className="py-2.5 px-3 font-semibold">Template</th>
-                  <th className="py-2.5 px-3 font-semibold">Confidence</th>
-                  <th className="py-2.5 px-3 font-semibold">Pivot Entry</th>
-                  <th className="py-2.5 px-3 font-semibold">Stop Loss</th>
-                  <th className="py-2.5 px-3 font-semibold">Target 1</th>
-                  <th className="py-2.5 px-3 font-semibold">Risk Budget</th>
-                  <th className="py-2.5 px-3 font-semibold">Target Session</th>
-                  <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/40 text-[11px]">
-                {proposals.map((p) => {
-                  const isPending = p.status === "pending_approval"
-                  return (
-                    <tr
-                      key={p.id}
-                      onClick={() => {
-                        setSelectedProposal(p)
-                        setDetailOpen(true)
-                      }}
-                      className="cursor-pointer hover:bg-muted/20 transition-colors"
-                    >
-                      <td className="py-2.5 px-3 font-bold text-foreground">
-                        {p.symbol}
-                      </td>
-                      <td className="py-2.5 px-3">
-                        <Badge
-                          variant="outline"
-                          className={templateBadges[p.entry_template] || ""}
-                        >
-                          {p.entry_template.toUpperCase()}
-                        </Badge>
-                      </td>
-                      <td className="py-2.5 px-3 text-muted-foreground">
-                        {(Number(p.confidence) * 100).toFixed(0)}%
-                      </td>
-                      <td className="py-2.5 px-3 font-semibold text-foreground">
-                        ₹{Number(p.pivot_price).toFixed(2)}
-                      </td>
-                      <td className="py-2.5 px-3 text-rose-400">
-                        ₹{Number(p.initial_stop).toFixed(2)} (
-                        {Number(p.stop_distance_pct).toFixed(2)}%)
-                      </td>
-                      <td className="py-2.5 px-3 text-emerald-400">
-                        ₹{Number(p.t1).toFixed(2)}
-                      </td>
-                      <td className="py-2.5 px-3 text-muted-foreground">
-                        {Number(p.risk_budget_pct).toFixed(1)}% (
-                        {p.leg_count} legs)
-                      </td>
-                      <td className="py-2.5 px-3 text-muted-foreground">
-                        {p.entry_session_date}
-                      </td>
-                      <td className="py-2.5 px-3 text-right">
-                        {isPending ? (
-                          <Button variant="outline" size="sm" className="h-6 px-2 text-[10px]">
-                            Review charts
-                          </Button>
-                        ) : (
+
+          {/* Proposals Table */}
+          {isLoading ? (
+            <div className="flex h-48 items-center justify-center rounded-lg border border-border/60 bg-card text-muted-foreground">
+              <div className="flex flex-col items-center gap-2">
+                <Spinner className="h-5 w-5 text-primary" />
+                <span>Loading trade proposals…</span>
+              </div>
+            </div>
+          ) : error ? (
+            <div className="flex h-48 items-center justify-center rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-400">
+              Error loading trade proposals
+            </div>
+          ) : proposals.length === 0 ? (
+            <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-lg border border-border/60 bg-card/40 text-muted-foreground p-4 text-center">
+              <AlertCircleIcon className="h-8 w-8 text-muted-foreground/40" />
+              <p>
+                {symbolSearch
+                  ? `No proposals found matching symbol "${symbolSearch}".`
+                  : statusFilter === "pending_approval"
+                    ? "No proposals are waiting for approval. Generate a batch from the latest scan to review candidates."
+                    : `No proposals found for ${statusFilter.replaceAll("_", " ")}.`}
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-border/60 bg-card overflow-hidden shadow-sm">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-border/60 bg-muted/30 text-[10px] text-muted-foreground uppercase tracking-wider">
+                    <th className="py-2.5 px-3 font-semibold">Symbol</th>
+                    <th className="py-2.5 px-3 font-semibold">Template</th>
+                    <th className="py-2.5 px-3 font-semibold">Confidence</th>
+                    <th className="py-2.5 px-3 font-semibold">Pivot Entry</th>
+                    <th className="py-2.5 px-3 font-semibold">Stop Loss</th>
+                    <th className="py-2.5 px-3 font-semibold">Target 1</th>
+                    <th className="py-2.5 px-3 font-semibold">Risk Budget</th>
+                    <th className="py-2.5 px-3 font-semibold">Session Date</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/40 text-[11px]">
+                  {proposals.map((p) => {
+                    const isPending = p.status === "pending_approval"
+                    return (
+                      <tr
+                        key={p.id}
+                        onClick={() => navigate(`/proposals/${p.id}`)}
+                        className="cursor-pointer hover:bg-muted/20 transition-colors group"
+                      >
+                        <td className="py-2.5 px-3 font-bold text-foreground group-hover:text-primary transition-colors">
+                          <div className="flex items-center gap-1.5">
+                            {p.symbol}
+                            {p.live_eligible ? (
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title="Live Eligible" />
+                            ) : null}
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-3">
                           <Badge
-                            variant={
-                              p.status === "approved"
-                                ? "default"
-                                : p.status === "expired_unapproved"
-                                  ? "secondary"
-                                  : "outline"
-                            }
-                            className="text-[9px] uppercase"
+                            variant="outline"
+                            className={templateBadges[p.entry_template] || ""}
                           >
-                            {p.status.replace("_", " ")}
+                            {p.entry_template.toUpperCase()}
                           </Badge>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+                        </td>
+                        <td className="py-2.5 px-3 text-muted-foreground">
+                          {(Number(p.confidence) * 100).toFixed(0)}%
+                        </td>
+                        <td className="py-2.5 px-3 font-semibold text-foreground">
+                          ₹{Number(p.pivot_price).toFixed(2)}
+                        </td>
+                        <td className="py-2.5 px-3 text-rose-400">
+                          ₹{Number(p.initial_stop).toFixed(2)} (
+                          {Number(p.stop_distance_pct).toFixed(2)}%)
+                        </td>
+                        <td className="py-2.5 px-3 text-emerald-400 font-semibold">
+                          ₹{Number(p.t1).toFixed(2)}
+                        </td>
+                        <td className="py-2.5 px-3 text-muted-foreground">
+                          {Number(p.risk_budget_pct).toFixed(1)}% (
+                          {p.leg_count} legs)
+                        </td>
+                        <td className="py-2.5 px-3 text-muted-foreground">
+                          {p.entry_session_date}
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
+                          <Button
+                            variant={isPending ? "default" : "outline"}
+                            size="sm"
+                            className="h-6 px-2.5 text-[10px] font-bold"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              navigate(`/proposals/${p.id}`)
+                            }}
+                          >
+                            {isPending ? "Review Plan" : "View Details"}
+                          </Button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
-
-      {/* Detail Modal */}
-      <ProposalDetailModal
-        proposal={selectedProposal}
-        open={detailOpen}
-        onOpenChange={setDetailOpen}
-      />
     </div>
   )
 }

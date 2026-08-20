@@ -40,6 +40,7 @@ from app.schemas.proposals import (
     ProposalBatchTriggerRequest,
     ProposalBatchTriggerResponse,
     ProposalGenerationResultsResponse,
+    ProposalRunSummaryResponse,
     ProposalSingleTriggerResponse,
 )
 from app.services.p10_rollout import (
@@ -136,6 +137,59 @@ async def get_latest_proposal_batch(
         await db.execute(stmt, {"scan_run_id": scan_run_id})
     ).mappings().one_or_none()
     return _proposal_batch_status(row)
+
+
+@router.get("/proposal-batches", response_model=list[ProposalRunSummaryResponse])
+async def list_proposal_batches(
+    db: db_dep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> list[ProposalRunSummaryResponse]:
+    """Returns a list of recent proposal automation runs (batches and single-stock runs)."""
+    stmt = text("""
+        SELECT ar.id, ar.scan_run_id, ar.status, ar.candidates_total, ar.candidates_processed,
+               ar.proposals_generated, ar.proposals_rejected, ar.proposals_uncertain,
+               ar.proposals_failed, ar.error_message, ar.started_at, ar.completed_at,
+               ar.created_at, sr.as_of_date,
+               (
+                   SELECT pa.symbol
+                   FROM proposal_attempts pa
+                   WHERE pa.automation_run_id = ar.id
+                   LIMIT 1
+               ) AS single_symbol
+        FROM automation_runs ar
+        LEFT JOIN scan_runs sr ON sr.id = ar.scan_run_id
+        ORDER BY ar.created_at DESC
+        LIMIT :limit;
+    """)
+    rows = (await db.execute(stmt, {"limit": limit})).mappings().all()
+    results = []
+    for r in rows:
+        status_val = str(r["status"] or "failed")
+        if status_val not in {"running", "completed", "timed_out", "failed", "idle"}:
+            status_val = "failed"
+        total = int(r["candidates_total"] or 0)
+        run_type = "single" if total == 1 else "batch"
+        results.append(
+            ProposalRunSummaryResponse(
+                id=r["id"],
+                scan_run_id=r["scan_run_id"],
+                status=status_val,  # type: ignore[arg-type]
+                candidates_total=total,
+                candidates_processed=int(r["candidates_processed"] or 0),
+                proposals_generated=int(r["proposals_generated"] or 0),
+                proposals_rejected=int(r["proposals_rejected"] or 0),
+                proposals_uncertain=int(r["proposals_uncertain"] or 0),
+                proposals_failed=int(r["proposals_failed"] or 0),
+                run_type=run_type,
+                single_symbol=r["single_symbol"] if run_type == "single" else None,
+                as_of_date=r["as_of_date"],
+                error_message=r["error_message"],
+                started_at=r["started_at"],
+                completed_at=r["completed_at"],
+                created_at=r["created_at"],
+            )
+        )
+    return results
 
 
 @router.post("/proposal-batches", response_model=ProposalBatchTriggerResponse)
@@ -486,9 +540,11 @@ async def list_trade_proposals(
         Query(alias="status"),
     ] = "pending_approval",
     symbol: str | None = None,
+    automation_run_id: UUID | None = None,
+    as_of_date: dt.date | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[dict[str, Any]]:
-    """Returns trade proposals filtered by status (default: pending_approval) and symbol."""
+    """Returns trade proposals filtered by status (default: pending_approval), symbol, run, or date."""
     where_clauses = []
     params: dict[str, Any] = {"limit": limit}
 
@@ -499,6 +555,14 @@ async def list_trade_proposals(
     if symbol:
         where_clauses.append("symbol = :symbol")
         params["symbol"] = symbol.upper()
+
+    if automation_run_id:
+        where_clauses.append("automation_run_id = :automation_run_id")
+        params["automation_run_id"] = automation_run_id
+
+    if as_of_date:
+        where_clauses.append("as_of_date = :as_of_date")
+        params["as_of_date"] = as_of_date
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     stmt = text(f"""

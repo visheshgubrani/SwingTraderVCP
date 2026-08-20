@@ -454,6 +454,13 @@ async def process_proposal_candidate(
                 charts=charts,
                 policy_version=int(policy["version"]),
             )
+        logger.info(
+            "Processing candidate %s (attempt %s/%s) for automation run %s",
+            candidate.symbol,
+            attempt_number,
+            settings.proposal_max_attempts,
+            automation_run_id,
+        )
         try:
             ai_output, usage, cost, request_id = await asyncio.wait_for(
                 call_gemini_vision_for_proposal(
@@ -465,6 +472,14 @@ async def process_proposal_candidate(
                     tick_size=tick_size,
                 ),
                 timeout=timeout,
+            )
+            logger.info(
+                "Gemini vision output for %s: verdict=%s, confidence=%.2f, contradicts=%s, template=%s",
+                candidate.symbol,
+                ai_output.verdict,
+                ai_output.confidence,
+                ai_output.contradicts_scanner,
+                ai_output.entry_template.value,
             )
         except TimeoutError as exc:
             logger.warning(

@@ -19,6 +19,7 @@ import { OrderBookTable, type OrderIntentItem } from "@/features/orders/OrderBoo
 import { DashboardOverview } from "@/features/overview/DashboardOverview"
 import { PositionsTable, type PositionItem } from "@/features/positions/PositionsTable"
 import { PaperLedgerView } from "@/features/proposals/PaperLedgerView"
+import { ProposalDetailPage } from "@/features/proposals/ProposalDetailPage"
 import { ProposalInbox } from "@/features/proposals/ProposalInbox"
 import { RolloutBanner } from "@/features/proposals/RolloutBanner"
 import { ScannerPage } from "@/features/screener/ScannerPage"
@@ -185,6 +186,7 @@ const router = createBrowserRouter([
         { index: true, Component: TradingDashboard },
         { path: "scanner", Component: ScannerPage },
         { path: "proposals", Component: ProposalInbox },
+        { path: "proposals/:proposalId", Component: ProposalDetailPage },
         { path: "fundamentals", Component: FundamentalsView },
         { path: "positions", Component: PositionsRoute },
         { path: "orders", Component: OrdersRoute },

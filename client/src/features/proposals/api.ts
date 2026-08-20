@@ -341,6 +341,7 @@ export interface ProposalGenerationAttempt {
   error_type: string | null
   error_message: string | null
   error_details: Record<string, unknown>
+  as_of_date?: string | null
   started_at: string
   completed_at: string | null
 }
@@ -740,3 +741,43 @@ export function useResolveCapacityConflict() {
     },
   })
 }
+
+export function useRejectedAttempts(filters?: {
+  status?: string | null
+  symbol?: string | null
+  automationRunId?: string | null
+  limit?: number
+}) {
+  const queryParams = new URLSearchParams()
+  if (filters?.status && filters.status !== "all") queryParams.set("status", filters.status)
+  if (filters?.symbol) queryParams.set("symbol", filters.symbol)
+  if (filters?.automationRunId) queryParams.set("automation_run_id", filters.automationRunId)
+  if (filters?.limit) queryParams.set("limit", String(filters.limit))
+
+  const queryString = queryParams.toString() ? `?${queryParams.toString()}` : ""
+  return useQuery<ProposalGenerationAttempt[]>({
+    queryKey: [
+      "automation",
+      "rejected-attempts",
+      filters?.status,
+      filters?.symbol,
+      filters?.automationRunId,
+      filters?.limit,
+    ],
+    queryFn: () =>
+      apiRequest<ProposalGenerationAttempt[]>(`/automation/rejected-attempts${queryString}`),
+    refetchInterval: 5000,
+  })
+}
+
+export function useProposalAttempt(id: string | null) {
+  return useQuery<ProposalGenerationAttempt>({
+    queryKey: ["automation", "proposal-attempt", id],
+    queryFn: () => {
+      if (!id) throw new Error("No attempt ID provided")
+      return apiRequest<ProposalGenerationAttempt>(`/automation/attempts/${id}`)
+    },
+    enabled: !!id,
+  })
+}
+

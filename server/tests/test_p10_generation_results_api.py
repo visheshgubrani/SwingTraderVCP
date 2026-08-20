@@ -131,6 +131,38 @@ class ProposalGenerationResultsApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 404)
 
+    async def test_list_rejected_attempts(self) -> None:
+        db = AsyncMock()
+        attempt_row = dict(self.attempt)
+        attempt_row["as_of_date"] = dt.date(2026, 8, 19)
+        db.execute.return_value = mappings_all([attempt_row])
+
+        from app.routers.automation import list_rejected_attempts
+
+        results = await list_rejected_attempts(db, status_filter="invalid", symbol="EXAMPLE")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].symbol, "NSE:EXAMPLE-EQ")
+        self.assertEqual(results[0].status, "invalid")
+        self.assertEqual(results[0].error_type, "proposal_anchor_price_out_of_tolerance")
+
+    async def test_get_proposal_attempt(self) -> None:
+        db = AsyncMock()
+        attempt_row = dict(self.attempt)
+        attempt_row["as_of_date"] = dt.date(2026, 8, 19)
+        db.execute.return_value = mappings_one(attempt_row)
+
+        from app.routers.automation import get_proposal_attempt, get_attempt_chart_direct
+
+        result = await get_proposal_attempt(self.attempt_id, db)
+        self.assertEqual(result.id, self.attempt_id)
+        self.assertEqual(result.symbol, "NSE:EXAMPLE-EQ")
+
+        # Direct chart test
+        db.execute.return_value = mappings_one({"image": b"direct-png-bytes"})
+        chart_res = await get_attempt_chart_direct(self.attempt_id, "context", db)
+        self.assertEqual(chart_res.media_type, "image/png")
+        self.assertEqual(bytes(chart_res.body), b"direct-png-bytes")
+
 
 if __name__ == "__main__":
     unittest.main()

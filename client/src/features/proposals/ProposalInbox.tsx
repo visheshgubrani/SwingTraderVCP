@@ -5,9 +5,11 @@ import {
   AlertCircleIcon,
   ChevronDownIcon,
   HistoryIcon,
+  LayersIcon,
   PlayIcon,
   SearchIcon,
   SparklesIcon,
+  XCircleIcon,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -25,6 +27,7 @@ import {
   useCapacityConflicts,
   useResolveCapacityConflict,
   useTradeProposals,
+  useRejectedAttempts,
   useProposalBatch,
   useProposalBatches,
   useTriggerProposalBatch,
@@ -38,6 +41,7 @@ export function ProposalInbox() {
   const [symbolSearch, setSymbolSearch] = useState<string>("")
   const [selectedRunId, setSelectedRunId] = useState<string>("latest")
   const [showMarketContext, setShowMarketContext] = useState<boolean>(false)
+  const [showGenerationLedger, setShowGenerationLedger] = useState<boolean>(false)
   const queryClient = useQueryClient()
 
   const { data: pastRuns = [] } = useProposalBatches(30)
@@ -67,13 +71,30 @@ export function ProposalInbox() {
     automationRunId: selectedRunId !== "all" && selectedRunId !== "latest" ? selectedRunId : null,
   }), [symbolSearch, selectedRunId])
 
-  const { data: rawProposals = [], isLoading, error } = useTradeProposals(statusFilter, proposalQueryParams)
+  const isRejectedTab = statusFilter === "system_rejected"
+
+  const { data: rawProposals = [], isLoading: isProposalsLoading, error: proposalsError } = useTradeProposals(
+    isRejectedTab ? "all" : statusFilter,
+    proposalQueryParams,
+  )
+
+  const { data: rawRejected = [], isLoading: isRejectedLoading, error: rejectedError } = useRejectedAttempts({
+    status: "all",
+    symbol: symbolSearch.trim() || null,
+    automationRunId: selectedRunId !== "all" && selectedRunId !== "latest" ? selectedRunId : null,
+  })
 
   const proposals = useMemo(() => {
     if (!symbolSearch.trim()) return rawProposals
     const query = symbolSearch.trim().toUpperCase()
     return rawProposals.filter((p) => p.symbol.toUpperCase().includes(query))
   }, [rawProposals, symbolSearch])
+
+  const rejectedAttempts = useMemo(() => {
+    if (!symbolSearch.trim()) return rawRejected
+    const query = symbolSearch.trim().toUpperCase()
+    return rawRejected.filter((a) => a.symbol.toUpperCase().includes(query))
+  }, [rawRejected, symbolSearch])
 
   const supervisorActive = supervisorStatus?.status === "active"
   const batchRunning =
@@ -120,6 +141,7 @@ export function ProposalInbox() {
         queryKey: ["automation", "proposal-generation-results", runId],
       })
       void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
+      void queryClient.invalidateQueries({ queryKey: ["automation", "rejected-attempts"] })
       void queryClient.invalidateQueries({ queryKey: ["automation", "proposal-batches"] })
     }
     previousBatchRef.current = { runId, status }
@@ -133,9 +155,9 @@ export function ProposalInbox() {
   }
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden bg-background font-mono text-xs text-foreground">
+    <div className="flex h-full w-full flex-col overflow-y-auto bg-background font-mono text-xs text-foreground min-h-0">
       {/* Top Header & Supervisor Monitor */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/80 bg-card/60 px-4 py-3">
+      <div className="sticky top-0 z-20 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/80 bg-card/95 px-4 py-3 backdrop-blur shadow-sm">
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary">
             <SparklesIcon className="h-4 w-4" />
@@ -196,25 +218,10 @@ export function ProposalInbox() {
         </div>
       ) : null}
 
-      {/* Main Scrollable Viewport */}
-      <div className="flex-1 overflow-y-auto min-h-0 p-4 space-y-4">
-        {/* Toggleable Market Context Panel */}
-        <div className="flex items-center justify-between">
-          <Button
-            variant="ghost"
-            size="xs"
-            onClick={() => setShowMarketContext(!showMarketContext)}
-            className="text-[11px] text-muted-foreground hover:text-foreground"
-          >
-            <ChevronDownIcon className={`mr-1 h-3.5 w-3.5 transition-transform ${showMarketContext ? "" : "-rotate-90"}`} />
-            {showMarketContext ? "Hide Market Context" : "Show Market Context & Sector Gates"}
-          </Button>
-        </div>
-
-        {showMarketContext && <MarketContextPanel />}
-
-        {/* History / Run Selector Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-card/60 p-3">
+      {/* Main Content Area */}
+      <div className="p-4 space-y-4">
+        {/* Run Selector & Collapsible Panels Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-card/60 p-3 shadow-sm">
           <div className="flex items-center gap-2">
             <HistoryIcon className="h-4 w-4 text-primary" />
             <span className="font-semibold text-foreground">Generation Run History:</span>
@@ -224,7 +231,7 @@ export function ProposalInbox() {
               className="rounded-md border border-border bg-background px-2.5 py-1 text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             >
               <option value="latest">Latest Batch / Run</option>
-              <option value="all">All Historical Proposals</option>
+              <option value="all">All Historical Runs & Trades</option>
               {pastRuns.map((run) => {
                 const label = run.run_type === "single"
                   ? `Single Stock: ${run.single_symbol ?? "Single"} · ${run.status.toUpperCase()} (${new Date(run.created_at).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit" })})`
@@ -238,15 +245,36 @@ export function ProposalInbox() {
             </select>
           </div>
 
-          <div className="text-[10px] text-muted-foreground">
-            {selectedRunId === "latest" ? "Showing most recent batch" : selectedRunId === "all" ? "Showing all proposals" : "Viewing historical run"}
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => setShowGenerationLedger(!showGenerationLedger)}
+              className="text-[10px] text-muted-foreground hover:text-foreground gap-1"
+            >
+              <LayersIcon className="h-3 w-3" />
+              {showGenerationLedger ? "Hide Batch Ledger" : "View Batch Ledger"}
+            </Button>
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => setShowMarketContext(!showMarketContext)}
+              className="text-[10px] text-muted-foreground hover:text-foreground gap-1"
+            >
+              <ChevronDownIcon className={`h-3 w-3 transition-transform ${showMarketContext ? "" : "-rotate-90"}`} />
+              {showMarketContext ? "Hide Market Context" : "P9 Market Context"}
+            </Button>
           </div>
         </div>
 
-        {/* Generation Ledger (Candidate Attempts) */}
-        <ProposalGenerationResults
-          automationRunId={effectiveRunId}
-        />
+        {/* Optional Collapsible P9 Context & Generation Ledger */}
+        {showMarketContext && <MarketContextPanel />}
+
+        {showGenerationLedger && (
+          <ProposalGenerationResults
+            automationRunId={effectiveRunId}
+          />
+        )}
 
         {(supervisorStatus?.recent_allocation_events ?? [])
           .filter((event) => event.context_gate_reasons?.length)
@@ -289,16 +317,17 @@ export function ProposalInbox() {
           </div>
         ))}
 
-        {/* Proposals List Section Header & Filters */}
+        {/* Proposals / Rejected Tabs and Search Bar */}
         <div className="space-y-3 pt-2">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-1.5">
               {[
                 { key: "pending_approval", label: "Pending Approval" },
                 { key: "approved", label: "Approved" },
+                { key: "system_rejected", label: "Rejected by System" },
+                { key: "rejected", label: "Rejected by Operator" },
                 { key: "expired_unapproved", label: "Expired" },
-                { key: "rejected", label: "Human Rejected" },
-                { key: "all", label: "All Proposals" },
+                { key: "all", label: "All Trades" },
               ].map((tab) => (
                 <button
                   key={tab.key}
@@ -310,6 +339,11 @@ export function ProposalInbox() {
                   }`}
                 >
                   {tab.label}
+                  {tab.key === "system_rejected" && rejectedAttempts.length > 0 && (
+                    <span className="ml-1.5 rounded-full bg-rose-500/20 px-1.5 py-0.5 text-[9px] text-rose-300 font-bold">
+                      {rejectedAttempts.length}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
@@ -327,112 +361,219 @@ export function ProposalInbox() {
             </div>
           </div>
 
-          {/* Proposals Table */}
-          {isLoading ? (
-            <div className="flex h-48 items-center justify-center rounded-lg border border-border/60 bg-card text-muted-foreground">
-              <div className="flex flex-col items-center gap-2">
-                <Spinner className="h-5 w-5 text-primary" />
-                <span>Loading trade proposals…</span>
+          {/* REJECTED BY SYSTEM TABLE */}
+          {isRejectedTab ? (
+            isRejectedLoading ? (
+              <div className="flex h-48 items-center justify-center rounded-lg border border-border/60 bg-card text-muted-foreground">
+                <div className="flex flex-col items-center gap-2">
+                  <Spinner className="h-5 w-5 text-primary" />
+                  <span>Loading system-rejected trade candidates…</span>
+                </div>
               </div>
-            </div>
-          ) : error ? (
-            <div className="flex h-48 items-center justify-center rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-400">
-              Error loading trade proposals
-            </div>
-          ) : proposals.length === 0 ? (
-            <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-lg border border-border/60 bg-card/40 text-muted-foreground p-4 text-center">
-              <AlertCircleIcon className="h-8 w-8 text-muted-foreground/40" />
-              <p>
-                {symbolSearch
-                  ? `No proposals found matching symbol "${symbolSearch}".`
-                  : statusFilter === "pending_approval"
-                    ? "No proposals are waiting for approval. Generate a batch from the latest scan to review candidates."
-                    : `No proposals found for ${statusFilter.replaceAll("_", " ")}.`}
-              </p>
-            </div>
+            ) : rejectedError ? (
+              <div className="flex h-48 items-center justify-center rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-400">
+                Error loading rejected trade candidates
+              </div>
+            ) : rejectedAttempts.length === 0 ? (
+              <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-lg border border-border/60 bg-card/40 text-muted-foreground p-4 text-center">
+                <AlertCircleIcon className="h-8 w-8 text-muted-foreground/40" />
+                <p>
+                  {symbolSearch
+                    ? `No system-rejected candidates matching symbol "${symbolSearch}".`
+                    : "No candidate setups were rejected by the system rules for this selection."}
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-border/60 bg-card overflow-hidden shadow-sm">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-border/60 bg-muted/30 text-[10px] text-muted-foreground uppercase tracking-wider">
+                      <th className="py-2.5 px-3 font-semibold">Symbol</th>
+                      <th className="py-2.5 px-3 font-semibold">Gemini Verdict</th>
+                      <th className="py-2.5 px-3 font-semibold">Proposed Pivot</th>
+                      <th className="py-2.5 px-3 font-semibold">Proposed SL</th>
+                      <th className="py-2.5 px-3 font-semibold">System Rejection Reason</th>
+                      <th className="py-2.5 px-3 font-semibold">Date</th>
+                      <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/40 text-[11px]">
+                    {rejectedAttempts.map((attempt) => {
+                      const structured = attempt.structured_output ?? {}
+                      const pivot = structured.pivot_price != null ? Number(structured.pivot_price) : null
+                      const verdict = structured.verdict ?? attempt.status
+                      const confidence = structured.confidence != null ? Number(structured.confidence) : null
+
+                      return (
+                        <tr
+                          key={attempt.id}
+                          onClick={() => navigate(`/proposals/attempts/${attempt.id}`)}
+                          className="cursor-pointer hover:bg-muted/20 transition-colors group"
+                        >
+                          <td className="py-2.5 px-3 font-bold text-foreground group-hover:text-primary transition-colors">
+                            <div className="flex items-center gap-1.5">
+                              <XCircleIcon className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+                              {attempt.symbol}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <div className="flex items-center gap-1.5">
+                              <Badge variant="outline" className="text-[10px]">
+                                {String(verdict).toUpperCase()}
+                              </Badge>
+                              {confidence != null && (
+                                <span className="text-[10px] text-muted-foreground">
+                                  {(confidence * 100).toFixed(0)}%
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 font-semibold text-foreground">
+                            {pivot != null ? `₹${pivot.toFixed(2)}` : "-"}
+                          </td>
+                          <td className="py-2.5 px-3 text-rose-400">
+                            {attempt.error_type === "proposal_geometry_invalid" ? (
+                              <span className="font-semibold">{attempt.error_message?.split(";")[0] ?? "Invalid SL"}</span>
+                            ) : (
+                              "-"
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-rose-300/90 max-w-xs truncate" title={attempt.error_message || ""}>
+                            <span className="font-semibold text-rose-400">{attempt.error_type ?? "rejected"}:</span>{" "}
+                            {attempt.error_message || "Rejected by deterministic risk rules"}
+                          </td>
+                          <td className="py-2.5 px-3 text-muted-foreground">
+                            {attempt.as_of_date || new Date(attempt.started_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" })}
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-6 px-2.5 text-[10px] font-bold text-rose-400 border-rose-500/30 hover:bg-rose-500/10"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                navigate(`/proposals/attempts/${attempt.id}`)
+                              }}
+                            >
+                              View Details
+                            </Button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )
           ) : (
-            <div className="rounded-lg border border-border/60 bg-card overflow-hidden shadow-sm">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-border/60 bg-muted/30 text-[10px] text-muted-foreground uppercase tracking-wider">
-                    <th className="py-2.5 px-3 font-semibold">Symbol</th>
-                    <th className="py-2.5 px-3 font-semibold">Template</th>
-                    <th className="py-2.5 px-3 font-semibold">Confidence</th>
-                    <th className="py-2.5 px-3 font-semibold">Pivot Entry</th>
-                    <th className="py-2.5 px-3 font-semibold">Stop Loss</th>
-                    <th className="py-2.5 px-3 font-semibold">Target 1</th>
-                    <th className="py-2.5 px-3 font-semibold">Risk Budget</th>
-                    <th className="py-2.5 px-3 font-semibold">Session Date</th>
-                    <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/40 text-[11px]">
-                  {proposals.map((p) => {
-                    const isPending = p.status === "pending_approval"
-                    return (
-                      <tr
-                        key={p.id}
-                        onClick={() => navigate(`/proposals/${p.id}`)}
-                        className="cursor-pointer hover:bg-muted/20 transition-colors group"
-                      >
-                        <td className="py-2.5 px-3 font-bold text-foreground group-hover:text-primary transition-colors">
-                          <div className="flex items-center gap-1.5">
-                            {p.symbol}
-                            {p.live_eligible ? (
-                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title="Live Eligible" />
-                            ) : null}
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-3">
-                          <Badge
-                            variant="outline"
-                            className={templateBadges[p.entry_template] || ""}
-                          >
-                            {p.entry_template.toUpperCase()}
-                          </Badge>
-                        </td>
-                        <td className="py-2.5 px-3 text-muted-foreground">
-                          {(Number(p.confidence) * 100).toFixed(0)}%
-                        </td>
-                        <td className="py-2.5 px-3 font-semibold text-foreground">
-                          ₹{Number(p.pivot_price).toFixed(2)}
-                        </td>
-                        <td className="py-2.5 px-3 text-rose-400">
-                          ₹{Number(p.initial_stop).toFixed(2)} (
-                          {Number(p.stop_distance_pct).toFixed(2)}%)
-                        </td>
-                        <td className="py-2.5 px-3 text-emerald-400 font-semibold">
-                          ₹{Number(p.t1).toFixed(2)}
-                        </td>
-                        <td className="py-2.5 px-3 text-muted-foreground">
-                          {Number(p.risk_budget_pct).toFixed(1)}% (
-                          {p.leg_count} legs)
-                        </td>
-                        <td className="py-2.5 px-3 text-muted-foreground">
-                          {p.entry_session_date}
-                        </td>
-                        <td className="py-2.5 px-3 text-right">
-                          <Button
-                            variant={isPending ? "default" : "outline"}
-                            size="sm"
-                            className="h-6 px-2.5 text-[10px] font-bold"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              navigate(`/proposals/${p.id}`)
-                            }}
-                          >
-                            {isPending ? "Review Plan" : "View Details"}
-                          </Button>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
+            /* PROPOSALS TABLE (Pending, Approved, Rejected by Operator, Expired, All) */
+            isProposalsLoading ? (
+              <div className="flex h-48 items-center justify-center rounded-lg border border-border/60 bg-card text-muted-foreground">
+                <div className="flex flex-col items-center gap-2">
+                  <Spinner className="h-5 w-5 text-primary" />
+                  <span>Loading trade proposals…</span>
+                </div>
+              </div>
+            ) : proposalsError ? (
+              <div className="flex h-48 items-center justify-center rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-400">
+                Error loading trade proposals
+              </div>
+            ) : proposals.length === 0 ? (
+              <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-lg border border-border/60 bg-card/40 text-muted-foreground p-4 text-center">
+                <AlertCircleIcon className="h-8 w-8 text-muted-foreground/40" />
+                <p>
+                  {symbolSearch
+                    ? `No proposals found matching symbol "${symbolSearch}".`
+                    : statusFilter === "pending_approval"
+                      ? "No proposals are waiting for approval. Generate a batch from the latest scan to review candidates."
+                      : `No proposals found for ${statusFilter.replaceAll("_", " ")}.`}
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-border/60 bg-card overflow-hidden shadow-sm">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-border/60 bg-muted/30 text-[10px] text-muted-foreground uppercase tracking-wider">
+                      <th className="py-2.5 px-3 font-semibold">Symbol</th>
+                      <th className="py-2.5 px-3 font-semibold">Template</th>
+                      <th className="py-2.5 px-3 font-semibold">Confidence</th>
+                      <th className="py-2.5 px-3 font-semibold">Pivot Entry</th>
+                      <th className="py-2.5 px-3 font-semibold">Stop Loss</th>
+                      <th className="py-2.5 px-3 font-semibold">Target 1</th>
+                      <th className="py-2.5 px-3 font-semibold">Risk Budget</th>
+                      <th className="py-2.5 px-3 font-semibold">Session Date</th>
+                      <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/40 text-[11px]">
+                    {proposals.map((p) => {
+                      const isPending = p.status === "pending_approval"
+                      return (
+                        <tr
+                          key={p.id}
+                          onClick={() => navigate(`/proposals/${p.id}`)}
+                          className="cursor-pointer hover:bg-muted/20 transition-colors group"
+                        >
+                          <td className="py-2.5 px-3 font-bold text-foreground group-hover:text-primary transition-colors">
+                            <div className="flex items-center gap-1.5">
+                              {p.symbol}
+                              {p.live_eligible ? (
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title="Live Eligible" />
+                              ) : null}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <Badge
+                              variant="outline"
+                              className={templateBadges[p.entry_template] || ""}
+                            >
+                              {p.entry_template.toUpperCase()}
+                            </Badge>
+                          </td>
+                          <td className="py-2.5 px-3 text-muted-foreground">
+                            {(Number(p.confidence) * 100).toFixed(0)}%
+                          </td>
+                          <td className="py-2.5 px-3 font-semibold text-foreground">
+                            ₹{Number(p.pivot_price).toFixed(2)}
+                          </td>
+                          <td className="py-2.5 px-3 text-rose-400">
+                            ₹{Number(p.initial_stop).toFixed(2)} (
+                            {Number(p.stop_distance_pct).toFixed(2)}%)
+                          </td>
+                          <td className="py-2.5 px-3 text-emerald-400 font-semibold">
+                            ₹{Number(p.t1).toFixed(2)}
+                          </td>
+                          <td className="py-2.5 px-3 text-muted-foreground">
+                            {Number(p.risk_budget_pct).toFixed(1)}% (
+                            {p.leg_count} legs)
+                          </td>
+                          <td className="py-2.5 px-3 text-muted-foreground">
+                            {p.entry_session_date}
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <Button
+                              variant={isPending ? "default" : "outline"}
+                              size="sm"
+                              className="h-6 px-2.5 text-[10px] font-bold"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                navigate(`/proposals/${p.id}`)
+                              }}
+                            >
+                              {isPending ? "Review Plan" : "View Details"}
+                            </Button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )
           )}
         </div>
       </div>
     </div>
   )
 }
+

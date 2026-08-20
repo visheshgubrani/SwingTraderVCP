@@ -329,6 +329,7 @@ class ProposalGenerationAttemptResponse(BaseModel):
     error_type: str | None = None
     error_message: str | None = None
     error_details: dict[str, Any] = Field(default_factory=dict)
+    as_of_date: dt.date | None = None
     started_at: dt.datetime
     completed_at: dt.datetime | None = None
 

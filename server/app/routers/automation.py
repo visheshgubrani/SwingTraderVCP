@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -39,6 +40,7 @@ from app.schemas.proposals import (
     ProposalBatchStatusResponse,
     ProposalBatchTriggerRequest,
     ProposalBatchTriggerResponse,
+    ProposalGenerationAttemptResponse,
     ProposalGenerationResultsResponse,
     ProposalRunSummaryResponse,
     ProposalSingleTriggerResponse,
@@ -529,6 +531,161 @@ async def get_proposal_generation_chart(
     ).mappings().one_or_none()
     if row is None or row["image"] is None:
         raise HTTPException(status_code=404, detail="Generation chart not found")
+    return Response(content=bytes(row["image"]), media_type="image/png")
+
+
+@router.get("/rejected-attempts", response_model=list[ProposalGenerationAttemptResponse])
+async def list_rejected_attempts(
+    db: db_dep,
+    status_filter: Annotated[
+        Literal["all", "invalid", "uncertain", "failed", "timed_out"],
+        Query(alias="status"),
+    ] = "all",
+    symbol: str | None = None,
+    automation_run_id: UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[ProposalGenerationAttemptResponse]:
+    """Returns candidate attempts that were rejected by the system (Python rules or Gemini) or failed."""
+    where_clauses = ["pa.status <> 'valid' AND pa.status <> 'running'"]
+    params: dict[str, Any] = {"limit": limit}
+
+    if status_filter != "all":
+        where_clauses.append("pa.status = :status")
+        params["status"] = status_filter
+
+    if symbol:
+        where_clauses.append("pa.symbol = :symbol")
+        params["symbol"] = symbol.upper()
+
+    if automation_run_id:
+        where_clauses.append("pa.automation_run_id = :automation_run_id")
+        params["automation_run_id"] = automation_run_id
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}"
+    stmt = text(f"""
+        SELECT DISTINCT ON (pa.screening_result_id)
+               pa.id, pa.automation_run_id, pa.screening_result_id, pa.instrument_id,
+               pa.symbol, pa.attempt_number, pa.status, pa.source_hash, pa.renderer_version,
+               pa.prompt_version, pa.schema_version, pa.geometry_version, pa.model,
+               pa.risk_policy_version, pa.context_image_hash, pa.detail_image_hash,
+               pa.provider_request_id, pa.provider_usage, pa.provider_cost,
+               pa.structured_output, pa.error_type, pa.error_message, pa.error_details,
+               pa.started_at, pa.completed_at, sr.as_of_date
+        FROM proposal_attempts pa
+        LEFT JOIN automation_runs ar ON ar.id = pa.automation_run_id
+        LEFT JOIN scan_runs sr ON sr.id = ar.scan_run_id
+        {where_sql}
+        ORDER BY pa.screening_result_id, pa.attempt_number DESC, pa.started_at DESC
+        LIMIT :limit;
+    """)
+    rows = (await db.execute(stmt, params)).mappings().all()
+    return [
+        ProposalGenerationAttemptResponse(
+            id=r["id"],
+            automation_run_id=r["automation_run_id"],
+            screening_result_id=r["screening_result_id"],
+            instrument_id=r["instrument_id"],
+            symbol=r["symbol"],
+            attempt_number=r["attempt_number"],
+            status=r["status"],
+            source_hash=r["source_hash"],
+            renderer_version=r["renderer_version"],
+            prompt_version=r["prompt_version"],
+            schema_version=r["schema_version"],
+            geometry_version=r["geometry_version"],
+            model=r["model"],
+            risk_policy_version=r["risk_policy_version"],
+            context_image_hash=r["context_image_hash"],
+            detail_image_hash=r["detail_image_hash"],
+            provider_request_id=r["provider_request_id"],
+            provider_usage=r["provider_usage"] or {},
+            provider_cost=Decimal(str(r["provider_cost"] or 0)),
+            structured_output=r["structured_output"],
+            error_type=r["error_type"],
+            error_message=r["error_message"],
+            error_details=r["error_details"] or {},
+            as_of_date=r["as_of_date"],
+            started_at=r["started_at"],
+            completed_at=r["completed_at"],
+        )
+        for r in rows
+    ]
+
+
+@router.get("/attempts/{attempt_id}", response_model=ProposalGenerationAttemptResponse)
+async def get_proposal_attempt(
+    attempt_id: UUID,
+    db: db_dep,
+) -> ProposalGenerationAttemptResponse:
+    """Returns single candidate attempt details including structured output, error details, and basis."""
+    stmt = text("""
+        SELECT pa.id, pa.automation_run_id, pa.screening_result_id, pa.instrument_id,
+               pa.symbol, pa.attempt_number, pa.status, pa.source_hash, pa.renderer_version,
+               pa.prompt_version, pa.schema_version, pa.geometry_version, pa.model,
+               pa.risk_policy_version, pa.context_image_hash, pa.detail_image_hash,
+               pa.provider_request_id, pa.provider_usage, pa.provider_cost,
+               pa.structured_output, pa.error_type, pa.error_message, pa.error_details,
+               pa.started_at, pa.completed_at, sr.as_of_date
+        FROM proposal_attempts pa
+        LEFT JOIN automation_runs ar ON ar.id = pa.automation_run_id
+        LEFT JOIN scan_runs sr ON sr.id = ar.scan_run_id
+        WHERE pa.id = :attempt_id;
+    """)
+    r = (await db.execute(stmt, {"attempt_id": attempt_id})).mappings().one_or_none()
+    if not r:
+        raise HTTPException(status_code=404, detail="Proposal attempt not found")
+    return ProposalGenerationAttemptResponse(
+        id=r["id"],
+        automation_run_id=r["automation_run_id"],
+        screening_result_id=r["screening_result_id"],
+        instrument_id=r["instrument_id"],
+        symbol=r["symbol"],
+        attempt_number=r["attempt_number"],
+        status=r["status"],
+        source_hash=r["source_hash"],
+        renderer_version=r["renderer_version"],
+        prompt_version=r["prompt_version"],
+        schema_version=r["schema_version"],
+        geometry_version=r["geometry_version"],
+        model=r["model"],
+        risk_policy_version=r["risk_policy_version"],
+        context_image_hash=r["context_image_hash"],
+        detail_image_hash=r["detail_image_hash"],
+        provider_request_id=r["provider_request_id"],
+        provider_usage=r["provider_usage"] or {},
+        provider_cost=Decimal(str(r["provider_cost"] or 0)),
+        structured_output=r["structured_output"],
+        error_type=r["error_type"],
+        error_message=r["error_message"],
+        error_details=r["error_details"] or {},
+        as_of_date=r["as_of_date"],
+        started_at=r["started_at"],
+        completed_at=r["completed_at"],
+    )
+
+
+@router.get("/attempts/{attempt_id}/charts/{chart_type}")
+async def get_attempt_chart_direct(
+    attempt_id: UUID,
+    chart_type: Literal["context", "detail"],
+    db: db_dep,
+) -> Response:
+    """Serve a stored candidate attempt chart directly by attempt_id."""
+    column = "context_image" if chart_type == "context" else "detail_image"
+    row = (
+        await db.execute(
+            text(
+                f"""
+                SELECT {column} AS image
+                FROM proposal_attempts
+                WHERE id = :attempt_id
+                """
+            ),
+            {"attempt_id": attempt_id},
+        )
+    ).mappings().one_or_none()
+    if row is None or row["image"] is None:
+        raise HTTPException(status_code=404, detail="Attempt chart not found")
     return Response(content=bytes(row["image"]), media_type="image/png")
 
 

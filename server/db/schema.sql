@@ -1520,7 +1520,7 @@ ALTER TABLE trade_proposals
     ADD COLUMN IF NOT EXISTS risk_policy_version integer NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS approved_risk_budget_amount numeric(18, 4),
     ADD COLUMN IF NOT EXISTS prompt_version text NOT NULL DEFAULT 'p10_vcp_proposal_v4',
-    ADD COLUMN IF NOT EXISTS schema_version text NOT NULL DEFAULT 'gemini_vcp_proposal_output_v3',
+    ADD COLUMN IF NOT EXISTS schema_version text NOT NULL DEFAULT 'gemini_vcp_proposal_output_v4',
     ADD COLUMN IF NOT EXISTS geometry_version text NOT NULL DEFAULT 'p10_geometry_rr_adjusted_chase_v4',
     ADD COLUMN IF NOT EXISTS live_eligible boolean NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS generated_at timestamptz NOT NULL DEFAULT now(),

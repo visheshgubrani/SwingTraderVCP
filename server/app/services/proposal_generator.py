@@ -17,6 +17,7 @@ from typing import Any, Collection, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import httpx
+from pydantic import ValidationError
 
 from app.config import settings
 from app.domain.p10_geometry import (
@@ -35,15 +36,37 @@ from app.domain.p10_geometry import (
 from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
 from app.schemas.proposals import GeminiVcpProposalOutput
 from app.services.canonical_ohlcv import compact_ohlcv_table
-from app.services.openrouter_content import parse_openrouter_structured_content
+from app.services.fundamental_llm import sanitize_provider_payload
+from app.services.openrouter_content import (
+    decode_openrouter_json_value,
+    parse_openrouter_structured_content,
+)
+from app.services.openrouter_schema import gemini_compatible_json_schema
 from app.services.proposal_renderer import RenderedProposalCharts
 
 
 logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
 PROMPT_VERSION = "p10_vcp_proposal_v4"
-SCHEMA_VERSION = "gemini_vcp_proposal_output_v3"
+SCHEMA_VERSION = "gemini_vcp_proposal_output_v4"
 GEOMETRY_VERSION = "p10_geometry_rr_adjusted_chase_v4"
+PROPOSAL_INVALID_PROVIDER_JSON = "proposal_invalid_provider_json"
+_PROVIDER_PAYLOAD_SNIPPET_LIMIT = 4000
+
+
+class ProposalProviderError(RuntimeError):
+    """OpenRouter returned a payload that is not usable proposal JSON."""
+
+    error_type = PROPOSAL_INVALID_PROVIDER_JSON
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.details = details or {}
 
 
 GEMINI_PROPOSAL_SYSTEM_PROMPT = """You are a chart-pattern reader specializing in Mark Minervini's Volatility Contraction Pattern (VCP).
@@ -474,7 +497,9 @@ def build_proposal_vision_request(
             "json_schema": {
                 "name": "gemini_vcp_proposal_output",
                 "strict": True,
-                "schema": GeminiVcpProposalOutput.model_json_schema(),
+                "schema": gemini_compatible_json_schema(
+                    GeminiVcpProposalOutput.model_json_schema()
+                ),
             },
         },
         "provider": {"require_parameters": True, "data_collection": "deny"},
@@ -526,29 +551,102 @@ async def call_gemini_vision_for_proposal(
             json=request_body,
         )
         resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {"unparsed_body": resp.text[:2000]}
 
     return parse_proposal_openrouter_response(data)
 
 
-def parse_proposal_openrouter_response(
+def _provider_payload_snippet(value: Any) -> Any:
+    sanitized = sanitize_provider_payload(value)
+    encoded = json.dumps(sanitized, default=str)
+    if len(encoded) <= _PROVIDER_PAYLOAD_SNIPPET_LIMIT:
+        return sanitized
+    return {"truncated": True, "preview": encoded[:_PROVIDER_PAYLOAD_SNIPPET_LIMIT]}
+
+
+def _unwrap_json_payload(data: Any) -> Any:
+    if isinstance(data, (bytes, bytearray)):
+        data = data.decode("utf-8")
+    if not isinstance(data, str):
+        return data
+    try:
+        return decode_openrouter_json_value(data)
+    except json.JSONDecodeError as exc:
+        raise ProposalProviderError(
+            f"OpenRouter proposal payload is not valid JSON: {exc}",
+            details={"payload_type": "str"},
+        ) from exc
+
+
+def _extract_proposal_json(
     data: Mapping[str, Any],
+    *,
+    usage: Mapping[str, Any],
+) -> dict[str, Any]:
+    if "verdict" in data and "choices" not in data:
+        return dict(data)
+
+    choices: Any = data.get("choices")
+    if isinstance(choices, str):
+        choices = _unwrap_json_payload(choices)
+    if isinstance(choices, Mapping):
+        choices = [choices]
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("OpenRouter returned no proposal choice")
+
+    choice: Any = choices[0]
+    if isinstance(choice, str):
+        choice = _unwrap_json_payload(choice)
+    if isinstance(choice, Mapping) and "verdict" in choice and "message" not in choice:
+        return dict(choice)
+    if not isinstance(choice, Mapping):
+        raise ValueError("OpenRouter returned no proposal choice")
+    return parse_openrouter_structured_content(choice, usage=usage)
+
+
+def parse_proposal_openrouter_response(
+    data: Any,
 ) -> tuple[GeminiVcpProposalOutput, dict[str, Any], float, str | None]:
     """Parse a completed OpenRouter chat payload into the locked Gemini schema.
 
-    The helper expects the full choice object, matching VCP vision / P7 / journal.
-    Passing message content alone raises because that string has no ``message`` key.
+    Accepts a normal chat-completions object, a JSON string envelope, an
+    unwrapped structured proposal object, or a choice whose content is the
+    proposal JSON itself.
     """
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
-        raise RuntimeError("OpenRouter returned no proposal choice")
-    raw_usage = data.get("usage", {})
-    usage = dict(raw_usage) if isinstance(raw_usage, Mapping) else {}
-    parsed_json = parse_openrouter_structured_content(choices[0], usage=usage)
-    output = GeminiVcpProposalOutput.model_validate(parsed_json)
-    cost = float(usage.get("total_cost", usage.get("cost", 0.0)) or 0.0)
-    request_id = str(data["id"]) if data.get("id") is not None else None
-    return output, usage, cost, request_id
+    original = data
+    try:
+        data = _unwrap_json_payload(data)
+        if not isinstance(data, Mapping):
+            raise ValueError(
+                f"OpenRouter proposal payload is {type(data).__name__}, not an object"
+            )
+        raw_usage = data.get("usage", {})
+        usage = dict(raw_usage) if isinstance(raw_usage, Mapping) else {}
+        parsed_json = _extract_proposal_json(data, usage=usage)
+        output = GeminiVcpProposalOutput.model_validate(parsed_json)
+        cost = float(usage.get("total_cost", usage.get("cost", 0.0)) or 0.0)
+        request_id = str(data["id"]) if data.get("id") is not None else None
+        return output, usage, cost, request_id
+    except ProposalProviderError:
+        raise
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        ValidationError,
+        json.JSONDecodeError,
+        AttributeError,
+    ) as exc:
+        raise ProposalProviderError(
+            f"OpenRouter structured response was invalid: {exc}",
+            details={
+                "payload_type": type(original).__name__,
+                "payload": _provider_payload_snippet(original),
+            },
+        ) from exc
 
 
 def generate_trade_proposal_from_analysis(

@@ -37,6 +37,7 @@ from app.services.proposal_generator import (
     GEOMETRY_VERSION,
     PROMPT_VERSION,
     ProposalBuildResult,
+    ProposalProviderError,
     SCHEMA_VERSION,
     call_gemini_vision_for_proposal,
     compute_frozen_source_hash,
@@ -492,6 +493,26 @@ async def process_proposal_candidate(
                 await _finish_attempt(session, attempt_id=attempt_id, status="timed_out", error=exc)
             if dt.datetime.now(dt.timezone.utc) >= deadline:
                 return "timed_out"
+            continue
+        except ProposalProviderError as exc:
+            logger.warning(
+                "Proposal attempt %s for %s returned unusable provider JSON: %s",
+                attempt_number,
+                candidate.symbol,
+                exc,
+            )
+            async with async_session() as session:
+                await _finish_attempt(
+                    session,
+                    attempt_id=attempt_id,
+                    status="failed",
+                    error=exc,
+                    error_type=exc.error_type,
+                    error_message=str(exc),
+                    error_details=exc.details,
+                )
+            if attempt_number == settings.proposal_max_attempts:
+                return "failed"
             continue
         except Exception as exc:
             logger.warning(

@@ -20,6 +20,21 @@ def _usage_summary(usage: Mapping[str, Any] | None) -> str:
     return ", ".join(parts) if parts else "usage=n/a"
 
 
+def decode_openrouter_json_value(value: Any) -> Any:
+    """JSON-decode strings once, or twice when the payload is double-encoded."""
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8")
+    if not isinstance(value, str):
+        return value
+    parsed = json.loads(value)
+    if isinstance(parsed, str):
+        try:
+            return json.loads(parsed)
+        except json.JSONDecodeError:
+            return parsed
+    return parsed
+
+
 def _text_from_content_parts(parts: list[Any]) -> str:
     chunks: list[str] = []
     for part in parts:
@@ -37,40 +52,99 @@ def _text_from_content_parts(parts: list[Any]) -> str:
     return "".join(chunks)
 
 
+def _object_from_content_parts(parts: list[Any]) -> dict[str, Any] | None:
+    for part in parts:
+        if not isinstance(part, Mapping):
+            continue
+        for key in ("parsed", "json"):
+            candidate = part.get(key)
+            if isinstance(candidate, Mapping):
+                return dict(candidate)
+            if isinstance(candidate, str):
+                try:
+                    decoded = decode_openrouter_json_value(candidate)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(decoded, dict):
+                    return decoded
+    return None
+
+
+def _as_json_object(value: Any, *, error: str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise ValueError(error)
+
+
 def parse_openrouter_structured_content(
-    choice: Mapping[str, Any],
+    choice: Mapping[str, Any] | str,
     *,
     usage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if isinstance(choice, str):
+        try:
+            loaded = decode_openrouter_json_value(choice)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"OpenRouter choice is not valid JSON: {exc}") from exc
+        if isinstance(loaded, Mapping) and "verdict" in loaded and "message" not in loaded:
+            return _as_json_object(
+                loaded,
+                error="OpenRouter structured content must be a JSON object",
+            )
+        if isinstance(loaded, Mapping):
+            choice = loaded
+        else:
+            raise ValueError("OpenRouter choice has no message")
+
+    if not isinstance(choice, Mapping):
+        raise ValueError("OpenRouter choice has no message")
+
     message = choice.get("message")
     if not isinstance(message, Mapping):
+        if "verdict" in choice:
+            return dict(choice)
         raise ValueError("OpenRouter choice has no message")
 
     finish_reason = choice.get("finish_reason")
     usage_hint = _usage_summary(usage)
-    content = message.get("content")
 
     def parse_text(text: str) -> Any:
         try:
-            return json.loads(text)
+            return decode_openrouter_json_value(text)
         except json.JSONDecodeError as exc:
             raise ValueError(
                 "OpenRouter structured JSON is malformed: "
                 f"{exc} (finish_reason={finish_reason!r}, {usage_hint})"
             ) from exc
 
+    parsed_field = message.get("parsed")
+    if isinstance(parsed_field, Mapping):
+        return dict(parsed_field)
+    if isinstance(parsed_field, str):
+        decoded_parsed = parse_text(parsed_field)
+        if isinstance(decoded_parsed, dict):
+            return decoded_parsed
+
+    content = message.get("content")
+
     if isinstance(content, str):
         parsed: Any = parse_text(content)
     elif isinstance(content, Mapping):
         parsed = dict(content)
     elif isinstance(content, list):
-        text = _text_from_content_parts(content)
-        if not text:
-            raise ValueError(
-                "OpenRouter message content is empty multipart "
-                f"(finish_reason={finish_reason!r}, {usage_hint})"
-            )
-        parsed = parse_text(text)
+        structured = _object_from_content_parts(content)
+        if structured is not None:
+            parsed = structured
+        else:
+            text = _text_from_content_parts(content)
+            if not text:
+                raise ValueError(
+                    "OpenRouter message content is empty multipart "
+                    f"(finish_reason={finish_reason!r}, {usage_hint})"
+                )
+            parsed = parse_text(text)
     else:
         raise ValueError(
             "OpenRouter message content is missing or not structured JSON "

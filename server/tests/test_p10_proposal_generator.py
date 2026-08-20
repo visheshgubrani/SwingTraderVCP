@@ -14,6 +14,8 @@ from app.domain.p10_sizing import EntryTemplate
 from app.schemas.proposals import GeminiVcpProposalOutput
 from app.services.proposal_renderer import RenderedProposalCharts
 from app.services.proposal_generator import (
+    SCHEMA_VERSION,
+    ProposalProviderError,
     build_proposal_vision_request,
     generate_trade_proposal_from_analysis,
     calculate_next_session_and_deadline,
@@ -134,6 +136,8 @@ class TestProposalGenerator(unittest.TestCase):
             str(self.resistance_candle.high),
         )
         self.assertTrue(len(proposal.proposal["proposal_hash"]) == 64)
+        self.assertEqual(proposal.proposal["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v4")
 
     def test_generate_trade_proposal_accepts_structural_t2_t3_below_hard_rr(self):
         atr14 = compute_atr14(self.candles)
@@ -525,6 +529,16 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertGreater(len(grounding["higher_zones"]), 0)
 
 
+def _contains_key(node: object, key: str) -> bool:
+    if isinstance(node, dict):
+        if key in node:
+            return True
+        return any(_contains_key(value, key) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_key(value, key) for value in node)
+    return False
+
+
 class TestProposalVisionRequest(unittest.TestCase):
     def test_request_contains_grounding_and_provider_controls(self):
         candles = [
@@ -552,10 +566,29 @@ class TestProposalVisionRequest(unittest.TestCase):
         self.assertEqual(request["provider"], {"require_parameters": True, "data_collection": "deny"})
         self.assertEqual(request["reasoning"], {"effort": "high", "exclude": True})
         self.assertFalse(request["stream"])
+        schema = request["response_format"]["json_schema"]["schema"]
+        self.assertFalse(_contains_key(schema, "anyOf"))
+        self.assertFalse(_contains_key(schema, "$ref"))
+        self.assertNotIn("$defs", schema)
+        self.assertFalse(schema["additionalProperties"])
+        anchor_schema = schema["properties"]["contraction_anchors"]["items"]
+        self.assertEqual(anchor_schema["type"], "object")
+        self.assertEqual(anchor_schema["properties"]["price"]["type"], "number")
+        self.assertEqual(anchor_schema["properties"]["price"]["exclusiveMinimum"], 0.0)
+        self.assertFalse(anchor_schema["additionalProperties"])
+        self.assertEqual(schema["properties"]["pivot_price"]["type"], "number")
+        self.assertEqual(
+            schema["properties"]["entry_template"]["enum"],
+            ["single", "two_leg", "two_leg_staged", "three_leg_front", "three_leg_balanced"],
+        )
+        self.assertEqual(
+            set(schema["required"]),
+            set(schema["properties"]),
+        )
 
 
 class TestParseProposalOpenRouterResponse(unittest.TestCase):
-    def _payload(self, content: str | dict) -> dict:
+    def _payload(self, content: str | dict | list) -> dict:
         return {
             "id": "gen-proposal-1",
             "usage": {"cost": 0.012, "total_tokens": 800},
@@ -605,11 +638,98 @@ class TestParseProposalOpenRouterResponse(unittest.TestCase):
         self.assertEqual(cost, 0.012)
         self.assertEqual(usage["total_tokens"], 800)
 
-    def test_rejects_message_content_passed_as_choice(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "no proposal choice"):
+    def test_parses_top_level_json_string_envelope(self) -> None:
+        envelope = json.dumps(self._payload(json.dumps(self._valid_content())))
+        output, usage, cost, request_id = parse_proposal_openrouter_response(envelope)
+        self.assertEqual(output.verdict, "valid")
+        self.assertEqual(request_id, "gen-proposal-1")
+        self.assertEqual(cost, 0.012)
+        self.assertEqual(usage["total_tokens"], 800)
+
+    def test_parses_double_encoded_message_content(self) -> None:
+        output, *_ = parse_proposal_openrouter_response(
+            self._payload(json.dumps(json.dumps(self._valid_content()))),
+        )
+        self.assertEqual(output.verdict, "valid")
+        self.assertEqual(output.entry_template, EntryTemplate.TWO_LEG)
+
+    def test_parses_choice_that_is_proposal_json_string(self) -> None:
+        output, *_ = parse_proposal_openrouter_response(
+            {"choices": [json.dumps(self._valid_content())]},
+        )
+        self.assertEqual(output.verdict, "valid")
+        self.assertEqual(output.entry_template, EntryTemplate.TWO_LEG)
+
+    def test_parses_unwrapped_proposal_object(self) -> None:
+        output, usage, cost, request_id = parse_proposal_openrouter_response(
+            self._valid_content(),
+        )
+        self.assertEqual(output.verdict, "valid")
+        self.assertEqual(usage, {})
+        self.assertEqual(cost, 0.0)
+        self.assertIsNone(request_id)
+
+    def test_parses_message_parsed_object(self) -> None:
+        payload = {
+            "id": "gen-proposal-1",
+            "usage": {"cost": 0.012, "total_tokens": 800},
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": None,
+                        "parsed": self._valid_content(),
+                    },
+                }
+            ],
+        }
+        output, usage, cost, request_id = parse_proposal_openrouter_response(payload)
+        self.assertEqual(output.verdict, "valid")
+        self.assertEqual(request_id, "gen-proposal-1")
+        self.assertEqual(cost, 0.012)
+        self.assertEqual(usage["total_tokens"], 800)
+
+    def test_parses_multipart_json_part(self) -> None:
+        payload = self._payload(
+            [{"type": "output_json", "json": self._valid_content()}],
+        )
+        output, *_ = parse_proposal_openrouter_response(payload)
+        self.assertEqual(output.verdict, "valid")
+
+    def test_bad_payload_raises_typed_provider_error_not_attribute_error(self) -> None:
+        with self.assertRaises(ProposalProviderError) as raised:
+            parse_proposal_openrouter_response("not-json")
+        self.assertEqual(
+            raised.exception.error_type,
+            "proposal_invalid_provider_json",
+        )
+        self.assertIsInstance(raised.exception.details, dict)
+
+        with self.assertRaises(ProposalProviderError) as raised:
+            parse_proposal_openrouter_response(["unexpected-list"])
+        self.assertEqual(
+            raised.exception.error_type,
+            "proposal_invalid_provider_json",
+        )
+        self.assertIn("payload_type", raised.exception.details)
+
+    def test_malformed_json_is_typed_provider_error(self) -> None:
+        with self.assertRaises(ProposalProviderError) as raised:
             parse_proposal_openrouter_response(
-                {"choices": [json.dumps(self._valid_content())]},
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {"content": '{"summary":"cut off'},
+                        }
+                    ]
+                }
             )
+        self.assertEqual(
+            raised.exception.error_type,
+            "proposal_invalid_provider_json",
+        )
+        self.assertIn("finish_reason='length'", str(raised.exception))
 
 
 if __name__ == "__main__":

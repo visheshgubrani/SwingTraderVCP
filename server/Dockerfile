@@ -31,6 +31,10 @@ COPY ind_nifty500list.csv ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+# Fail the image build if FYERS' market-data socket cannot import with the
+# resolved compatibility dependencies.
+RUN python -c "from fyers_apiv3.FyersWebsocket.data_ws import FyersDataSocket"
+
 
 FROM python:3.13-slim-bookworm AS runtime
 

@@ -19,3 +19,9 @@ class FyersTransitiveOverrideTests(unittest.TestCase):
         self.assertGreaterEqual(_locked_version("aiohttp"), (3, 11, 18))
         self.assertGreaterEqual(_locked_version("requests"), (2, 32, 4))
         self.assertGreaterEqual(_locked_version("setuptools"), (78, 1, 1))
+        self.assertLess(_locked_version("setuptools"), (81, 0, 0))
+
+    def test_fyers_market_data_socket_imports(self) -> None:
+        from fyers_apiv3.FyersWebsocket.data_ws import FyersDataSocket
+
+        self.assertEqual(FyersDataSocket.__name__, "FyersDataSocket")

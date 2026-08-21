@@ -159,6 +159,13 @@ def _on_close_factory(state: TickWorkerState):
     return on_close
 
 
+def _load_fyers_data_socket_class():
+    """Import the SDK socket lazily so worker startup failures are auditable."""
+    from fyers_apiv3.FyersWebsocket.data_ws import FyersDataSocket
+
+    return FyersDataSocket
+
+
 from app.services.bar_aggregator import FiveMinuteBarAggregator
 
 
@@ -414,6 +421,7 @@ async def run_tick_worker():
     publish_task = None
     sub_task = None
     ws = None
+    failure: Exception | None = None
 
     try:
         # --- Get access token ---
@@ -431,6 +439,7 @@ async def run_tick_worker():
         if not symbols:
             logger.warning("No symbols to subscribe (no open positions or watchlist items)")
             symbols = []
+        state.symbols = set(symbols)
 
         logger.info("Initial subscription set: %d symbols", len(symbols))
 
@@ -439,7 +448,7 @@ async def run_tick_worker():
         connected_event = threading.Event()
 
         # --- Create FyersDataSocket (SDK, runs in its own thread) ---
-        from fyers_apiv3.FyersWebsocket.data_ws import FyersDataSocket
+        FyersDataSocket = _load_fyers_data_socket_class()
 
         FyersDataSocket._instance = None
 
@@ -496,6 +505,29 @@ async def run_tick_worker():
             await asyncio.sleep(1)
     except asyncio.CancelledError:
         pass
+    except Exception as exc:
+        failure = exc
+        state.status = "failed"
+        logger.exception("Tick worker crashed")
+        try:
+            await _set_worker_status(
+                redis,
+                "failed",
+                worker_id=worker_id,
+                symbols=list(state.symbols),
+            )
+        except Exception:
+            logger.exception("Failed to publish tick-worker failure status")
+        await _emit_system_event(
+            redis,
+            "critical",
+            "tick_worker_crashed",
+            {
+                "worker_id": worker_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
     finally:
         logger.info("Shutting down tick worker")
         _shutdown.set()
@@ -517,9 +549,20 @@ async def run_tick_worker():
                 pass
 
         # Emit shutdown event
-        state.status = "stopped"
-        await _set_worker_status(redis, "stopped", worker_id=worker_id)
-        await _emit_system_event(redis, "info", "tick_worker_stopped", {"worker_id": worker_id})
+        state.status = "failed" if failure is not None else "stopped"
+        await _set_worker_status(
+            redis,
+            state.status,
+            worker_id=worker_id,
+            symbols=list(state.symbols),
+        )
+        if failure is None:
+            await _emit_system_event(
+                redis,
+                "info",
+                "tick_worker_stopped",
+                {"worker_id": worker_id},
+            )
         await release_distributed_lease(redis, _LOCK_KEY, worker_id)
         await redis.aclose()
 

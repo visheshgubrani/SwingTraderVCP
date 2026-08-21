@@ -1,7 +1,8 @@
 import unittest
+from unittest.mock import AsyncMock, MagicMock
 
 from app.domain.market_regime import BENCHMARK_SYMBOL
-from app.workers.tick_worker import plan_tick_subscription_change
+from app.workers.tick_worker import _load_subscription_symbols, plan_tick_subscription_change
 
 
 class TickSubscriptionProtectionTests(unittest.TestCase):
@@ -48,3 +49,30 @@ class TickSubscriptionProtectionTests(unittest.TestCase):
         self.assertEqual(to_add, {"NSE:CHART-EQ"})
         self.assertEqual(to_remove, set())
         self.assertEqual(new_current, {BENCHMARK_SYMBOL, "NSE:CHART-EQ"})
+
+
+class TickSubscriptionRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_loads_armed_proposals_and_benchmark(self) -> None:
+        result = MagicMock()
+        result.fetchall.return_value = [
+            ("NSE:BAJAJ-AUTO-EQ",),
+            ("NSE:JINDALSAW-EQ",),
+            ("NSE:OFSS-EQ",),
+        ]
+        db = AsyncMock()
+        db.execute.return_value = result
+
+        symbols = await _load_subscription_symbols(db)
+
+        self.assertEqual(
+            symbols,
+            [
+                "NSE:BAJAJ-AUTO-EQ",
+                "NSE:JINDALSAW-EQ",
+                "NSE:OFSS-EQ",
+                BENCHMARK_SYMBOL,
+            ],
+        )
+        sql = str(db.execute.await_args.args[0])
+        self.assertIn("JOIN entry_legs", sql)
+        self.assertIn("el.status = 'armed'", sql)

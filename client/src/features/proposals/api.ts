@@ -696,6 +696,12 @@ export function useEntrySupervisorStatus() {
   return useQuery<{
     status: "active" | "inactive"
     heartbeat?: { timestamp?: string }
+    market_data: {
+      status: string
+      timestamp: string | null
+      symbol_count: number
+      ready: boolean
+    }
     armed_legs_count: number
     trigger_observed_count: number
     pending_capacity_conflicts: number
@@ -787,4 +793,3 @@ export function useProposalAttempt(id: string | null) {
     enabled: !!id,
   })
 }
-

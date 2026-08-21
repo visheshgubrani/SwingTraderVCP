@@ -120,8 +120,8 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
                     )
                     """
                 )
-            ).mappings().all()
-        )
+            )
+        ).mappings().all()
     if not symbols:
         return {"status": "no_symbols", "verified": 0}
 

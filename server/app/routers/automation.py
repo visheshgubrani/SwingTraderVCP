@@ -61,6 +61,69 @@ from app.services.risk_stop_streak import reset_stop_streak, synchronize_stop_st
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/automation", tags=["automation"])
+MARKET_DATA_HEARTBEAT_MAX_AGE_SECONDS = 30
+
+
+def _market_data_status(
+    raw_status: bytes | str | None,
+    *,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    """Normalize the tick-worker heartbeat into a fail-closed API status."""
+    if raw_status is None:
+        return {
+            "status": "offline",
+            "timestamp": None,
+            "symbol_count": 0,
+            "ready": False,
+        }
+    try:
+        if isinstance(raw_status, bytes):
+            raw_status = raw_status.decode()
+        payload = json.loads(raw_status)
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+        payload = None
+    if not isinstance(payload, dict):
+        return {
+            "status": "invalid_heartbeat",
+            "timestamp": None,
+            "symbol_count": 0,
+            "ready": False,
+        }
+
+    worker_status = str(payload.get("status") or "invalid_heartbeat")
+    timestamp_value = payload.get("timestamp")
+    timestamp = timestamp_value if isinstance(timestamp_value, str) else None
+    try:
+        symbol_count = max(0, int(payload.get("symbol_count") or 0))
+    except (TypeError, ValueError):
+        symbol_count = 0
+
+    heartbeat_is_fresh = False
+    if timestamp is not None:
+        try:
+            heartbeat_at = dt.datetime.fromisoformat(timestamp)
+            if heartbeat_at.tzinfo is None:
+                heartbeat_at = heartbeat_at.replace(tzinfo=dt.timezone.utc)
+            checked_at = now or dt.datetime.now(dt.timezone.utc)
+            if checked_at.tzinfo is None:
+                checked_at = checked_at.replace(tzinfo=dt.timezone.utc)
+            age_seconds = (checked_at - heartbeat_at).total_seconds()
+            heartbeat_is_fresh = (
+                0 <= age_seconds <= MARKET_DATA_HEARTBEAT_MAX_AGE_SECONDS
+            )
+        except ValueError:
+            pass
+
+    ready = worker_status == "ready" and heartbeat_is_fresh
+    if worker_status == "ready" and not ready:
+        worker_status = "stale"
+    return {
+        "status": worker_status,
+        "timestamp": timestamp,
+        "symbol_count": symbol_count,
+        "ready": ready,
+    }
 
 
 @router.get("/runs/{run_id}")
@@ -1509,6 +1572,9 @@ async def get_entry_supervisor_status(
         worker_status = json.loads(raw_status) if raw_status else {"status": "offline"}
     except json.JSONDecodeError:
         worker_status = {"status": "invalid_heartbeat"}
+    market_data = _market_data_status(
+        await request.app.state.redis.get("tick_worker:status")
+    )
     trigger_observed_count = int(
         (
             await db.execute(
@@ -1526,6 +1592,7 @@ async def get_entry_supervisor_status(
     return {
         "status": "active" if worker_status.get("status") == "running" else "inactive",
         "heartbeat": worker_status,
+        "market_data": market_data,
         "armed_legs_count": len(armed_legs),
         "trigger_observed_count": trigger_observed_count,
         "pending_capacity_conflicts": pending_conflicts,

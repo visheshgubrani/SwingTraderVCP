@@ -25,6 +25,7 @@ import { Spinner } from "@/components/ui/spinner"
 import {
   useTradeProposal,
   useRecordProposalDecision,
+  useEntrySupervisorStatus,
   useP10Rollout,
   type DecisionPayload,
 } from "./api"
@@ -61,6 +62,7 @@ export function ProposalDetailPage() {
   const { data: proposal, isLoading, error } = useTradeProposal(proposalId ?? null)
   const recordDecision = useRecordProposalDecision()
   const rollout = useP10Rollout()
+  const entrySupervisor = useEntrySupervisorStatus()
   const approvalsAllowed = rollout.data?.approvals_allowed === true
 
   useEffect(() => {
@@ -115,6 +117,13 @@ export function ProposalDetailPage() {
 
   const isPending = proposal.status === "pending_approval"
   const isApproved = proposal.status === "approved"
+  const entryMonitoringReady =
+    entrySupervisor.data?.status === "active" &&
+    entrySupervisor.data.market_data.ready
+  const monitoringIssue =
+    entrySupervisor.data?.status !== "active"
+      ? "the entry supervisor is inactive"
+      : `the market-data worker is ${entrySupervisor.data.market_data.status}`
   const activePivot = customPivot ? Number(customPivot) : Number(proposal.pivot_price)
   const activeStop = customStop ? Number(customStop) : Number(proposal.initial_stop)
   const activeT1 = customT1 ? Number(customT1) : Number(proposal.t1)
@@ -555,16 +564,24 @@ export function ProposalDetailPage() {
           </div>
         )}
 
-        {isApproved && (
-          <div className="flex items-center gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-400">
-            <CheckCircle2Icon className="h-5 w-5 shrink-0" />
-            <div>
-              <div className="font-bold">Approved by Operator</div>
-              <div className="text-[10px] text-emerald-400/80">
-                Entry supervisor is actively monitoring intraday 5m confirmation bars for {proposal.symbol}.
-              </div>
-            </div>
-          </div>
+        {isApproved && entryMonitoringReady && (
+          <Alert>
+            <CheckCircle2Icon />
+            <AlertTitle>Approved and actively monitored</AlertTitle>
+            <AlertDescription>
+              The entry supervisor is receiving Fyers market data and monitoring fresh 5-minute confirmation bars for {proposal.symbol}.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {isApproved && !entryMonitoringReady && (
+          <Alert variant="destructive">
+            <ShieldAlertIcon />
+            <AlertTitle>Entry monitoring unavailable</AlertTitle>
+            <AlertDescription>
+              This proposal remains armed, but entries cannot be detected because {monitoringIssue}. Paper trading still requires live Fyers ticks. No order can be placed until market data recovers and a fresh two-bar confirmation completes.
+            </AlertDescription>
+          </Alert>
         )}
 
         {/* High-Resolution Headless Rendered Charts */}

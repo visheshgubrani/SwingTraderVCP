@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 from uuid import uuid4
 
 from app.workers.entry_supervisor import (
@@ -57,12 +57,75 @@ class WorkerSingletonLeaseTests(unittest.IsolatedAsyncioTestCase):
         from app.workers.tick_worker import _shutdown
 
         _shutdown.clear()
+        self.addCleanup(_shutdown.clear)
         self.assertFalse(_shutdown.is_set())
 
         await tick_worker_heartbeat(redis, state)
 
         self.assertTrue(_shutdown.is_set())
         mock_renew.assert_awaited_once()
+
+    async def test_tick_worker_import_failure_emits_critical_event(self) -> None:
+        redis = AsyncMock()
+        session_cm = AsyncMock()
+        session_cm.__aenter__.return_value = AsyncMock()
+
+        from app.workers.tick_worker import _shutdown
+
+        _shutdown.clear()
+        self.addCleanup(_shutdown.clear)
+        with (
+            patch(
+                "app.workers.tick_worker.create_async_redis",
+                new=AsyncMock(return_value=redis),
+            ),
+            patch(
+                "app.workers.tick_worker.acquire_distributed_lease",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.workers.tick_worker.release_distributed_lease",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.workers.tick_worker._heartbeat_loop",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.workers.tick_worker.get_valid_access_token",
+                new=AsyncMock(return_value="token"),
+            ),
+            patch(
+                "app.workers.tick_worker.async_session",
+                return_value=session_cm,
+            ),
+            patch(
+                "app.workers.tick_worker._load_subscription_symbols",
+                new=AsyncMock(return_value=["NSE:NIFTY50-INDEX"]),
+            ),
+            patch(
+                "app.workers.tick_worker._load_fyers_data_socket_class",
+                side_effect=ModuleNotFoundError("pkg_resources"),
+            ),
+            patch(
+                "app.workers.tick_worker._set_worker_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.workers.tick_worker._emit_system_event",
+                new=AsyncMock(),
+            ) as emit_event,
+        ):
+            with self.assertRaises(ModuleNotFoundError):
+                await run_tick_worker()
+
+        critical_call = emit_event.await_args_list[0]
+        self.assertEqual(critical_call.args[:3], (redis, "critical", "tick_worker_crashed"))
+        self.assertEqual(
+            critical_call.args[3],
+            {"worker_id": ANY, "error_type": "ModuleNotFoundError"},
+        )
+        self.assertEqual(len(emit_event.await_args_list), 1)
 
     # --- Position Monitor Worker ---
     @patch("app.workers.position_monitor.create_async_redis", new_callable=AsyncMock)

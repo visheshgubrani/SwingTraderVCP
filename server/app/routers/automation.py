@@ -872,7 +872,7 @@ async def list_trade_proposals(
         LIMIT :limit;
     """)
     res = await db.execute(stmt, params)
-    rows = res.fetchall()
+    rows = res.mappings().all()
     proposal_ids = [UUID(r["id"]) for r in rows]
     legs_by_proposal: dict[UUID, list[dict[str, Any]]] = {}
     if proposal_ids:
@@ -893,7 +893,7 @@ async def list_trade_proposals(
     now_ist = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
     results: list[dict[str, Any]] = []
     for row in rows:
-        item = dict(row._mapping)
+        item = dict(row)
         item["entry_state"] = derive_proposal_entry_state(
             legs_by_proposal.get(row["id"], []), now_ist
         )

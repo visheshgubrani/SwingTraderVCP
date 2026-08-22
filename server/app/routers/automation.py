@@ -65,6 +65,20 @@ router = APIRouter(prefix="/api/v1/automation", tags=["automation"])
 MARKET_DATA_HEARTBEAT_MAX_AGE_SECONDS = 30
 
 
+def _as_uuid(value: Any) -> UUID:
+    """Coerce a DB-sourced UUID value to ``uuid.UUID``.
+
+    asyncpg decodes PostgreSQL ``uuid`` columns as
+    ``asyncpg.pgproto.pgproto.UUID``. That type is a ``uuid.UUID`` subclass,
+    but passing it to ``UUID(...)`` fails because CPython's constructor tries
+    to treat it as a hex string (``.replace``). Tolerate UUID instances and
+    UUID-like strings alike.
+    """
+    if isinstance(value, UUID):
+        return value
+    return UUID(str(value))
+
+
 def _market_data_status(
     raw_status: bytes | str | None,
     *,
@@ -873,7 +887,7 @@ async def list_trade_proposals(
     """)
     res = await db.execute(stmt, params)
     rows = res.mappings().all()
-    proposal_ids = [UUID(r["id"]) for r in rows]
+    proposal_ids = [_as_uuid(r["id"]) for r in rows]
     legs_by_proposal: dict[UUID, list[dict[str, Any]]] = {}
     if proposal_ids:
         legs_res = await db.execute(

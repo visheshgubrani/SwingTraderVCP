@@ -57,8 +57,8 @@ export function ProposalAttemptDetailPage() {
   const geminiT1 = structured.t1 != null ? Number(structured.t1) : null
   const geminiT2 = structured.t2 != null ? Number(structured.t2) : null
   const geminiT3 = structured.t3 != null ? Number(structured.t3) : null
-  const anchors = Array.isArray(structured.contraction_anchors) ? structured.contraction_anchors : []
-  const confidence = structured.confidence != null ? Number(structured.confidence) : null
+  const contractions = Array.isArray(structured.contractions) ? structured.contractions : []
+  const redFlags = Array.isArray(structured.red_flags) ? structured.red_flags : []
   const verdict = structured.verdict ?? "unknown"
   const entryTemplate = (structured.entry_template as string) || "single"
 
@@ -91,11 +91,6 @@ export function ProposalAttemptDetailPage() {
             {verdict && (
               <Badge variant="outline" className="text-[10px]">
                 Gemini {String(verdict).toUpperCase()}
-              </Badge>
-            )}
-            {confidence != null && (
-              <Badge variant="outline" className="text-[10px]">
-                CONF: {(confidence * 100).toFixed(0)}%
               </Badge>
             )}
           </div>
@@ -298,12 +293,12 @@ export function ProposalAttemptDetailPage() {
                   <strong className="text-foreground capitalize">{entryTemplate.replace("_", " ")}</strong>
                 </div>
                 <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
-                  <span className="text-muted-foreground">Base Tightness: </span>
-                  <strong className="text-foreground capitalize">{String(structured.base_tightness ?? "Not specified")}</strong>
+                  <span className="text-muted-foreground">Prior Uptrend: </span>
+                  <strong className="text-foreground capitalize">{String(structured.prior_uptrend ?? "Not specified")}</strong>
                 </div>
                 <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
                   <span className="text-muted-foreground">Volume Dry-Up: </span>
-                  <strong className="text-foreground capitalize">{String(structured.dry_up_quality ?? "Not specified")}</strong>
+                  <strong className="text-foreground capitalize">{String(structured.volume_dry_up ?? "Not specified")}</strong>
                 </div>
               </div>
 
@@ -311,30 +306,38 @@ export function ProposalAttemptDetailPage() {
                 <div className="mb-1 text-[10px] uppercase font-semibold text-foreground">AI Evidence Summary</div>
                 {String(structured.evidence_summary || "No structured summary returned.")}
               </div>
+              {redFlags.length > 0 ? (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-[11px] text-amber-200">
+                  <div className="mb-1 text-[10px] uppercase font-semibold">Red Flags</div>
+                  <ul className="list-disc space-y-0.5 pl-4">
+                    {redFlags.map((flag: string, idx: number) => (
+                      <li key={idx}>{flag}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
 
-            {/* Pattern Anchors Table */}
+            {/* Visual Contractions */}
             <div className="rounded-lg border border-border/40 bg-background/50 p-3">
-              <div className="mb-2 text-[10px] uppercase font-semibold text-foreground">Pattern Anchors</div>
-              {anchors.length > 0 ? (
+              <div className="mb-2 text-[10px] uppercase font-semibold text-foreground">Visual Contractions</div>
+              {contractions.length > 0 ? (
                 <div className="max-h-40 overflow-y-auto">
                   <table className="w-full text-left text-[10px]">
                     <thead>
                       <tr className="border-b border-border/40 text-muted-foreground">
-                        <th className="py-1">Date</th>
-                        <th className="py-1">Type</th>
-                        <th className="py-1 text-right">Price</th>
+                        <th className="py-1">Leg</th>
+                        <th className="py-1">Depth</th>
+                        <th className="py-1 text-right">High → Low</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/20">
-                      {anchors.map((anchor: any, idx: number) => (
-                        <tr key={idx}>
-                          <td className="py-1 font-mono text-muted-foreground">{anchor.date}</td>
-                          <td className="py-1 text-foreground capitalize">
-                            {anchor.anchor_type?.replace("_", " ") ?? "Anchor"}
-                          </td>
+                      {contractions.map((leg: { index?: number; depth_pct?: number | string; high_price?: number | string; low_price?: number | string }, idx: number) => (
+                        <tr key={leg.index ?? idx}>
+                          <td className="py-1 font-mono text-muted-foreground">T{leg.index ?? idx + 1}</td>
+                          <td className="py-1 text-foreground">{Number(leg.depth_pct ?? 0).toFixed(1)}%</td>
                           <td className="py-1 text-right font-mono font-semibold text-foreground">
-                            ₹{Number(anchor.price ?? 0).toFixed(2)}
+                            ₹{Number(leg.high_price ?? 0).toFixed(2)} → ₹{Number(leg.low_price ?? 0).toFixed(2)}
                           </td>
                         </tr>
                       ))}
@@ -342,7 +345,7 @@ export function ProposalAttemptDetailPage() {
                   </table>
                 </div>
               ) : (
-                <div className="text-[10px] text-muted-foreground">No pattern anchors recorded.</div>
+                <div className="text-[10px] text-muted-foreground">No visual contractions recorded.</div>
               )}
             </div>
           </div>

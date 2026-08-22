@@ -49,8 +49,16 @@ Push to `main` or run **Build and deploy** via `workflow_dispatch`. The arm64 ru
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env.prod pull
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d postgres redis
+docker compose -f docker-compose.prod.yml --env-file .env.prod run --rm --no-deps -T api \
+  python scripts/apply_pending_migrations.py
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```
+
+Pending files in `server/db/migrations/` are applied automatically against the
+existing VPS database (tracked in `schema_migrations`). You do not need to SSH
+in and run SQL by hand after each push. First-time empty volumes still use
+`schema.sql` below.
 
 Step 1 services: `postgres`, `redis`, `api`, `worker`, `proposal-worker`, `tick-worker`,
 `entry-supervisor`, `position-monitor`, `order-gateway`, `client`.

@@ -24,6 +24,35 @@ from app.services.proposal_generator import (
 )
 
 
+def _ai_output(**overrides) -> GeminiVcpProposalOutput:
+    payload = {
+        "verdict": "valid",
+        "prior_uptrend": "yes",
+        "prior_uptrend_note": "Higher highs and higher lows above rising 50/150-day MAs.",
+        "volume_dry_up": "yes",
+        "volume_dry_up_note": "Volume dries up into the final contraction and pivot.",
+        "contractions": [
+            {
+                "index": 1,
+                "depth_pct": Decimal("18.0"),
+                "high_price": Decimal("120.00"),
+                "low_price": Decimal("98.40"),
+            },
+            {
+                "index": 2,
+                "depth_pct": Decimal("9.0"),
+                "high_price": Decimal("118.00"),
+                "low_price": Decimal("107.38"),
+            },
+        ],
+        "entry_template": EntryTemplate.TWO_LEG,
+        "red_flags": [],
+        "evidence_summary": "Two nested contractions with volume dry-up into resistance.",
+    }
+    payload.update(overrides)
+    return GeminiVcpProposalOutput.model_validate(payload)
+
+
 class TestProposalGenerator(unittest.TestCase):
     def setUp(self):
         # A complete, frozen 252-session packet with tick-aligned prices.
@@ -78,31 +107,11 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(deadline.minute, 0)
 
     def test_generate_trade_proposal_valid(self):
-        ai_output = GeminiVcpProposalOutput(
-            verdict="valid",
-            contradicts_scanner=False,
-            confidence=0.85,
-            contraction_anchors=[
-                {
-                    "date": self.low_candle.date,
-                    "price": Decimal(str(self.low_candle.low)) + Decimal("0.01"),
-                    "anchor_type": "contraction_low",
-                },
-                {
-                    "date": self.resistance_candle.date,
-                    "price": Decimal(str(self.resistance_candle.high)) + Decimal("0.01"),
-                    "anchor_type": "resistance",
-                },
-            ],
+        ai_output = _ai_output(
             pivot_price=self.pivot,
             t1=self.targets[0],
             t2=self.targets[1],
             t3=self.targets[2],
-            entry_template=EntryTemplate.TWO_LEG,
-            base_tightness="solid",
-            dry_up_quality="drying_up",
-            resistance_room="clear",
-            evidence_summary="Coherent 2-contraction VCP pattern with volume dry-up.",
         )
 
         proposal = generate_trade_proposal_from_analysis(
@@ -125,10 +134,13 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(proposal.proposal["leg_count"], 2)
         self.assertEqual(proposal.proposal["leg_risk_allocations"], [0.60, 0.40])
         self.assertEqual(proposal.proposal["relative_volume_threshold"], Decimal("1.75"))
+        self.assertEqual(proposal.proposal["confidence"], Decimal("0"))
         self.assertEqual(
-            proposal.proposal["gemini_evidence"]["contraction_anchors"][0]["price"],
-            str(self.low_candle.low),
+            proposal.proposal["gemini_evidence"]["contractions"][0]["depth_pct"],
+            "18.0",
         )
+        self.assertEqual(proposal.proposal["gemini_evidence"]["prior_uptrend"], "yes")
+        self.assertEqual(proposal.proposal["gemini_evidence"]["volume_dry_up"], "yes")
         pivot_grounding = proposal.proposal["geometry"]["pivot_grounding"]
         self.assertTrue(pivot_grounding["is_grounded"])
         self.assertEqual(
@@ -137,40 +149,23 @@ class TestProposalGenerator(unittest.TestCase):
         )
         self.assertTrue(len(proposal.proposal["proposal_hash"]) == 64)
         self.assertEqual(proposal.proposal["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v4")
+        self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v5")
 
     def test_generate_trade_proposal_accepts_structural_t2_t3_below_hard_rr(self):
+        from app.domain.p10_geometry import derive_chart_geometry
+
         atr14 = compute_atr14(self.candles)
-        stop = calculate_structural_stop(Decimal(str(self.low_candle.low)), atr14)
+        chart = derive_chart_geometry(self.candles)
+        stop = calculate_structural_stop(chart.final_contraction_low, atr14)
         base_chase, _ = calculate_chase_ceiling(self.pivot, stop)
         t1 = (self.pivot * 2) - stop
         t2 = t1 + Decimal("0.50")
         t3 = t1 + Decimal("1.00")
-        ai_output = GeminiVcpProposalOutput(
-            verdict="valid",
-            contradicts_scanner=False,
-            confidence=0.85,
-            contraction_anchors=[
-                {
-                    "date": self.low_candle.date,
-                    "price": self.low_candle.low,
-                    "anchor_type": "contraction_low",
-                },
-                {
-                    "date": self.resistance_candle.date,
-                    "price": self.resistance_candle.high,
-                    "anchor_type": "resistance",
-                },
-            ],
+        ai_output = _ai_output(
             pivot_price=self.pivot,
             t1=t1,
             t2=t2,
             t3=t3,
-            entry_template=EntryTemplate.TWO_LEG,
-            base_tightness="solid",
-            dry_up_quality="drying_up",
-            resistance_room="clear",
-            evidence_summary="Structural targets with T2/T3 below historic 2R/3R gates.",
         )
 
         proposal = generate_trade_proposal_from_analysis(
@@ -199,31 +194,16 @@ class TestProposalGenerator(unittest.TestCase):
             "p10_geometry_rr_adjusted_chase_v4",
         )
 
-    def test_generate_trade_proposal_rejects_contradicting_or_invalid(self):
-        ai_output = GeminiVcpProposalOutput(
+    def test_generate_trade_proposal_rejects_invalid_verdict(self):
+        ai_output = _ai_output(
             verdict="invalid",
-            contradicts_scanner=True,
-            confidence=0.40,
-            contraction_anchors=[
-                {
-                    "date": self.low_candle.date,
-                    "price": self.low_candle.low,
-                    "anchor_type": "contraction_low",
-                },
-                {
-                    "date": self.resistance_candle.date,
-                    "price": self.resistance_candle.high,
-                    "anchor_type": "resistance",
-                },
-            ],
+            prior_uptrend="no",
+            volume_dry_up="no",
             pivot_price=self.pivot,
             t1=self.targets[0],
             t2=self.targets[1],
             t3=self.targets[2],
             entry_template=EntryTemplate.SINGLE,
-            base_tightness="loose",
-            dry_up_quality="weak",
-            resistance_room="congested",
             evidence_summary="Erratic wide swings.",
         )
 
@@ -239,35 +219,15 @@ class TestProposalGenerator(unittest.TestCase):
             approved_risk_budget_amount=Decimal("1000"),
         )
         self.assertFalse(proposal.accepted)
-        self.assertEqual(proposal.rejection_code, "proposal_ai_contradicts_scanner")
+        self.assertEqual(proposal.rejection_code, "proposal_ai_invalid")
 
-    def test_anchor_outside_tolerance_has_stable_diagnostic(self):
-        tolerance = compute_atr14(self.candles) * Decimal("0.50")
-        ai_output = GeminiVcpProposalOutput(
-            verdict="valid",
-            contradicts_scanner=False,
-            confidence=0.8,
-            contraction_anchors=[
-                {
-                    "date": self.low_candle.date,
-                    "price": Decimal(str(self.low_candle.low)) + tolerance + Decimal("0.01"),
-                    "anchor_type": "contraction_low",
-                },
-                {
-                    "date": self.resistance_candle.date,
-                    "price": self.resistance_candle.high,
-                    "anchor_type": "resistance",
-                },
-            ],
+    def test_generate_trade_proposal_rejects_partial_verdict(self):
+        ai_output = _ai_output(
+            verdict="partial",
             pivot_price=self.pivot,
             t1=self.targets[0],
             t2=self.targets[1],
             t3=self.targets[2],
-            entry_template=EntryTemplate.SINGLE,
-            base_tightness="solid",
-            dry_up_quality="supportive",
-            resistance_room="clear",
-            evidence_summary="Grounded test output.",
         )
         result = generate_trade_proposal_from_analysis(
             symbol="TESTSTOCK",
@@ -281,37 +241,96 @@ class TestProposalGenerator(unittest.TestCase):
             approved_risk_budget_amount=Decimal("1000"),
         )
         self.assertFalse(result.accepted)
-        self.assertEqual(result.rejection_code, "proposal_anchor_price_out_of_tolerance")
-        self.assertIn("contraction_low", result.rejection_message)
-        self.assertIn(str(self.low_candle.low), result.rejection_message)
-        self.assertIn(str(tolerance), result.rejection_message)
+        self.assertEqual(result.rejection_code, "proposal_ai_partial")
 
-    def test_pivot_outside_every_recent_zone_has_machine_subreason(self):
-        ai_output = GeminiVcpProposalOutput(
-            verdict="valid",
-            contradicts_scanner=False,
-            confidence=0.8,
-            contraction_anchors=[
+    def test_generate_trade_proposal_rejects_missing_prior_uptrend(self):
+        ai_output = _ai_output(
+            prior_uptrend="no",
+            prior_uptrend_note="No Stage 2 advance before the base.",
+            pivot_price=self.pivot,
+            t1=self.targets[0],
+            t2=self.targets[1],
+            t3=self.targets[2],
+        )
+        result = generate_trade_proposal_from_analysis(
+            symbol="TESTSTOCK",
+            as_of_date=dt.date(2026, 8, 17),
+            screening_result_id="res-123",
+            instrument_id="inst-123",
+            candles=self.candles,
+            ai_output=ai_output,
+            rendered_charts=self.charts,
+            model="google/gemini-3.7-flash",
+            approved_risk_budget_amount=Decimal("1000"),
+        )
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.rejection_code, "proposal_ai_no_prior_uptrend")
+
+    def test_generate_trade_proposal_rejects_missing_volume_dry_up(self):
+        ai_output = _ai_output(
+            volume_dry_up="no",
+            volume_dry_up_note="Volume expands into the lows.",
+            pivot_price=self.pivot,
+            t1=self.targets[0],
+            t2=self.targets[1],
+            t3=self.targets[2],
+        )
+        result = generate_trade_proposal_from_analysis(
+            symbol="TESTSTOCK",
+            as_of_date=dt.date(2026, 8, 17),
+            screening_result_id="res-123",
+            instrument_id="inst-123",
+            candles=self.candles,
+            ai_output=ai_output,
+            rendered_charts=self.charts,
+            model="google/gemini-3.7-flash",
+            approved_risk_budget_amount=Decimal("1000"),
+        )
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.rejection_code, "proposal_ai_no_volume_dry_up")
+
+    def test_generate_trade_proposal_rejects_non_decreasing_contractions(self):
+        ai_output = _ai_output(
+            contractions=[
                 {
-                    "date": self.low_candle.date,
-                    "price": self.low_candle.low,
-                    "anchor_type": "contraction_low",
+                    "index": 1,
+                    "depth_pct": Decimal("8.0"),
+                    "high_price": Decimal("120.00"),
+                    "low_price": Decimal("110.40"),
                 },
                 {
-                    "date": self.resistance_candle.date,
-                    "price": self.resistance_candle.high,
-                    "anchor_type": "resistance",
+                    "index": 2,
+                    "depth_pct": Decimal("12.0"),
+                    "high_price": Decimal("118.00"),
+                    "low_price": Decimal("103.84"),
                 },
             ],
+            pivot_price=self.pivot,
+            t1=self.targets[0],
+            t2=self.targets[1],
+            t3=self.targets[2],
+        )
+        result = generate_trade_proposal_from_analysis(
+            symbol="TESTSTOCK",
+            as_of_date=dt.date(2026, 8, 17),
+            screening_result_id="res-123",
+            instrument_id="inst-123",
+            candles=self.candles,
+            ai_output=ai_output,
+            rendered_charts=self.charts,
+            model="google/gemini-3.7-flash",
+            approved_risk_budget_amount=Decimal("1000"),
+        )
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.rejection_code, "proposal_ai_contractions_not_tightening")
+
+    def test_pivot_outside_every_recent_zone_has_machine_subreason(self):
+        ai_output = _ai_output(
             pivot_price=self.pivot + Decimal("10"),
             t1=self.targets[0],
             t2=self.targets[1],
             t3=self.targets[2],
             entry_template=EntryTemplate.SINGLE,
-            base_tightness="solid",
-            dry_up_quality="supportive",
-            resistance_room="clear",
-            evidence_summary="Grounded anchors with an unsupported pivot.",
         )
 
         result = generate_trade_proposal_from_analysis(
@@ -335,54 +354,6 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(
             result.rejection_details["pivot_grounding"]["selected_zone"]["low"],
             str(self.resistance_candle.high),
-        )
-
-    def test_unsupported_old_resistance_has_no_eligible_evidence(self):
-        old_resistance = self.candles[-100]
-        ai_output = GeminiVcpProposalOutput(
-            verdict="valid",
-            contradicts_scanner=False,
-            confidence=0.8,
-            contraction_anchors=[
-                {
-                    "date": old_resistance.date,
-                    "price": old_resistance.high,
-                    "anchor_type": "resistance",
-                },
-                {
-                    "date": self.low_candle.date,
-                    "price": self.low_candle.low,
-                    "anchor_type": "contraction_low",
-                },
-            ],
-            pivot_price=Decimal(str(old_resistance.high)),
-            t1=self.targets[0],
-            t2=self.targets[1],
-            t3=self.targets[2],
-            entry_template=EntryTemplate.SINGLE,
-            base_tightness="solid",
-            dry_up_quality="supportive",
-            resistance_room="clear",
-            evidence_summary="An old boundary without structural retest support.",
-        )
-
-        result = generate_trade_proposal_from_analysis(
-            symbol="TESTSTOCK",
-            as_of_date=dt.date(2026, 8, 17),
-            screening_result_id="res-123",
-            instrument_id="inst-123",
-            candles=self.candles,
-            ai_output=ai_output,
-            rendered_charts=self.charts,
-            model="google/gemini-3.7-flash",
-            approved_risk_budget_amount=Decimal("1000"),
-        )
-
-        self.assertFalse(result.accepted)
-        self.assertEqual(result.rejection_code, "proposal_pivot_not_anchored")
-        self.assertEqual(
-            result.rejection_details["subreason"],
-            "no_eligible_resistance_evidence",
         )
 
     def test_data_patterns_shape_grounds_upper_zone_before_wide_stop_rejection(self):
@@ -416,27 +387,11 @@ class TestProposalGenerator(unittest.TestCase):
         replace_extreme(230, low=4090.0)
         replace_extreme(240, high=4625.0)
         replace_extreme(245, low=4271.8)
-        ai_output = GeminiVcpProposalOutput(
-            verdict="valid",
-            contradicts_scanner=False,
-            confidence=0.86,
-            contraction_anchors=[
-                {"date": candles[190].date, "price": "4955.9", "anchor_type": "resistance"},
-                {"date": candles[205].date, "price": "3899.0", "anchor_type": "contraction_low"},
-                {"date": candles[220].date, "price": "4831.7", "anchor_type": "contraction_high"},
-                {"date": candles[230].date, "price": "4090.0", "anchor_type": "contraction_low"},
-                {"date": candles[240].date, "price": "4625.0", "anchor_type": "contraction_high"},
-                {"date": candles[245].date, "price": "4271.8", "anchor_type": "contraction_low"},
-            ],
+        ai_output = _ai_output(
             pivot_price=Decimal("4831.7"),
             t1=Decimal("5325.0"),
             t2=Decimal("5700.0"),
             t3=Decimal("6100.0"),
-            entry_template=EntryTemplate.TWO_LEG,
-            base_tightness="solid",
-            dry_up_quality="drying_up",
-            resistance_room="clear",
-            evidence_summary="Upper base resistance remains the breakout pivot.",
         )
 
         result = generate_trade_proposal_from_analysis(
@@ -457,76 +412,9 @@ class TestProposalGenerator(unittest.TestCase):
         grounding = result.rejection_details["pivot_grounding"]
         self.assertTrue(grounding["is_grounded"])
         self.assertEqual(grounding["selected_zone"]["low"], "4831.7")
-        self.assertEqual(
-            result.rejection_details["geometry_inputs"]["final_contraction_low"],
-            "4271.8",
-        )
         self.assertIsNone(
             result.rejection_details["geometry_inputs"]["calculated_chase_ceiling"]
         )
-
-    def test_buried_grounded_pivot_is_audit_flagged_not_rejected(self):
-        lower_high = self.candles[-30]
-        upper_high_one = self.candles[-2]
-        upper_high_two = self.candles[-1]
-        pivot = Decimal(str(lower_high.high))
-        ai_output = GeminiVcpProposalOutput(
-            verdict="valid",
-            contradicts_scanner=False,
-            confidence=0.82,
-            contraction_anchors=[
-                {
-                    "date": lower_high.date,
-                    "price": lower_high.high,
-                    "anchor_type": "resistance",
-                },
-                {
-                    "date": self.low_candle.date,
-                    "price": self.low_candle.low,
-                    "anchor_type": "contraction_low",
-                },
-                {
-                    "date": upper_high_one.date,
-                    "price": upper_high_one.high,
-                    "anchor_type": "contraction_high",
-                },
-                {
-                    "date": upper_high_two.date,
-                    "price": upper_high_two.high,
-                    "anchor_type": "contraction_high",
-                },
-            ],
-            pivot_price=pivot,
-            t1=Decimal("124.50"),
-            t2=Decimal("126.00"),
-            t3=Decimal("128.00"),
-            entry_template=EntryTemplate.TWO_LEG,
-            base_tightness="solid",
-            dry_up_quality="drying_up",
-            resistance_room="moderate",
-            evidence_summary="Grounded internal pivot with repeated overhead evidence.",
-        )
-
-        result = generate_trade_proposal_from_analysis(
-            symbol="TESTSTOCK",
-            as_of_date=dt.date(2026, 8, 17),
-            screening_result_id="res-buried",
-            instrument_id="inst-123",
-            candles=self.candles,
-            ai_output=ai_output,
-            rendered_charts=self.charts,
-            model="google/gemini-3.7-flash",
-            approved_risk_budget_amount=Decimal("1000"),
-            generated_at=dt.datetime(2026, 8, 18, 8, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
-        )
-
-        self.assertTrue(result.accepted)
-        grounding = result.proposal["geometry"]["pivot_grounding"]
-        self.assertIn(
-            "pivot_below_material_overhead_zone",
-            grounding["audit_flags"],
-        )
-        self.assertGreater(len(grounding["higher_zones"]), 0)
 
 
 def _contains_key(node: object, key: str) -> bool:
@@ -541,28 +429,21 @@ def _contains_key(node: object, key: str) -> bool:
 
 class TestProposalVisionRequest(unittest.TestCase):
     def test_request_contains_grounding_and_provider_controls(self):
-        candles = [
-            CandleData(
-                open=100.0, high=105.0, low=95.0, close=102.0,
-                volume=1000, date="2026-08-18",
-            )
-        ]
         request = build_proposal_vision_request(
-            symbol="TESTSTOCK",
             context_png_b64="context",
             detail_png_b64="detail",
-            candles=candles,
             model="google/gemini-3.7-flash",
             tick_size=Decimal("0.05"),
         )
         content = request["messages"][1]["content"]
         user_text = content[0]["text"]
-        self.assertIn("2026-08-18,100.00,105.00,95.00,102.00,1000,1.0", user_text)
+        self.assertNotIn("TESTSTOCK", user_text)
+        self.assertNotIn("Canonical frozen OHLCV", user_text)
+        self.assertNotIn("2026-08-18,100.00", user_text)
+        self.assertIn("tick size is 0.05", user_text)
         system_prompt = request["messages"][0]["content"]
-        self.assertIn("contraction_low.price", system_prompt)
-        self.assertIn("measured-move / prior-swing / overhead-room", system_prompt)
+        self.assertIn("Do not invent session dates", system_prompt)
         self.assertIn("Do not set t1 at the pivot, the breakout tick, or the first nearby resistance", system_prompt)
-        self.assertIn("t1 < t2 < t3", system_prompt)
         self.assertEqual(request["provider"], {"require_parameters": True, "data_collection": "deny"})
         self.assertEqual(request["reasoning"], {"effort": "high", "exclude": True})
         self.assertFalse(request["stream"])
@@ -571,16 +452,20 @@ class TestProposalVisionRequest(unittest.TestCase):
         self.assertFalse(_contains_key(schema, "$ref"))
         self.assertNotIn("$defs", schema)
         self.assertFalse(schema["additionalProperties"])
-        anchor_schema = schema["properties"]["contraction_anchors"]["items"]
-        self.assertEqual(anchor_schema["type"], "object")
-        self.assertEqual(anchor_schema["properties"]["price"]["type"], "number")
-        self.assertEqual(anchor_schema["properties"]["price"]["exclusiveMinimum"], 0.0)
-        self.assertFalse(anchor_schema["additionalProperties"])
+        self.assertNotIn("confidence", schema["properties"])
+        self.assertNotIn("contradicts_scanner", schema["properties"])
+        self.assertNotIn("contraction_anchors", schema["properties"])
+        contraction_schema = schema["properties"]["contractions"]["items"]
+        self.assertEqual(contraction_schema["type"], "object")
+        self.assertEqual(contraction_schema["properties"]["high_price"]["type"], "number")
+        self.assertEqual(contraction_schema["properties"]["high_price"]["exclusiveMinimum"], 0.0)
+        self.assertFalse(contraction_schema["additionalProperties"])
         self.assertEqual(schema["properties"]["pivot_price"]["type"], "number")
         self.assertEqual(
             schema["properties"]["entry_template"]["enum"],
             ["single", "two_leg", "two_leg_staged", "three_leg_front", "three_leg_balanced"],
         )
+        self.assertEqual(schema["properties"]["verdict"]["enum"], ["valid", "partial", "invalid"])
         self.assertEqual(
             set(schema["required"]),
             set(schema["properties"]),
@@ -603,18 +488,22 @@ class TestParseProposalOpenRouterResponse(unittest.TestCase):
     def _valid_content(self) -> dict:
         return {
             "verdict": "valid",
-            "contradicts_scanner": False,
-            "confidence": 0.81,
-            "contraction_anchors": [
+            "prior_uptrend": "yes",
+            "prior_uptrend_note": "Higher highs above rising 50/150-day MAs.",
+            "volume_dry_up": "yes",
+            "volume_dry_up_note": "Volume dries up into the final contraction.",
+            "contractions": [
                 {
-                    "date": "2026-08-10",
-                    "price": "100.5",
-                    "anchor_type": "contraction_low",
+                    "index": 1,
+                    "depth_pct": "18.0",
+                    "high_price": "120.0",
+                    "low_price": "98.4",
                 },
                 {
-                    "date": "2026-08-17",
-                    "price": "112.0",
-                    "anchor_type": "resistance",
+                    "index": 2,
+                    "depth_pct": "9.0",
+                    "high_price": "118.0",
+                    "low_price": "107.38",
                 },
             ],
             "pivot_price": "112.0",
@@ -622,9 +511,7 @@ class TestParseProposalOpenRouterResponse(unittest.TestCase):
             "t2": "128.0",
             "t3": "136.0",
             "entry_template": "two_leg",
-            "base_tightness": "solid",
-            "dry_up_quality": "drying_up",
-            "resistance_room": "clear",
+            "red_flags": [],
             "evidence_summary": "Two nested contractions with volume dry-up into resistance.",
         }
 

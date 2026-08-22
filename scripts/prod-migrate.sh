@@ -11,6 +11,10 @@
 # Existing DB that already has older tables:
 #   ./scripts/prod-migrate.sh migrations
 #
+# `migrations` applies only files not yet recorded in schema_migrations.
+# Files 001–024 are baselined on first run (already applied by hand).
+# Push-to-main deploy runs this automatically after pulling the new image.
+#
 # Requires docker compose prod stack to be up (postgres + api).
 
 set -euo pipefail
@@ -47,13 +51,8 @@ case "$MODE" in
     "${COMPOSE[@]}" run --rm --no-deps -T api cat db/schema.sql | psql_apply
     ;;
   migrations)
-    echo "Applying db/migrations/*.sql from api image ..."
-    mapfile -t files < <("${COMPOSE[@]}" run --rm --no-deps -T api sh -c 'ls db/migrations/*.sql | sort')
-    for f in "${files[@]}"; do
-      f="$(echo "$f" | tr -d '\r')"
-      echo "→ $f"
-      "${COMPOSE[@]}" run --rm --no-deps -T api cat "$f" | psql_apply
-    done
+    echo "Applying pending db/migrations from api image ..."
+    "${COMPOSE[@]}" run --rm --no-deps -T api python scripts/apply_pending_migrations.py
     ;;
   *)
     echo "Usage: $0 [schema|migrations]" >&2

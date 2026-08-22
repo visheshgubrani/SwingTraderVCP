@@ -21,6 +21,34 @@ SESSION_SKIP_UNTIL = dt.time(9, 30)  # Ignore first 15 minutes
 SESSION_END_TIME = dt.time(15, 30)
 IST_TZ = ZoneInfo("Asia/Kolkata")
 
+# An entry window closes at 16:00 IST on its final eligible session (D1 for the
+# initial leg, the 10-session expiry date for add legs). The cutoff sits after
+# the last intraday bar-reconciliation cron tick (15:45:20), which verifies and
+# re-publishes the final 15:25-15:30 five-minute bars, so a legitimate last-bar
+# two-bar confirmation and its allocation can never be cut off by expiry.
+ENTRY_WINDOW_CLOSE_TIME = dt.time(16, 0)
+
+
+def entry_window_closed(
+    eligible_session_end: dt.date | None,
+    now_ist: dt.datetime,
+) -> bool:
+    """True once the eligible entry window has closed for good.
+
+    A leg with no recorded eligible session end (legacy rows) is never
+    auto-expired: fail conservatively toward leaving it visible for review.
+    """
+    if eligible_session_end is None:
+        return False
+    if now_ist.tzinfo is None:
+        now_ist = now_ist.replace(tzinfo=IST_TZ)
+    else:
+        now_ist = now_ist.astimezone(IST_TZ)
+    deadline = dt.datetime.combine(
+        eligible_session_end, ENTRY_WINDOW_CLOSE_TIME, tzinfo=IST_TZ
+    )
+    return now_ist >= deadline
+
 
 @dataclass(frozen=True)
 class FiveMinuteBar:

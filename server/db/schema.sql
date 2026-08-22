@@ -1,5 +1,12 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- Ledger of incremental SQL files applied to an existing database.
+-- Fresh installs still use this schema.sql; deploy applies only pending files.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    filename text PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- Swyingify Better Auth tables. These are intentionally separate from the
 -- personal money-path tables below; Better Auth writes them from Next.js.
 CREATE TABLE "user" (
@@ -1519,8 +1526,8 @@ ALTER TABLE trade_proposals
     ADD COLUMN IF NOT EXISTS risk_policy_id uuid REFERENCES risk_policies(id),
     ADD COLUMN IF NOT EXISTS risk_policy_version integer NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS approved_risk_budget_amount numeric(18, 4),
-    ADD COLUMN IF NOT EXISTS prompt_version text NOT NULL DEFAULT 'p10_vcp_proposal_v4',
-    ADD COLUMN IF NOT EXISTS schema_version text NOT NULL DEFAULT 'gemini_vcp_proposal_output_v4',
+    ADD COLUMN IF NOT EXISTS prompt_version text NOT NULL DEFAULT 'p10_vcp_proposal_v5',
+    ADD COLUMN IF NOT EXISTS schema_version text NOT NULL DEFAULT 'gemini_vcp_proposal_output_v5',
     ADD COLUMN IF NOT EXISTS geometry_version text NOT NULL DEFAULT 'p10_geometry_rr_adjusted_chase_v4',
     ADD COLUMN IF NOT EXISTS live_eligible boolean NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS generated_at timestamptz NOT NULL DEFAULT now(),
@@ -1552,7 +1559,7 @@ CREATE TABLE proposal_attempts (
     symbol text NOT NULL,
     attempt_number integer NOT NULL CHECK (attempt_number BETWEEN 1 AND 2),
     status text NOT NULL CHECK (
-        status IN ('running', 'valid', 'invalid', 'uncertain', 'failed', 'timed_out')
+        status IN ('running', 'valid', 'invalid', 'uncertain', 'partial', 'failed', 'timed_out')
     ),
     source_hash text NOT NULL,
     renderer_version text NOT NULL,

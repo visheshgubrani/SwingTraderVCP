@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from app.config import settings
 from app.domain.p10_geometry import (
     CandleData,
+    DeterministicChartGeometry,
     compute_atr14,
     construct_and_validate_proposal,
     DEFAULT_TICK_SIZE,
@@ -34,8 +35,7 @@ from app.domain.p10_geometry import (
     ValidatedPatternAnchor,
 )
 from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
-from app.schemas.proposals import GeminiVcpProposalOutput
-from app.services.canonical_ohlcv import compact_ohlcv_table
+from app.schemas.proposals import GeminiContractionLeg, GeminiVcpProposalOutput
 from app.services.fundamental_llm import sanitize_provider_payload
 from app.services.openrouter_content import (
     decode_openrouter_json_value,
@@ -47,8 +47,8 @@ from app.services.proposal_renderer import RenderedProposalCharts
 
 logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
-PROMPT_VERSION = "p10_vcp_proposal_v4"
-SCHEMA_VERSION = "gemini_vcp_proposal_output_v4"
+PROMPT_VERSION = "p10_vcp_proposal_v5"
+SCHEMA_VERSION = "gemini_vcp_proposal_output_v5"
 GEOMETRY_VERSION = "p10_geometry_rr_adjusted_chase_v4"
 PROPOSAL_INVALID_PROVIDER_JSON = "proposal_invalid_provider_json"
 _PROVIDER_PAYLOAD_SNIPPET_LIMIT = 4000
@@ -69,23 +69,51 @@ class ProposalProviderError(RuntimeError):
         self.details = details or {}
 
 
-GEMINI_PROPOSAL_SYSTEM_PROMPT = """You are a chart-pattern reader specializing in Mark Minervini's Volatility Contraction Pattern (VCP).
+GEMINI_PROPOSAL_SYSTEM_PROMPT = """You are a technical analyst trained in Mark Minervini's Volatility Contraction Pattern (VCP) methodology.
 
-Analyze the provided standardized 252-session context chart, 126-session detail chart, and canonical frozen OHLCV table.
-Your task is to identify whether a high-conviction Volatility Contraction Pattern (VCP) is present and ready for an imminent breakout.
+You will be shown two standardized stock-chart images: a 252-session context chart and a 126-session detail chart (log price, volume pane, moving averages). Analyze the images only. Do not invent session dates. Estimate prices from the visible axis and snap every price to the instrument tick given in the request.
 
-Requirements:
-1. Verdict: 'valid' only if there is a clear prior uptrend, sequential contracting waves (2 to 4 contractions), volume dry-up near the pivot, and overhead resistance room. Otherwise 'invalid' or 'uncertain'.
-2. Contradicts Scanner: true if your chart read contradicts a constructive VCP breakout thesis.
-3. The OHLCV table is authoritative for exact dated prices. Every cited date must appear in it and on the detail chart. For an anchor, use the exact candle field: contraction_low.price is that date's daily Low; contraction_high.price and resistance.price are that date's daily High. Do not estimate anchor prices from pixels or use Close for an anchor. Identify the exact pivot breakout price and exactly 3 strictly increasing, tick-aligned technical targets t1 < t2 < t3. Those targets are successive upside measured-move / prior-swing / overhead-room objectives in the prior-uptrend direction. Do not set t1 at the pivot, the breakout tick, or the first nearby resistance just above the base high. t1 must be a full last-contraction measured move or a prior major swing high with clear overhead room; t2 and t3 must be further expansions of that same upside structure. If there are 3 contractions (C1, C2, C3) and C3 forms a tight micro-consolidation, you may set pivot_price to the clearance of C3 high (the cheat pivot) with two_leg_staged template. All prices must align to the instrument tick shown in the request.
-4. Entry Template: Choose the appropriate entry template based on pattern tightness and conviction:
-   - 'single' (Tightest bases with maximum conviction, single leg entry)
-   - 'two_leg_staged' (Staged entry: 50% on C3 micro/cheat pivot clearance, 50% on Base breakout)
-   - 'two_leg' (Standard VCP base, 2-leg entry)
-   - 'three_leg_front' (Front-loaded 3-leg entry for large liquid setups)
-   - 'three_leg_balanced' (Balanced 3-leg entry for wider contractions)
-5. Strict JSON output adhering exactly to the provided schema with NO additional properties.
-6. Your job ends at pattern evidence and an entry idea. Do NOT calculate or suggest stops, quantities, capital, monetary risk, position or sector exposure, daily-loss limits, add sizes, target sizes, or trailing rules.
+Your job is to decide whether the charts show a real VCP setup, not to force a VCP label onto noise.
+
+Check, in order:
+
+1. Prior uptrend / Stage 2 context
+   Is the stock in a confirmed uptrend before the base (higher highs and higher lows, ideally above a rising 50-day and 150/200-day MA)? Has it already had a meaningful advance before contracting? Bases with no prior trend are not valid VCPs.
+
+2. Count and structure of contractions
+   Identify each pullback (T1, T2, T3, …) by its swing high and swing low. A valid VCP has 2 to 6 contractions. Measure each leg's depth as an approximate percent from peak to trough. Each successive contraction MUST be smaller than the prior one (for example 25%, then 15%, then 8%). The final contraction is usually tight (often under 10%).
+
+3. Volume behavior
+   Volume should generally decrease as the pattern progresses, especially into each successive contraction low. Look for volume dry-up near the final contraction/pivot — noticeably quieter than earlier in the base. High-volume breakdowns through support are a red flag (distribution, not healthy contraction). If the volume pane is missing or unreadable, say so and do not guess dry-up.
+
+4. Price-action tightness
+   Swings should get narrower into the last 1–3 weeks. The tight, low-volatility area just under resistance is the pivot.
+
+5. Base depth and duration
+   Overall base depth should be reasonable (very deep bases, e.g. >35–40% from peak to absolute low, are less reliable). Duration is typically several weeks to several months; 1–2 week wiggles are not mature VCPs.
+
+6. Pivot / breakout level
+   The pivot is the resistance formed by the highs of the last contraction. Note whether price is still under it on lighter volume (constructive) or has already broken out.
+
+7. Moving-average alignment
+   Later contractions should hold the 50-day MA when it is visible. Prefer Stage 2 alignment (50-day above 150/200-day, both rising).
+
+After the visual read, still return:
+- pivot_price: your tick-aligned estimate of the breakout/pivot level
+- t1, t2, t3: exactly three strictly increasing, tick-aligned upside structural objectives in the prior-uptrend direction. Do not set t1 at the pivot, the breakout tick, or the first nearby resistance just above the base high. t1 is a full last-contraction measured move or a prior major swing high with overhead room; t2 and t3 are further expansions of that same upside structure.
+- entry_template:
+  - 'single' — tightest bases, maximum pattern quality, one leg
+  - 'two_leg_staged' — C3 micro/cheat-pivot clearance then base breakout
+  - 'two_leg' — standard VCP base
+  - 'three_leg_front' — front-loaded 3-leg for large liquid setups
+  - 'three_leg_balanced' — balanced 3-leg for wider contractions
+
+Verdict rules — be strict and skeptical:
+- 'valid' only when prior uptrend is present, 2–6 contractions clearly get successively tighter, volume dry-up is visible into the pivot, and the pivot is identifiable.
+- 'partial' when some VCP traits exist but the pattern is incomplete, ambiguous, or missing volume evidence.
+- 'invalid' when this is not a VCP (widening contractions, no prior trend, distribution, chop, or a deep/immature base).
+
+Do NOT calculate or suggest stops, quantities, capital, monetary risk, position or sector exposure, daily-loss limits, add sizes, target sizes, trailing rules, or a confidence score. Return only the strict JSON schema with no additional properties.
 """
 
 
@@ -371,9 +399,8 @@ def _serialize_calculation_basis(
             "risk_per_trade_pct": str(risk_per_trade_pct * Decimal("100")),
             "approved_risk_budget_amount": str(approved_risk_budget_amount) if approved_risk_budget_amount is not None else None,
             "risk_policy_version": risk_policy_version,
-            "base_tightness": ai_output.base_tightness,
-            "dry_up_quality": ai_output.dry_up_quality,
-            "resistance_room": ai_output.resistance_room,
+            "prior_uptrend": ai_output.prior_uptrend,
+            "volume_dry_up": ai_output.volume_dry_up,
             "basis": (
                 f"{tmpl.value.upper()} template: {tmpl_info['leg_count']} leg(s) "
                 f"with allocations {[float(x)*100 for x in tmpl_info['leg_allocations']]}% "
@@ -384,11 +411,19 @@ def _serialize_calculation_basis(
     }
 
 
-def proposal_prompt_hash(*, symbol: str, tick_size: Decimal) -> str:
-    user_text = (
-        f"Evaluate the VCP pattern for {symbol}. Instrument tick size is "
-        f"{tick_size}. Return only the strict structured opinion."
+def _proposal_user_text(*, tick_size: Decimal) -> str:
+    return (
+        "Evaluate the two charts for a Volatility Contraction Pattern (VCP). "
+        f"Instrument tick size is {tick_size}. IMAGE 1 is the 252-session "
+        "context view. IMAGE 2 is the 126-session detail view (log price, "
+        "volume pane). Estimate prices from the visible axis and snap them to "
+        "the tick. Do not invent session dates. Return only the strict "
+        "structured opinion."
     )
+
+
+def proposal_prompt_hash(*, tick_size: Decimal) -> str:
+    user_text = _proposal_user_text(tick_size=tick_size)
     return hashlib.sha256(
         json.dumps(
             {
@@ -454,23 +489,13 @@ def calculate_next_session_and_deadline(
 
 def build_proposal_vision_request(
     *,
-    symbol: str,
     context_png_b64: str,
     detail_png_b64: str,
-    candles: Sequence[CandleData],
     model: str,
     tick_size: Decimal,
 ) -> dict[str, Any]:
-    """Build the fully grounded, auditable P10 multimodal request."""
-    user_text = (
-        f"Evaluate the VCP pattern for {symbol}. Instrument tick size is "
-        f"{tick_size}. The charts cover a 252-session context and 126-session "
-        "detail view. The canonical frozen OHLCV table below is authoritative "
-        "for exact dates and daily high/low anchor prices. Return only the "
-        "strict structured opinion.\n\n"
-        "Canonical frozen OHLCV (Date,O,H,L,C,Vol,Vol/50MA):\n"
-        f"{compact_ohlcv_table(candles)}"
-    )
+    """Build the chart-only, auditable P10 multimodal request."""
+    user_text = _proposal_user_text(tick_size=tick_size)
     return {
         "model": model,
         "messages": [
@@ -513,14 +538,12 @@ def build_proposal_vision_request(
 
 
 async def call_gemini_vision_for_proposal(
-    symbol: str,
     context_png: bytes,
     detail_png: bytes,
-    candles: Sequence[CandleData],
     model: str | None = None,
     tick_size: Decimal = DEFAULT_TICK_SIZE,
 ) -> tuple[GeminiVcpProposalOutput, dict[str, Any], float, str | None]:
-    """Call OpenRouter with two charts and the immutable canonical OHLCV packet."""
+    """Call OpenRouter with the two standardized charts only. No OHLCV table."""
     if not settings.openrouter_api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured")
 
@@ -528,10 +551,8 @@ async def call_gemini_vision_for_proposal(
     context_b64 = base64.b64encode(context_png).decode("ascii")
     detail_b64 = base64.b64encode(detail_png).decode("ascii")
     request_body = build_proposal_vision_request(
-        symbol=symbol,
         context_png_b64=context_b64,
         detail_png_b64=detail_b64,
-        candles=candles,
         model=selected_model,
         tick_size=tick_size,
     )
@@ -649,6 +670,72 @@ def parse_proposal_openrouter_response(
         ) from exc
 
 
+def _serialize_visual_contraction(leg: GeminiContractionLeg) -> dict[str, Any]:
+    return {
+        "index": leg.index,
+        "depth_pct": str(leg.depth_pct),
+        "high_price": str(leg.high_price),
+        "low_price": str(leg.low_price),
+    }
+
+
+def contractions_are_successively_tighter(
+    contractions: Sequence[GeminiContractionLeg],
+) -> bool:
+    if not 2 <= len(contractions) <= 6:
+        return False
+    ordered = sorted(contractions, key=lambda leg: leg.index)
+    depths = [leg.depth_pct for leg in ordered]
+    return all(depths[index] > depths[index + 1] for index in range(len(depths) - 1))
+
+
+def _pattern_anchors_from_chart_geometry(
+    geometry: DeterministicChartGeometry,
+) -> list[ValidatedPatternAnchor]:
+    anchors: list[ValidatedPatternAnchor] = []
+    for anchor in geometry.anchors:
+        try:
+            date = dt.date.fromisoformat(anchor.date)
+        except ValueError:
+            continue
+        anchors.append(
+            ValidatedPatternAnchor(
+                date=date,
+                price=anchor.price,
+                anchor_type=anchor.anchor_type,
+            )
+        )
+    return anchors
+
+
+def _final_low_anchor_from_geometry(
+    *,
+    geometry: DeterministicChartGeometry,
+    pattern_anchors: Sequence[ValidatedPatternAnchor],
+    candles: Sequence[CandleData],
+) -> ValidatedPatternAnchor:
+    low_anchors = [
+        anchor for anchor in pattern_anchors if anchor.anchor_type == "contraction_low"
+    ]
+    if low_anchors:
+        return max(low_anchors, key=lambda anchor: anchor.date)
+    last_dated = next(
+        (
+            candle
+            for candle in reversed(candles)
+            if candle.date is not None
+        ),
+        None,
+    )
+    if last_dated is None or last_dated.date is None:
+        raise ValueError("Dated candles are required to locate the final contraction low")
+    return ValidatedPatternAnchor(
+        date=dt.date.fromisoformat(last_dated.date),
+        price=geometry.final_contraction_low,
+        anchor_type="contraction_low",
+    )
+
+
 def generate_trade_proposal_from_analysis(
     symbol: str,
     as_of_date: dt.date,
@@ -667,21 +754,31 @@ def generate_trade_proposal_from_analysis(
     generated_at: dt.datetime | None = None,
 ) -> ProposalBuildResult:
     """Combines AI opinion and candles through deterministic Python validation into an immutable proposal dict."""
-    if ai_output.verdict != "valid" or ai_output.contradicts_scanner:
-        logger.info(f"Symbol {symbol} rejected by AI verdict ({ai_output.verdict}) or contradiction ({ai_output.contradicts_scanner})")
-        if ai_output.contradicts_scanner:
+    if ai_output.verdict != "valid":
+        logger.info("Symbol %s rejected by AI verdict (%s)", symbol, ai_output.verdict)
+        if ai_output.verdict == "partial":
             return _rejected(
-                "proposal_ai_contradicts_scanner",
-                "Gemini marked the pattern as contradicting the scanner thesis.",
-            )
-        if ai_output.verdict == "uncertain":
-            return _rejected(
-                "proposal_ai_uncertain",
-                "Gemini returned an uncertain pattern verdict.",
+                "proposal_ai_partial",
+                "Gemini returned a partial VCP verdict.",
             )
         return _rejected(
             "proposal_ai_invalid",
             f"Gemini returned verdict={ai_output.verdict!r}.",
+        )
+    if ai_output.prior_uptrend != "yes":
+        return _rejected(
+            "proposal_ai_no_prior_uptrend",
+            "Gemini did not confirm a prior Stage 2 uptrend.",
+        )
+    if ai_output.volume_dry_up != "yes":
+        return _rejected(
+            "proposal_ai_no_volume_dry_up",
+            "Gemini did not confirm volume dry-up into the pivot.",
+        )
+    if not contractions_are_successively_tighter(ai_output.contractions):
+        return _rejected(
+            "proposal_ai_contractions_not_tightening",
+            "Gemini contractions must be 2–6 legs with strictly decreasing depth.",
         )
 
     if len(candles) < 252:
@@ -705,49 +802,31 @@ def generate_trade_proposal_from_analysis(
                 f"Frozen candle has invalid date {candle.date!r}.",
             )
 
-    tolerance = atr14 * Decimal("0.50")
-    validated_anchors: list[dict[str, Any]] = []
-    validated_pattern_anchors: list[ValidatedPatternAnchor] = []
-    for anchor in ai_output.contraction_anchors:
-        candle = frozen_dates.get(anchor.date)
-        if candle is None:
-            logger.info("Symbol %s returned an anchor outside the frozen detail window", symbol)
-            return _rejected(
-                "proposal_anchor_date_missing",
-                f"{anchor.anchor_type} anchor date {anchor.date.isoformat()} is outside the frozen 126-session detail window.",
-            )
-        reference = (
-            Decimal(str(candle.low))
-            if anchor.anchor_type == "contraction_low"
-            else Decimal(str(candle.high))
-        )
-        if abs(anchor.price - reference) > tolerance:
-            return _rejected(
-                "proposal_anchor_price_out_of_tolerance",
-                f"{anchor.anchor_type} anchor on {anchor.date.isoformat()} supplied {anchor.price}; expected daily {'low' if anchor.anchor_type == 'contraction_low' else 'high'} {reference}; tolerance {tolerance} (0.5×ATR14).",
-            )
-        validated_anchors.append(
-            {
-                "date": anchor.date.isoformat(),
-                "price": str(reference),
-                "anchor_type": anchor.anchor_type,
-            }
-        )
-        validated_pattern_anchors.append(
-            ValidatedPatternAnchor(
-                date=anchor.date,
-                price=reference,
-                anchor_type=anchor.anchor_type,
-            )
+    try:
+        chart_geometry = derive_chart_geometry(candles, tick_size=tick_size)
+    except ValueError as exc:
+        return _rejected(
+            "proposal_geometry_unavailable",
+            f"Deterministic chart geometry could not be derived: {exc}",
         )
 
-    low_anchors = [
-        anchor for anchor in validated_pattern_anchors
-        if anchor.anchor_type == "contraction_low"
-    ]
-    final_low_anchor = max(low_anchors, key=lambda anchor: anchor.date)
-    final_low_candle = frozen_dates[final_low_anchor.date]
-    final_contraction_low = Decimal(str(final_low_candle.low))
+    tolerance = atr14 * Decimal("0.50")
+    validated_pattern_anchors = _pattern_anchors_from_chart_geometry(chart_geometry)
+    if not validated_pattern_anchors:
+        return _rejected(
+            "proposal_geometry_unavailable",
+            "Deterministic chart geometry produced no dated contraction/resistance anchors.",
+        )
+
+    try:
+        final_low_anchor = _final_low_anchor_from_geometry(
+            geometry=chart_geometry,
+            pattern_anchors=validated_pattern_anchors,
+            candles=candles,
+        )
+    except ValueError as exc:
+        return _rejected("proposal_geometry_unavailable", str(exc))
+    final_contraction_low = chart_geometry.final_contraction_low
 
     pivot_grounding = ground_pivot_to_resistance_zones(
         pivot=ai_output.pivot_price,
@@ -788,11 +867,10 @@ def generate_trade_proposal_from_analysis(
     )
 
     if not geom.is_valid and ai_output.entry_template == EntryTemplate.TWO_LEG_STAGED:
-        dyn_geom = derive_chart_geometry(candles, tick_size=tick_size)
-        if dyn_geom.cheat_pivot and dyn_geom.cheat_stop:
+        if chart_geometry.cheat_pivot and chart_geometry.cheat_stop:
             cheat_geom = construct_and_validate_proposal(
-                pivot_price=dyn_geom.cheat_pivot,
-                final_contraction_low=dyn_geom.final_contraction_low,
+                pivot_price=chart_geometry.cheat_pivot,
+                final_contraction_low=chart_geometry.final_contraction_low,
                 t1=ai_output.t1,
                 t2=ai_output.t2,
                 t3=ai_output.t3,
@@ -802,7 +880,7 @@ def generate_trade_proposal_from_analysis(
             if cheat_geom.is_valid:
                 geom = cheat_geom
                 ai_output = ai_output.model_copy(update={
-                    "pivot_price": dyn_geom.cheat_pivot,
+                    "pivot_price": chart_geometry.cheat_pivot,
                     "entry_template": EntryTemplate.TWO_LEG_STAGED,
                 })
 
@@ -938,7 +1016,7 @@ def generate_trade_proposal_from_analysis(
         "prompt_version": PROMPT_VERSION,
         "schema_version": SCHEMA_VERSION,
         "model": model,
-        "confidence": Decimal(str(round(ai_output.confidence, 4))),
+        "confidence": Decimal("0"),
         "entry_template": tmpl.value,
         "pivot_price": geom.pivot_price,
         "initial_stop": geom.initial_stop,
@@ -955,11 +1033,16 @@ def generate_trade_proposal_from_analysis(
         "leg_risk_allocations": [float(x) for x in tmpl_info["leg_allocations"]],
         "relative_volume_threshold": tmpl_info["relative_volume_threshold"],
         "gemini_evidence": {
-            "base_tightness": ai_output.base_tightness,
-            "dry_up_quality": ai_output.dry_up_quality,
-            "resistance_room": ai_output.resistance_room,
+            "prior_uptrend": ai_output.prior_uptrend,
+            "prior_uptrend_note": ai_output.prior_uptrend_note,
+            "volume_dry_up": ai_output.volume_dry_up,
+            "volume_dry_up_note": ai_output.volume_dry_up_note,
+            "contractions": [
+                _serialize_visual_contraction(leg)
+                for leg in sorted(ai_output.contractions, key=lambda item: item.index)
+            ],
+            "red_flags": list(ai_output.red_flags),
             "evidence_summary": ai_output.evidence_summary,
-            "contraction_anchors": validated_anchors,
         },
         "geometry": {
             "atr14": str(geom.atr14),

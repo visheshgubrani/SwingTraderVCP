@@ -90,9 +90,6 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
               <Badge variant="outline" className={templateColors[activeProposal.entry_template] || ""}>
                 {activeProposal.entry_template.toUpperCase()}
               </Badge>
-              <Badge variant="outline" className="text-[10px]">
-                CONF: {(Number(activeProposal.confidence) * 100).toFixed(0)}%
-              </Badge>
             </div>
             <Badge
               variant={isApproved ? "default" : isPending ? "secondary" : "destructive"}
@@ -169,9 +166,9 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
                 <TargetIcon className="h-3.5 w-3.5 text-primary" /> Gemini VCP Assessment
               </span>
               <div className="flex gap-1.5 text-[10px]">
-                <span className="text-muted-foreground">Tightness: <strong className="text-foreground">{activeProposal.gemini_evidence?.base_tightness}</strong></span>
+                <span className="text-muted-foreground">Prior trend: <strong className="text-foreground">{activeProposal.gemini_evidence?.prior_uptrend ?? activeProposal.gemini_evidence?.base_tightness ?? "—"}</strong></span>
                 <span>•</span>
-                <span className="text-muted-foreground">Volume: <strong className="text-foreground">{activeProposal.gemini_evidence?.dry_up_quality}</strong></span>
+                <span className="text-muted-foreground">Volume dry-up: <strong className="text-foreground">{activeProposal.gemini_evidence?.volume_dry_up ?? activeProposal.gemini_evidence?.dry_up_quality ?? "—"}</strong></span>
               </div>
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">

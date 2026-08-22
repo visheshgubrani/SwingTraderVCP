@@ -225,7 +225,7 @@ def sort_competing_candidates(
 ) -> CandidatePriorityResult:
     """Ranks competing triggered candidates:
     1. Descending scanner-score bands (2-point bands from highest score).
-    2. Within band: Gemini confidence DESC, then conservative R:R DESC, then trigger timestamp ASC.
+    2. Within band: conservative R:R DESC, then trigger timestamp ASC.
     3. Exact ties on all 4 fields produce a capacity_conflict requiring operator choice.
     """
     if not candidates:
@@ -258,10 +258,9 @@ def sort_competing_candidates(
         band_index += 1
 
     def sort_key(c: CompetingCandidate):
-        # Sort by: band_index ASC, confidence DESC (-), rr DESC (-), timestamp ASC (+)
+        # Sort by: band_index ASC, rr DESC (-), timestamp ASC (+)
         return (
             band_by_id[c.candidate_id],
-            -c.gemini_confidence,
             -c.conservative_rr,
             c.trigger_timestamp,
         )
@@ -279,7 +278,6 @@ def sort_competing_candidates(
         
         exact_tie = (
             same_band
-            and c1.gemini_confidence == c2.gemini_confidence
             and c1.conservative_rr == c2.conservative_rr
             and c1.trigger_timestamp == c2.trigger_timestamp
         )

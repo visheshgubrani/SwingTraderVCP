@@ -25,6 +25,7 @@ from app.config import settings
 from app.database import db_dep
 from app.domain.p10_geometry import MAX_STOP_DISTANCE_PCT, calculate_chase_ceiling, floor_to_tick
 from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
+from app.domain.p10_triggers import IST_TZ, entry_window_closed
 from app.services.execution_engine import publish_tick_subscriptions
 from app.schemas.proposals import (
     ProposalDecisionRequest,
@@ -124,6 +125,62 @@ def _market_data_status(
         "symbol_count": symbol_count,
         "ready": ready,
     }
+
+
+_EXECUTING_LEG_STATUSES = {
+    "intent_created",
+    "submitted",
+    "submission_unknown",
+    "partially_filled",
+}
+
+
+def _effective_leg_status(
+    status: str,
+    eligible_session_end: dt.date | None,
+    now_ist: dt.datetime,
+) -> str:
+    """Effective per-leg status for presentation.
+
+    A closed entry window downgrades armed/trigger_observed to expired and
+    in-flight intent states to executing, without writing to the database —
+    the entry supervisor remains the sole writer of entry_legs.status.
+    """
+    if status in ("armed", "trigger_observed") and entry_window_closed(
+        eligible_session_end, now_ist
+    ):
+        return "expired"
+    if status in _EXECUTING_LEG_STATUSES:
+        return "executing"
+    return status
+
+
+def derive_proposal_entry_state(
+    legs: list[dict[str, Any]],
+    now_ist: dt.datetime | None = None,
+) -> str | None:
+    """Best single entry-state label for a proposal's legs.
+
+    Priority: filled > executing > trigger_observed > armed > expired > None.
+    """
+    if now_ist is None:
+        now_ist = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
+    states: set[str] = set()
+    for leg in legs:
+        status = str(leg.get("status") or "planned")
+        end = leg.get("eligible_session_end")
+        if isinstance(end, dt.datetime):
+            end = end.date()
+        states.add(_effective_leg_status(status, end, now_ist))
+        try:
+            if int(leg.get("filled_shares") or 0) > 0:
+                states.add("filled")
+        except (TypeError, ValueError):
+            pass
+    for candidate in ("filled", "executing", "trigger_observed", "armed", "expired"):
+        if candidate in states:
+            return candidate
+    return None
 
 
 @router.get("/runs/{run_id}")
@@ -603,7 +660,7 @@ async def get_proposal_generation_chart(
 async def list_rejected_attempts(
     db: db_dep,
     status_filter: Annotated[
-        Literal["all", "invalid", "uncertain", "failed", "timed_out"],
+        Literal["all", "invalid", "uncertain", "partial", "failed", "timed_out"],
         Query(alias="status"),
     ] = "all",
     symbol: str | None = None,
@@ -764,9 +821,20 @@ async def list_trade_proposals(
     symbol: str | None = None,
     automation_run_id: UUID | None = None,
     as_of_date: dt.date | None = None,
+    entry_state: Annotated[
+        Literal["armed", "trigger_observed", "executing", "filled", "expired"] | None,
+        Query(alias="entry_state"),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[dict[str, Any]]:
-    """Returns trade proposals filtered by status (default: pending_approval), symbol, run, or date."""
+    """Returns trade proposals filtered by status (default: pending_approval), symbol, run, or date.
+
+    Each row carries a derived `entry_state` for its entry legs (armed,
+    trigger_observed, executing, filled, or expired — see
+    derive_proposal_entry_state). The optional `entry_state` filter applies
+    Python-side after fetching, and `expired` reflects a closed entry window
+    even before the entry supervisor has persisted the transition.
+    """
     where_clauses = []
     params: dict[str, Any] = {"limit": limit}
 
@@ -805,7 +873,34 @@ async def list_trade_proposals(
     """)
     res = await db.execute(stmt, params)
     rows = res.fetchall()
-    return [dict(r._mapping) for r in rows]
+    proposal_ids = [UUID(r["id"]) for r in rows]
+    legs_by_proposal: dict[UUID, list[dict[str, Any]]] = {}
+    if proposal_ids:
+        legs_res = await db.execute(
+            text(
+                """
+                SELECT proposal_id, leg_index, status, eligible_session_end,
+                       filled_shares
+                FROM entry_legs
+                WHERE proposal_id = ANY(:proposal_ids)
+                ORDER BY proposal_id, leg_index
+                """
+            ),
+            {"proposal_ids": proposal_ids},
+        )
+        for leg in legs_res.mappings().all():
+            legs_by_proposal.setdefault(leg["proposal_id"], []).append(dict(leg))
+    now_ist = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row._mapping)
+        item["entry_state"] = derive_proposal_entry_state(
+            legs_by_proposal.get(row["id"], []), now_ist
+        )
+        if entry_state is not None and item["entry_state"] != entry_state:
+            continue
+        results.append(item)
+    return results
 
 
 @router.get("/proposals/{proposal_id}")
@@ -844,10 +939,16 @@ async def get_trade_proposal(
         ORDER BY leg_index ASC;
     """)
     legs_res = await db.execute(legs_stmt, {"proposal_id": proposal_id})
-    legs = legs_res.fetchall()
+    legs = [dict(leg._mapping) for leg in legs_res.fetchall()]
+    now_ist = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
+    for leg in legs:
+        leg["derived_status"] = _effective_leg_status(
+            leg["status"], leg["eligible_session_end"], now_ist
+        )
 
     result = dict(prop._mapping)
-    result["legs"] = [dict(l._mapping) for l in legs]
+    result["legs"] = legs
+    result["entry_state"] = derive_proposal_entry_state(legs, now_ist)
     return result
 
 
@@ -1541,16 +1642,26 @@ async def get_entry_supervisor_status(
     request: Request,
     db: db_dep,
 ) -> dict[str, Any]:
-    """Returns live status of armed proposals, active legs, and recent allocation events."""
+    """Returns live status of armed proposals, active legs, and recent allocation events.
+
+    Armed/trigger-observed counts exclude legs whose entry window has already
+    closed, so a closed D1 window is never reported as armed even if the entry
+    supervisor has not yet persisted the expiry transition.
+    """
     armed_legs_stmt = text("""
         SELECT el.id, el.leg_index, el.risk_allocation_pct, el.status, el.trigger_price,
-               el.chase_ceiling, tp.symbol, tp.entry_template
+               el.chase_ceiling, tp.symbol, tp.entry_template, el.eligible_session_end
         FROM entry_legs el
         JOIN trade_proposals tp ON el.proposal_id = tp.id
         WHERE el.status = 'armed';
     """)
     res = await db.execute(armed_legs_stmt)
-    armed_legs = [dict(r._mapping) for r in res.fetchall()]
+    now_ist = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
+    armed_legs = [
+        row
+        for row in (dict(r._mapping) for r in res.fetchall())
+        if not entry_window_closed(row["eligible_session_end"], now_ist)
+    ]
 
     recent_ledger_stmt = text("""
         SELECT id, generation, leg_id, event_type, broker_funds_available,
@@ -1575,12 +1686,21 @@ async def get_entry_supervisor_status(
     market_data = _market_data_status(
         await request.app.state.redis.get("tick_worker:status")
     )
-    trigger_observed_count = int(
-        (
-            await db.execute(
-                text("SELECT COUNT(*) FROM entry_legs WHERE status = 'trigger_observed'")
+    trigger_observed_rows = (
+        await db.execute(
+            text(
+                """
+                SELECT eligible_session_end
+                FROM entry_legs
+                WHERE status = 'trigger_observed'
+                """
             )
-        ).scalar_one()
+        )
+    ).mappings().all()
+    trigger_observed_count = sum(
+        1
+        for row in trigger_observed_rows
+        if not entry_window_closed(row["eligible_session_end"], now_ist)
     )
     pending_conflicts = int(
         (

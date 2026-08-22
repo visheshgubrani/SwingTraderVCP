@@ -80,7 +80,7 @@ class TestP10Caps(unittest.TestCase):
             candidate_id="c2",
             symbol="B",
             scanner_score=Decimal("94.5"),  # Within 2 pts of 95.0 -> same band!
-            gemini_confidence=Decimal("0.90"),  # Higher confidence wins within band!
+            gemini_confidence=Decimal("0.90"),  # Unused for ranking; R:R decides within band
             conservative_rr=Decimal("2.0"),
             trigger_timestamp=now,
             requested_risk=Decimal("5000"),
@@ -99,8 +99,8 @@ class TestP10Caps(unittest.TestCase):
 
         res = sort_competing_candidates([c1, c2, c3])
         self.assertFalse(res.has_capacity_conflict)
-        # B wins first (band 0, higher confidence than A), then A (band 0), then C (band 2)
-        self.assertEqual([c.candidate_id for c in res.ranked_candidates], ["c2", "c1", "c3"])
+        # A wins first (band 0, higher R:R than B), then B (band 0), then C (lower band)
+        self.assertEqual([c.candidate_id for c in res.ranked_candidates], ["c1", "c2", "c3"])
 
     def test_sort_competing_candidates_detects_exact_tie_conflict(self):
         now = dt.datetime(2026, 8, 17, 10, 0)
@@ -118,7 +118,7 @@ class TestP10Caps(unittest.TestCase):
             candidate_id="c2",
             symbol="B",
             scanner_score=Decimal("95.0"),  # Identical score
-            gemini_confidence=Decimal("0.85"),  # Identical confidence
+            gemini_confidence=Decimal("0.85"),  # Unused; exact R:R + timestamp still tie
             conservative_rr=Decimal("2.5"),   # Identical R:R
             trigger_timestamp=now,             # Identical timestamp
             requested_risk=Decimal("5000"),

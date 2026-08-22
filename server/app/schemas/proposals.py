@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -16,58 +16,53 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.domain.p10_sizing import EntryTemplate
 
 
-VerdictType = Literal["valid", "invalid", "uncertain"]
+VerdictType = Literal["valid", "partial", "invalid"]
+YesNoType = Literal["yes", "no"]
 DecisionType = Literal["approved", "rejected"]
 ProposalStatusType = Literal["pending_approval", "approved", "rejected", "expired_unapproved"]
 ProposalAttemptStatusType = Literal[
-    "running", "valid", "invalid", "uncertain", "failed", "timed_out"
+    "running", "valid", "invalid", "uncertain", "partial", "failed", "timed_out"
 ]
 
 
-class GeminiContractionAnchor(BaseModel):
-    """One dated, price-specific geometry observation from the chart reader."""
+class GeminiContractionLeg(BaseModel):
+    """One visual contraction wave estimated from the chart images."""
 
     model_config = ConfigDict(extra="forbid")
 
-    date: dt.date
-    price: Decimal = Field(gt=0)
-    anchor_type: Literal["contraction_high", "contraction_low", "resistance"]
+    index: int = Field(ge=1, le=6)
+    depth_pct: Decimal = Field(gt=0, le=100)
+    high_price: Decimal = Field(gt=0)
+    low_price: Decimal = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_high_above_low(self) -> "GeminiContractionLeg":
+        if self.high_price <= self.low_price:
+            raise ValueError("high_price must be greater than low_price")
+        return self
 
 
 class GeminiVcpProposalOutput(BaseModel):
     """Strict JSON schema for serial Gemini VCP pattern reading.
-    Contains NO money, stop, quantity, or risk fields.
+    Contains NO money, stop, quantity, risk, confidence, or dated OHLCV fields.
     """
     model_config = ConfigDict(extra="forbid")
 
     verdict: VerdictType
-    contradicts_scanner: bool
-    confidence: float = Field(ge=0.0, le=1.0)
-    contraction_anchors: list[GeminiContractionAnchor] = Field(
-        min_length=2,
-        max_length=8,
-        description="List of dated contraction peak/trough anchors.",
-    )
+    prior_uptrend: YesNoType
+    prior_uptrend_note: str = Field(min_length=1, max_length=300)
+    volume_dry_up: YesNoType
+    volume_dry_up_note: str = Field(min_length=1, max_length=300)
+    contractions: list[GeminiContractionLeg] = Field(min_length=1, max_length=6)
     pivot_price: Decimal = Field(gt=0)
     t1: Decimal = Field(gt=0)
     t2: Decimal = Field(gt=0)
     t3: Decimal = Field(gt=0)
     entry_template: EntryTemplate
-    base_tightness: Literal["solid", "loose", "unclear"]
-    dry_up_quality: Literal["drying_up", "supportive", "mixed", "weak", "unclear"]
-    resistance_room: Literal["clear", "moderate", "congested", "unclear"]
+    red_flags: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        max_length=8,
+    )
     evidence_summary: str = Field(min_length=1, max_length=600)
-
-    @model_validator(mode="after")
-    def validate_anchor_shape(self) -> "GeminiVcpProposalOutput":
-        kinds = {anchor.anchor_type for anchor in self.contraction_anchors}
-        if "contraction_low" not in kinds or not (
-            {"contraction_high", "resistance"} & kinds
-        ):
-            raise ValueError(
-                "contraction_anchors must contain a contraction_low and a high/resistance anchor"
-            )
-        return self
 
 
 class ProposalDecisionRequest(BaseModel):

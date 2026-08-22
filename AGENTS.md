@@ -98,7 +98,7 @@ Do not substitute these without an explicit instruction from the user.
 | Market data & orders | Fyers API (REST + WebSocket)                      | See §2.1 for which Fyers surfaces we use                                                                                                            |
 | Fundamentals         | Upstox Company Fundamentals API + official NSE corporate filings | Upstox remains primary; official NSE shareholding and integrated-filing XBRL are read-only risk enrichment for technical survivors only; never prices, sockets, or orders |
 | Fundamental LLM inference | OpenRouter (`openai/gpt-5.6-luna-pro`)      | Blind structured second opinion over normalized snapshots; Python's deterministic fit remains authoritative. No tools or money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
-| VCP vision inference | OpenRouter (`google/gemini-3.7-flash`)            | Serial blind pattern interpretation over immutable OHLCV and standardized captures. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
+| VCP vision inference | OpenRouter (`google/gemini-3.7-flash`)            | P10 proposal reader: serial chart-only pattern interpretation over standardized captures (no OHLCV table). Advisory screener VCP still sends frozen OHLCV. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
 
 ### 2.1 Locked Fyers / trading product decisions
 
@@ -109,7 +109,7 @@ Do not substitute these without an explicit instruction from the user.
 | Default product type  | **CNC**                                        | Multi-day swing. Per-trade override may be added later; default CNC   |
 | Order placement API   | **Async** (`/api/v3/orders/async`)             | Correlate via **Order WebSocket** (`id_fyers` → exchange order id)    |
 | Order rate limit      | Internal ≤ **10 OPS** token bucket             | Align with Fyers; queue bursts inside the engine                      |
-| AI / LLM              | **Pattern read only**                         | May return verdict, geometry, pivot, T1–T3, evidence, confidence, and an entry-template enum; never stop/quantity/risk/exposure/trailing arithmetic, confirmation, or execution |
+| AI / LLM              | **Pattern read only**                         | May return verdict, visual contractions, pivot, T1–T3, evidence, and an entry-template enum; never stop/quantity/risk/exposure/trailing arithmetic, confirmation, confidence scores, or execution |
 | P7 fundamental source | **Upstox primary + official NSE filings enrichment** | Consolidated Upstox statements by default; known NSE pledge/leverage risks transparently reduce only the deterministic fundamental score; neither source is used for trading |
 
 **Explicit non-goals (v1 unless user reopens):**
@@ -295,7 +295,7 @@ raw 252-session chart + annotated 126-session chart
 Gemini strict pattern read (no broker/account/money context)
         │
         ▼
-Python schema/date/price/R:R/risk-policy validation
+Python schema/geometry/R:R/risk-policy validation
         │
         ▼
 immutable proposal → human approve/reject
@@ -308,35 +308,37 @@ Python is authoritative for proposal validity and every monetary rule.
 
 - Freeze the selected candidate's EOD OHLCV and `source_hash` before rendering
   or inference. Reuse is allowed only when source, geometry, renderer, prompt,
-  schema, model, and risk-policy version hashes all match.
+  schema, model, and risk-policy version hashes all match. Frozen OHLCV is for
+  charts, `source_hash`, ATR, stop, and pivot snap — it is **not** sent to Gemini.
 - Render two fixed 1280×720, log-price PNGs using pinned
   `matplotlib`/`mplfinance` Agg versions: a raw 252-session context chart and an
   annotated 126-session detail chart. Fix colors, fonts, DPI, candle/volume
   layout, EMA21, SMA50/150/200, axes, margins, and encoding.
 - Python derives candidate contraction geometry using ATR14, dated extrema,
-  and a `0.5×ATR14` anchor-merge tolerance. Gemini may agree or contradict; it
+  and a `0.5×ATR14` anchor-merge tolerance. Gemini reads the charts only and
   may not rewrite the frozen OHLCV.
-- Missing/stale candles, unsnappable anchors, hash/render mismatch, invalid
+- Missing/stale candles, ungrounded pivot, hash/render mismatch, invalid
   schema, provider failure, or timeout produces an audited non-proposal state.
 
 ### 5.2 Gemini contract
 
 Gemini must return strict JSON (`additionalProperties: false`) containing only:
 
-- `verdict`: `valid | invalid | uncertain`
-- `contradicts_scanner`: boolean
-- bounded `confidence`
-- dated contraction/resistance geometry anchors
+- `verdict`: `valid | partial | invalid`
+- `prior_uptrend` / `volume_dry_up`: `yes | no`, each with a short note
+- 1–6 visual `contractions` (index, approximate `%` depth, visual high/low;
+  no session dates)
 - absolute `pivot_price` and exactly three absolute targets `t1`, `t2`, `t3`
 - `entry_template`:
-  `single | two_leg | three_leg_front | three_leg_balanced`
-- structured pattern evidence, including base tightness, dry-up quality, and
-  resistance room, plus concise evidence references
+  `single | two_leg | two_leg_staged | three_leg_front | three_leg_balanced`
+- `red_flags` and a concise `evidence_summary`
 
 The schema must not contain a stop, quantity, capital, monetary risk, position
-or sector exposure, daily-loss, add-size, target-size, or trailing field. Do not
-persist or display provider `reasoning_details`. Only `verdict=valid` with
-`contradicts_scanner=false` may proceed.
+or sector exposure, daily-loss, add-size, target-size, trailing, confidence, or
+dated OHLCV-grounded anchor field. Do not persist or display provider
+`reasoning_details`. Only `verdict=valid` with `prior_uptrend=yes`,
+`volume_dry_up=yes`, and 2–6 strictly decreasing contraction depths may
+proceed; Python then snaps the visual pivot to frozen geometry.
 
 ### 5.3 Deterministic proposal construction
 
@@ -380,7 +382,14 @@ proof. No template may create more than three entry legs.
   reactivated. A new scan/analysis/proposal is required.
 - Approval before that deadline arms the initial leg for **D1 only**; this is
   the separate entry-trigger window. If it does not trigger on D1, it becomes
-  `entry_expired`.
+  `entry_expired`. The D1 window is considered closed at **16:00 IST on D1**
+  (after the final 15:45 intraday bar-reconciliation tick): the entry
+  supervisor persists `expired` on untriggered `armed`/`trigger_observed`
+  legs and cancels their higher-index `planned` siblings, and the API derives
+  the same expired state for display even when the supervisor was not running
+  at the close. The proposal decision itself remains `approved`; only the
+  legs expire, and only a new scan/analysis/proposal can produce a fresh
+  entry opportunity.
 - Approval locks the proposal hash, source and policy versions, pivot, targets,
   stop/structure rules, template, risk budget, chase ceiling, add rules, exit
   rules, and expiries. It locks a maximum monetary risk budget, not quantity.
@@ -518,8 +527,7 @@ When multiple valid signals compete:
    candidates.
 2. Form descending scanner-score bands spanning two points from the current
    highest remaining score.
-3. Within the band sort by Gemini confidence, conservative R:R, then trigger
-   timestamp.
+3. Within the band sort by conservative R:R, then trigger timestamp.
 4. An exact remaining tie becomes `capacity_conflict`; never use symbol order
    or another hidden fallback. Human may select one winner or skip all, without
    editing either proposal. If unresolved before signal expiry, skip all.
@@ -738,7 +746,7 @@ Do not build one “AI god service.” Split:
 | Surface            | Role                                              | Touches money? |
 | ------------------ | ------------------------------------------------- | -------------- |
 | Fundamental pass   | Python-authoritative fit plus blind AI pass/fail/uncertain second opinion | No          |
-| VCP proposal reader | Serial chart-pattern verdict, anchors, pivot, T1–T3, confidence, and template enum; Python validates and owns money rules | No |
+| VCP proposal reader | Serial chart-only VCP verdict, visual contractions, pivot, T1–T3, and template enum; Python validates frozen geometry and owns money rules | No |
 | Journal coach      | Post-trade patterns/mistakes from closed trades   | No             |
 
 P9 market context is deliberately absent from this table: it is pure,
@@ -860,9 +868,9 @@ the phase table above is authoritative going forward.
 
 - Golden charts/source hashes: identical frozen inputs and versions generate
   identical packets; changed renderer/geometry versions cannot silently reuse.
-- Gemini schema: reject extra/missing fields, money fields, invalid anchors,
-  unsnappable dates, bad templates, unordered targets, and T1 that cannot
-  provide 1R even at pivot.
+- Gemini schema: reject extra/missing fields, money fields, confidence,
+  dated OHLCV anchors, non-decreasing contraction depths, bad templates,
+  unordered targets, and T1 that cannot provide 1R even at pivot.
 - Pure rules: geometry, ATR/tick snapping, chase ceiling including R:R
   shrinkage to preserve 1R to T1, T2/T3 below 2R/3R accepted with flags, all
   template/relative-volume mappings, Hold/Base/EMA21, add expiry,
@@ -918,9 +926,9 @@ Owner-only, never self-promotes, cannot skip. Default `shadow`.
    reviewing reduced-live fills, slippage, correction, and recovery evidence.
    No stage promotes itself.
 
-Scanner score stays primary. Gemini confidence is only a tiebreaker inside a
-two-point scanner band until at least 100–150 closed proposal-backed trades
-support a separately reviewed calibration change.
+Scanner score stays primary. Within a two-point scanner band, conservative R:R
+then trigger timestamp break remaining ties. An exact remaining tie is still
+`capacity_conflict`.
 
 Never “test” live exits with size you cannot afford to lose.
 

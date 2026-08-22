@@ -9,6 +9,7 @@ export interface TradeProposalItem {
   symbol: string
   as_of_date: string
   status: "pending_approval" | "approved" | "rejected" | "expired_unapproved"
+  entry_state?: "armed" | "trigger_observed" | "executing" | "filled" | "expired" | null
   approval_deadline: string
   entry_session_date: string
   proposal_hash: string
@@ -34,10 +35,21 @@ export interface TradeProposalItem {
   leg_risk_allocations: number[]
   relative_volume_threshold: number
   gemini_evidence: {
-    base_tightness: string
-    dry_up_quality: string
-    resistance_room: string
+    prior_uptrend?: string
+    prior_uptrend_note?: string
+    volume_dry_up?: string
+    volume_dry_up_note?: string
+    contractions?: Array<{
+      index: number
+      depth_pct: number | string
+      high_price: number | string
+      low_price: number | string
+    }>
+    red_flags?: string[]
     evidence_summary: string
+    base_tightness?: string
+    dry_up_quality?: string
+    resistance_room?: string
     contraction_anchors?: Array<{ date: string; price?: number | string; anchor_type?: string; evidence?: string }>
   }
   geometry: {
@@ -141,9 +153,11 @@ export interface TradeProposalItem {
         risk_per_trade_pct: string
         approved_risk_budget_amount?: string | null
         risk_policy_version: number
-        base_tightness: string
-        dry_up_quality: string
-        resistance_room: string
+        prior_uptrend?: string
+        volume_dry_up?: string
+        base_tightness?: string
+        dry_up_quality?: string
+        resistance_room?: string
         basis: string
       }
     }
@@ -159,6 +173,7 @@ export interface TradeProposalItem {
     leg_index: number
     risk_allocation_pct: number
     status: string
+    derived_status?: string
     trigger_type: string
     trigger_price: number | null
     chase_ceiling: number | null
@@ -317,6 +332,7 @@ export type ProposalAttemptStatus =
   | "valid"
   | "invalid"
   | "uncertain"
+  | "partial"
   | "failed"
   | "timed_out"
 
@@ -341,8 +357,7 @@ export interface ProposalGenerationAttempt {
   provider_usage: Record<string, unknown>
   provider_cost: number
   structured_output: {
-    verdict?: "valid" | "invalid" | "uncertain"
-    confidence?: number
+    verdict?: "valid" | "invalid" | "partial" | "uncertain"
     [key: string]: unknown
   } | null
   error_type: string | null
@@ -557,6 +572,7 @@ export function useTradeProposals(
     automationRunId?: string | null
     symbol?: string | null
     asOfDate?: string | null
+    entryState?: string | null
     limit?: number
   },
 ) {
@@ -565,6 +581,7 @@ export function useTradeProposals(
   if (options?.symbol) queryParams.set("symbol", options.symbol)
   if (options?.automationRunId) queryParams.set("automation_run_id", options.automationRunId)
   if (options?.asOfDate) queryParams.set("as_of_date", options.asOfDate)
+  if (options?.entryState) queryParams.set("entry_state", options.entryState)
   if (options?.limit) queryParams.set("limit", String(options.limit))
 
   return useQuery<TradeProposalItem[]>({
@@ -574,6 +591,7 @@ export function useTradeProposals(
       options?.symbol,
       options?.automationRunId,
       options?.asOfDate,
+      options?.entryState,
       options?.limit,
     ],
     queryFn: () =>

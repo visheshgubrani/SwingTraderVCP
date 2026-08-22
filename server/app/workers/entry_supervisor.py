@@ -47,6 +47,7 @@ from app.domain.p10_triggers import (
     DailySessionBar,
     FiveMinuteBar,
     calculate_relative_volume,
+    entry_window_closed,
     evaluate_add_leg_gates,
     evaluate_intraday_trigger,
 )
@@ -1752,24 +1753,67 @@ async def recheck_filled_entry_risk(redis: aioredis.Redis) -> int:
 
 
 async def expire_stale_entry_legs() -> int:
-    """Expire untriggered entry windows without depending on Redis delivery."""
-    today = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ).date()
+    """Expire entry windows whose final eligible session has closed.
+
+    AGENTS.md §5.4: an approved initial leg is armed for D1 only. The window is
+    considered closed at 16:00 IST on `eligible_session_end` (after the final
+    15:45 bar-reconciliation tick), so expiry no longer waits for the next
+    calendar midnight and no longer depends on the supervisor being alive at
+    midnight — the sweep catches up on the next maintenance tick whenever the
+    process next runs. Expiring a leg also cancels its higher-index `planned`
+    siblings: an add leg can never arm once its preceding leg has expired.
+    """
+    now_ist = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
+    expired_leg_ids: list[UUID] = []
     async with async_session() as db:
-        result = await db.execute(
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT id, proposal_id, leg_index, eligible_session_end
+                    FROM entry_legs
+                    WHERE status IN ('armed', 'trigger_observed')
+                      AND eligible_session_end IS NOT NULL
+                    """
+                )
+            )
+        ).mappings().all()
+        stale_rows = [
+            row for row in rows
+            if entry_window_closed(row["eligible_session_end"], now_ist)
+        ]
+        if not stale_rows:
+            return 0
+        expired_leg_ids = [row["id"] for row in stale_rows]
+        await db.execute(
             text(
                 """
                 UPDATE entry_legs
                 SET status = 'expired', signal_bar_timestamp = NULL
-                WHERE status IN ('armed', 'trigger_observed')
-                  AND eligible_session_end < :today
-                RETURNING id
+                WHERE id = ANY(:leg_ids)
+                  AND status IN ('armed', 'trigger_observed')
                 """
             ),
-            {"today": today},
+            {"leg_ids": expired_leg_ids},
         )
-        expired = len(result.all())
+        for row in stale_rows:
+            await db.execute(
+                text(
+                    """
+                    UPDATE entry_legs
+                    SET status = 'cancelled'
+                    WHERE proposal_id = :proposal_id
+                      AND leg_index > :leg_index
+                      AND status = 'planned'
+                    """
+                ),
+                {
+                    "proposal_id": row["proposal_id"],
+                    "leg_index": int(row["leg_index"]),
+                },
+            )
         await db.commit()
-    return expired
+    return len(expired_leg_ids)
 
 
 async def _confirmed_leg_from_id(db: AsyncSession, leg_id: UUID) -> ConfirmedLeg | None:

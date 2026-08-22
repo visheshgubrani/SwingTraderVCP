@@ -66,15 +66,17 @@ export function ProposalInbox() {
     return selectedRunId
   }, [selectedRunId, proposalBatch.data?.automation_run_id, pastRuns])
 
+  const isRejectedTab = statusFilter === "system_rejected"
+  const isEntryExpiredTab = statusFilter === "entry_expired"
+
   const proposalQueryParams = useMemo(() => ({
     symbol: symbolSearch.trim() || null,
     automationRunId: selectedRunId !== "all" && selectedRunId !== "latest" ? selectedRunId : null,
-  }), [symbolSearch, selectedRunId])
-
-  const isRejectedTab = statusFilter === "system_rejected"
+    entryState: isEntryExpiredTab ? "expired" : null,
+  }), [symbolSearch, selectedRunId, isEntryExpiredTab])
 
   const { data: rawProposals = [], isLoading: isProposalsLoading, error: proposalsError } = useTradeProposals(
-    isRejectedTab ? "all" : statusFilter,
+    isRejectedTab ? "all" : isEntryExpiredTab ? "approved" : statusFilter,
     proposalQueryParams,
   )
 
@@ -152,6 +154,14 @@ export function ProposalInbox() {
     two_leg: "bg-blue-500/10 text-blue-400 border-blue-500/20",
     three_leg_front: "bg-purple-500/10 text-purple-400 border-purple-500/20",
     three_leg_balanced: "bg-amber-500/10 text-amber-400 border-amber-500/20",
+  }
+
+  const entryStateBadges: Record<string, { label: string; className: string }> = {
+    armed: { label: "ARMED", className: "bg-amber-500/10 text-amber-400 border-amber-500/30" },
+    trigger_observed: { label: "TRIGGERED", className: "bg-amber-500/10 text-amber-400 border-amber-500/30" },
+    executing: { label: "EXECUTING", className: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
+    filled: { label: "FILLED", className: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" },
+    expired: { label: "ENTRY EXPIRED", className: "bg-rose-500/10 text-rose-300 border-rose-500/30" },
   }
 
   return (
@@ -310,7 +320,7 @@ export function ProposalInbox() {
                   disabled={resolveConflict.isPending}
                   onClick={() => resolveConflict.mutate({ id: conflict.id, chosenLegId: candidate.leg_id })}
                 >
-                  Select {candidate.symbol} L{candidate.leg_index} · {(Number(candidate.confidence) * 100).toFixed(0)}% · {Number(candidate.conservative_rr).toFixed(2)}R
+                  Select {candidate.symbol} L{candidate.leg_index} · {Number(candidate.conservative_rr).toFixed(2)}R
                 </Button>
               ))}
             </div>
@@ -324,6 +334,7 @@ export function ProposalInbox() {
               {[
                 { key: "pending_approval", label: "Pending Approval" },
                 { key: "approved", label: "Approved" },
+                { key: "entry_expired", label: "Entry Expired" },
                 { key: "system_rejected", label: "Rejected by System" },
                 { key: "rejected", label: "Rejected by Operator" },
                 { key: "expired_unapproved", label: "Expired" },
@@ -402,7 +413,6 @@ export function ProposalInbox() {
                       const structured = attempt.structured_output ?? {}
                       const pivot = structured.pivot_price != null ? Number(structured.pivot_price) : null
                       const verdict = structured.verdict ?? attempt.status
-                      const confidence = structured.confidence != null ? Number(structured.confidence) : null
 
                       return (
                         <tr
@@ -421,11 +431,6 @@ export function ProposalInbox() {
                               <Badge variant="outline" className="text-[10px]">
                                 {String(verdict).toUpperCase()}
                               </Badge>
-                              {confidence != null && (
-                                <span className="text-[10px] text-muted-foreground">
-                                  {(confidence * 100).toFixed(0)}%
-                                </span>
-                              )}
                             </div>
                           </td>
                           <td className="py-2.5 px-3 font-semibold text-foreground">
@@ -496,12 +501,12 @@ export function ProposalInbox() {
                     <tr className="border-b border-border/60 bg-muted/30 text-[10px] text-muted-foreground uppercase tracking-wider">
                       <th className="py-2.5 px-3 font-semibold">Symbol</th>
                       <th className="py-2.5 px-3 font-semibold">Template</th>
-                      <th className="py-2.5 px-3 font-semibold">Confidence</th>
                       <th className="py-2.5 px-3 font-semibold">Pivot Entry</th>
                       <th className="py-2.5 px-3 font-semibold">Stop Loss</th>
                       <th className="py-2.5 px-3 font-semibold">Target 1</th>
                       <th className="py-2.5 px-3 font-semibold">Risk Budget</th>
                       <th className="py-2.5 px-3 font-semibold">Session Date</th>
+                      <th className="py-2.5 px-3 font-semibold">Entry</th>
                       <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
                     </tr>
                   </thead>
@@ -530,9 +535,6 @@ export function ProposalInbox() {
                               {p.entry_template.toUpperCase()}
                             </Badge>
                           </td>
-                          <td className="py-2.5 px-3 text-muted-foreground">
-                            {(Number(p.confidence) * 100).toFixed(0)}%
-                          </td>
                           <td className="py-2.5 px-3 font-semibold text-foreground">
                             ₹{Number(p.pivot_price).toFixed(2)}
                           </td>
@@ -549,6 +551,18 @@ export function ProposalInbox() {
                           </td>
                           <td className="py-2.5 px-3 text-muted-foreground">
                             {p.entry_session_date}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            {p.entry_state && entryStateBadges[p.entry_state] ? (
+                              <Badge
+                                variant="outline"
+                                className={entryStateBadges[p.entry_state].className}
+                              >
+                                {entryStateBadges[p.entry_state].label}
+                              </Badge>
+                            ) : (
+                              <span className="text-muted-foreground/50">-</span>
+                            )}
                           </td>
                           <td className="py-2.5 px-3 text-right">
                             <Button

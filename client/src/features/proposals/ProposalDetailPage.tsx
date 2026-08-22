@@ -42,6 +42,40 @@ function formatR(value: unknown): string | null {
   return `${parsed.toFixed(2)}R`
 }
 
+const LEG_STATUS_LABELS: Record<string, string> = {
+  planned: "PLANNED",
+  armed: "ARMED",
+  trigger_observed: "TRIGGER OBSERVED",
+  intent_created: "INTENT CREATED",
+  submitted: "SUBMITTED",
+  partially_filled: "PARTIALLY FILLED",
+  filled: "FILLED",
+  expired: "ENTRY EXPIRED",
+  cancelled: "CANCELLED",
+  submission_unknown: "SUBMISSION UNKNOWN",
+}
+
+function LegStatusBadge({ leg }: { leg: { status: string; derived_status?: string } }) {
+  const displayStatus = leg.derived_status ?? leg.status
+  const variant =
+    displayStatus === "filled"
+      ? "default"
+      : displayStatus === "armed" || displayStatus === "trigger_observed"
+        ? "secondary"
+        : "outline"
+  const className =
+    displayStatus === "expired"
+      ? "border-rose-500/30 text-rose-300"
+      : displayStatus === "cancelled"
+        ? "text-muted-foreground"
+        : undefined
+  return (
+    <Badge variant={variant} className={className}>
+      {LEG_STATUS_LABELS[displayStatus] ?? displayStatus.toUpperCase()}
+    </Badge>
+  )
+}
+
 export function ProposalDetailPage() {
   const { proposalId } = useParams<{ proposalId: string }>()
   const navigate = useNavigate()
@@ -210,9 +244,6 @@ export function ProposalDetailPage() {
             </h1>
             <Badge variant="outline" className={templateColors[proposal.entry_template] || ""}>
               {proposal.entry_template.toUpperCase()}
-            </Badge>
-            <Badge variant="outline" className="text-[10px]">
-              CONF: {(Number(proposal.confidence) * 100).toFixed(0)}%
             </Badge>
             {proposal.live_eligible ? (
               <Badge variant="default" className="bg-emerald-600/20 text-emerald-400 border-emerald-500/30">
@@ -895,9 +926,7 @@ export function ProposalDetailPage() {
                   </div>
                   <div className="mt-3 flex items-center justify-between border-t border-border/30 pt-2 text-[10px]">
                     <span className="text-muted-foreground">Status:</span>
-                    <Badge variant={leg.status === "filled" ? "default" : leg.status === "armed" ? "secondary" : "outline"}>
-                      {leg.status.toUpperCase()}
-                    </Badge>
+                    <LegStatusBadge leg={leg} />
                   </div>
                 </div>
               )
@@ -921,16 +950,12 @@ export function ProposalDetailPage() {
             <div className="lg:col-span-2 space-y-3">
               <div className="flex flex-wrap gap-2 text-[11px]">
                 <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
-                  <span className="text-muted-foreground">Base Tightness: </span>
-                  <strong className="text-foreground capitalize">{proposal.gemini_evidence?.base_tightness ?? "Solid"}</strong>
+                  <span className="text-muted-foreground">Prior Uptrend: </span>
+                  <strong className="text-foreground capitalize">{proposal.gemini_evidence?.prior_uptrend ?? proposal.gemini_evidence?.base_tightness ?? "—"}</strong>
                 </div>
                 <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
                   <span className="text-muted-foreground">Volume Dry-Up: </span>
-                  <strong className="text-foreground capitalize">{proposal.gemini_evidence?.dry_up_quality ?? "Drying Up"}</strong>
-                </div>
-                <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
-                  <span className="text-muted-foreground">Overhead Resistance Room: </span>
-                  <strong className="text-foreground capitalize">{proposal.gemini_evidence?.resistance_room ?? "Clear"}</strong>
+                  <strong className="text-foreground capitalize">{proposal.gemini_evidence?.volume_dry_up ?? proposal.gemini_evidence?.dry_up_quality ?? "—"}</strong>
                 </div>
               </div>
 
@@ -938,29 +963,37 @@ export function ProposalDetailPage() {
                 <div className="mb-1 text-[10px] uppercase font-semibold text-foreground">AI Evidence Summary</div>
                 {proposal.gemini_evidence?.evidence_summary || "No structured summary provided."}
               </div>
+              {proposal.gemini_evidence?.red_flags && proposal.gemini_evidence.red_flags.length > 0 ? (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-[11px] text-amber-200">
+                  <div className="mb-1 text-[10px] uppercase font-semibold">Red Flags</div>
+                  <ul className="list-disc space-y-0.5 pl-4">
+                    {proposal.gemini_evidence.red_flags.map((flag, idx) => (
+                      <li key={idx}>{flag}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
 
-            {/* Contraction Anchors Table */}
+            {/* Visual Contractions */}
             <div className="rounded-lg border border-border/40 bg-background/50 p-3">
-              <div className="mb-2 text-[10px] uppercase font-semibold text-foreground">Validated Pattern Anchors</div>
+              <div className="mb-2 text-[10px] uppercase font-semibold text-foreground">Visual Contractions</div>
               <div className="max-h-40 overflow-y-auto">
                 <table className="w-full text-left text-[10px]">
                   <thead>
                     <tr className="border-b border-border/40 text-muted-foreground">
-                      <th className="py-1">Date</th>
-                      <th className="py-1">Type</th>
-                      <th className="py-1 text-right">Price</th>
+                      <th className="py-1">Leg</th>
+                      <th className="py-1">Depth</th>
+                      <th className="py-1 text-right">High → Low</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border/20">
-                    {(proposal.gemini_evidence?.contraction_anchors ?? []).map((anchor, idx) => (
-                      <tr key={idx}>
-                        <td className="py-1 font-mono text-muted-foreground">{anchor.date}</td>
-                        <td className="py-1 text-foreground capitalize">
-                          {anchor.anchor_type?.replace("_", " ") ?? "Anchor"}
-                        </td>
+                    {(proposal.gemini_evidence?.contractions ?? []).map((leg) => (
+                      <tr key={leg.index}>
+                        <td className="py-1 font-mono text-muted-foreground">T{leg.index}</td>
+                        <td className="py-1 text-foreground">{Number(leg.depth_pct).toFixed(1)}%</td>
                         <td className="py-1 text-right font-mono font-semibold text-foreground">
-                          ₹{Number(anchor.price ?? 0).toFixed(2)}
+                          ₹{Number(leg.high_price).toFixed(2)} → ₹{Number(leg.low_price).toFixed(2)}
                         </td>
                       </tr>
                     ))}

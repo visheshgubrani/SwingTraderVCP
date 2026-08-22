@@ -207,7 +207,6 @@ async def _insert_attempt(
             "risk_policy_version": policy_version,
             "geometry_version": GEOMETRY_VERSION,
             "prompt_hash": proposal_prompt_hash(
-                symbol=candidate.symbol,
                 tick_size=Decimal(str(candidate.tick_size)),
             ),
             "input_hash": hashlib.sha256(
@@ -465,21 +464,19 @@ async def process_proposal_candidate(
         try:
             ai_output, usage, cost, request_id = await asyncio.wait_for(
                 call_gemini_vision_for_proposal(
-                    symbol=candidate.symbol,
                     context_png=charts.context_png,
                     detail_png=charts.detail_png,
-                    candles=candles,
                     model=settings.vcp_vision_model,
                     tick_size=tick_size,
                 ),
                 timeout=timeout,
             )
             logger.info(
-                "Gemini vision output for %s: verdict=%s, confidence=%.2f, contradicts=%s, template=%s",
+                "Gemini vision output for %s: verdict=%s, prior_uptrend=%s, volume_dry_up=%s, template=%s",
                 candidate.symbol,
                 ai_output.verdict,
-                ai_output.confidence,
-                ai_output.contradicts_scanner,
+                ai_output.prior_uptrend,
+                ai_output.volume_dry_up,
                 ai_output.entry_template.value,
             )
         except TimeoutError as exc:
@@ -528,22 +525,22 @@ async def process_proposal_candidate(
             continue
 
         output_json = ai_output.model_dump(mode="json")
-        if ai_output.verdict != "valid" or ai_output.contradicts_scanner:
-            outcome: CandidateOutcome = "uncertain" if ai_output.verdict == "uncertain" else "rejected"
-            if ai_output.contradicts_scanner:
-                ai_error_type = "proposal_ai_contradicts_scanner"
-                ai_error_message = "Gemini marked the pattern as contradicting the scanner thesis."
-            elif ai_output.verdict == "uncertain":
-                ai_error_type = "proposal_ai_uncertain"
-                ai_error_message = "Gemini returned an uncertain pattern verdict."
+        if ai_output.verdict != "valid":
+            if ai_output.verdict == "partial":
+                outcome: CandidateOutcome = "uncertain"
+                attempt_status = "partial"
+                ai_error_type = "proposal_ai_partial"
+                ai_error_message = "Gemini returned a partial VCP verdict."
             else:
+                outcome = "rejected"
+                attempt_status = "invalid"
                 ai_error_type = "proposal_ai_invalid"
                 ai_error_message = f"Gemini returned verdict={ai_output.verdict!r}."
             async with async_session() as session:
                 await _finish_attempt(
                     session,
                     attempt_id=attempt_id,
-                    status="uncertain" if outcome == "uncertain" else "invalid",
+                    status=attempt_status,
                     output=output_json,
                     usage=usage,
                     cost=cost,

@@ -18,6 +18,7 @@ interface ProposalGenerationResultsProps {
 function statusBadge(attempt: ProposalGenerationAttempt) {
   if (attempt.status === "valid") return <Badge variant="default">Generated</Badge>
   if (attempt.status === "uncertain") return <Badge variant="secondary">Uncertain</Badge>
+  if (attempt.status === "partial") return <Badge variant="secondary">Partial</Badge>
   if (attempt.status === "running") return <Badge variant="outline">Running</Badge>
   if (attempt.status === "timed_out") return <Badge variant="secondary">Timed out</Badge>
   if (attempt.status === "failed") return <Badge variant="destructive">Failed</Badge>
@@ -26,7 +27,7 @@ function statusBadge(attempt: ProposalGenerationAttempt) {
 
 function outcomeIcon(status: ProposalGenerationAttempt["status"]) {
   if (status === "valid") return <CheckCircle2Icon aria-hidden="true" className="text-emerald-400" />
-  if (status === "uncertain" || status === "running" || status === "timed_out") {
+  if (status === "uncertain" || status === "partial" || status === "running" || status === "timed_out") {
     return <Clock3Icon aria-hidden="true" className="text-amber-300" />
   }
   return <XCircleIcon aria-hidden="true" className="text-rose-400" />
@@ -91,7 +92,6 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
           {data.results.map((attempt) => {
             const expanded = expandedId === attempt.id
             const verdict = attempt.structured_output?.verdict
-            const confidence = attempt.structured_output?.confidence
             return (
               <div key={attempt.id} className="px-3 py-2.5">
                 <div className="flex flex-wrap items-center gap-2">
@@ -101,11 +101,6 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
                   </span>
                   {statusBadge(attempt)}
                   {verdict ? <Badge variant="outline">Gemini {verdict}</Badge> : null}
-                  {confidence !== undefined ? (
-                    <span className="text-[10px] text-muted-foreground">
-                      confidence {(Number(confidence) * 100).toFixed(0)}%
-                    </span>
-                  ) : null}
                   <span className="ml-auto text-[10px] text-muted-foreground">
                     attempt {attempt.attempt_number}
                   </span>

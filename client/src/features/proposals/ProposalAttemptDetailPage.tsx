@@ -2,7 +2,6 @@ import { useState } from "react"
 import { useNavigate, useParams } from "react-router"
 import {
   ArrowLeftIcon,
-  CrosshairIcon,
   Maximize2Icon,
   ShieldAlertIcon,
   SparklesIcon,
@@ -53,14 +52,9 @@ export function ProposalAttemptDetailPage() {
   }
 
   const structured = attempt.structured_output ?? {}
-  const geminiPivot = structured.pivot_price != null ? Number(structured.pivot_price) : null
-  const geminiT1 = structured.t1 != null ? Number(structured.t1) : null
-  const geminiT2 = structured.t2 != null ? Number(structured.t2) : null
-  const geminiT3 = structured.t3 != null ? Number(structured.t3) : null
-  const contractions = Array.isArray(structured.contractions) ? structured.contractions : []
   const redFlags = Array.isArray(structured.red_flags) ? structured.red_flags : []
-  const verdict = structured.verdict ?? "unknown"
-  const entryTemplate = (structured.entry_template as string) || "single"
+  const classification = String(structured.classification ?? structured.verdict ?? "unknown")
+  const assessments = Array.isArray(structured.candidate_assessments) ? structured.candidate_assessments : []
 
   const contextChartSrc = `/api/v1/automation/attempts/${attempt.id}/charts/context`
   const detailChartSrc = `/api/v1/automation/attempts/${attempt.id}/charts/detail`
@@ -88,9 +82,9 @@ export function ProposalAttemptDetailPage() {
             <Badge variant="destructive" className="font-bold uppercase tracking-wider">
               {attempt.status === "invalid" ? "REJECTED BY SYSTEM" : attempt.status.toUpperCase()}
             </Badge>
-            {verdict && (
+            {classification && (
               <Badge variant="outline" className="text-[10px]">
-                Gemini {String(verdict).toUpperCase()}
+                Gemini {String(classification).toUpperCase()}
               </Badge>
             )}
           </div>
@@ -129,62 +123,21 @@ export function ProposalAttemptDetailPage() {
           </div>
         </div>
 
-        {/* Proposed Levels Summary Dashboard (if Gemini suggested levels) */}
-        {geminiPivot != null && (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div className="rounded-lg border border-border/70 bg-card p-3 shadow-sm">
-              <div className="flex items-center justify-between text-[10px] uppercase text-muted-foreground">
-                <span>Proposed Pivot</span>
-                <CrosshairIcon className="h-3 w-3 text-primary" />
-              </div>
-              <div className="mt-1 text-base font-bold text-foreground">
-                ₹{geminiPivot.toFixed(2)}
-              </div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">
-                Suggested breakout level
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-border/70 bg-card p-3 shadow-sm">
-              <div className="flex items-center justify-between text-[10px] uppercase text-muted-foreground">
-                <span>Proposed Target 1</span>
-                <TargetIcon className="h-3 w-3 text-emerald-400" />
-              </div>
-              <div className="mt-1 text-base font-bold text-emerald-400">
-                {geminiT1 != null ? `₹${geminiT1.toFixed(2)}` : "-"}
-              </div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">
-                Primary upside target
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-border/70 bg-card p-3 shadow-sm">
-              <div className="flex items-center justify-between text-[10px] uppercase text-muted-foreground">
-                <span>Proposed Target 2</span>
-                <TargetIcon className="h-3 w-3 text-emerald-400/80" />
-              </div>
-              <div className="mt-1 text-base font-bold text-foreground">
-                {geminiT2 != null ? `₹${geminiT2.toFixed(2)}` : "-"}
-              </div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">
-                Secondary expansion target
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-border/70 bg-card p-3 shadow-sm">
-              <div className="flex items-center justify-between text-[10px] uppercase text-muted-foreground">
-                <span>Proposed Target 3</span>
-                <TargetIcon className="h-3 w-3 text-emerald-400/60" />
-              </div>
-              <div className="mt-1 text-base font-bold text-foreground">
-                {geminiT3 != null ? `₹${geminiT3.toFixed(2)}` : "-"}
-              </div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">
-                Runner swing target
-              </div>
-            </div>
+        {/* Qualitative Gemini audit (no prices) */}
+        <div className="flex flex-wrap gap-2 text-[11px]">
+          <div className="rounded-lg border border-border/70 bg-card px-3 py-2">
+            Classification: <strong className="text-foreground">{classification}</strong>
           </div>
-        )}
+          <div className="rounded-lg border border-border/70 bg-card px-3 py-2">
+            Dry-up: <strong className="text-foreground">{String(structured.volume_dry_up ?? "—")}</strong>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-card px-3 py-2">
+            Tightening: <strong className="text-foreground">{String(structured.progressive_tightening ?? "—")}</strong>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-card px-3 py-2">
+            Assessments: <strong className="text-foreground">{assessments.length}</strong>
+          </div>
+        </div>
 
         {/* High-Resolution Headless Rendered Charts */}
         <div className="rounded-xl border border-border/70 bg-card overflow-hidden shadow-sm">
@@ -251,7 +204,7 @@ export function ProposalAttemptDetailPage() {
             {(activeChartTab === "both" || activeChartTab === "detail") && (
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between text-[10px] text-muted-foreground uppercase">
-                  <span>Inference Detail · 126 Sessions (Annotated VCP Geometry + 21 EMA)</span>
+                  <span>LLM Chart · 126 Sessions (Clean log + MAs, no overlays)</span>
                   <button
                     type="button"
                     onClick={() => setImageModal(detailChartSrc)}
@@ -289,16 +242,16 @@ export function ProposalAttemptDetailPage() {
             <div className="lg:col-span-2 space-y-3">
               <div className="flex flex-wrap gap-2 text-[11px]">
                 <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
-                  <span className="text-muted-foreground">Template: </span>
-                  <strong className="text-foreground capitalize">{entryTemplate.replace("_", " ")}</strong>
-                </div>
-                <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
-                  <span className="text-muted-foreground">Prior Uptrend: </span>
-                  <strong className="text-foreground capitalize">{String(structured.prior_uptrend ?? "Not specified")}</strong>
+                  <span className="text-muted-foreground">Classification: </span>
+                  <strong className="text-foreground capitalize">{classification}</strong>
                 </div>
                 <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
                   <span className="text-muted-foreground">Volume Dry-Up: </span>
                   <strong className="text-foreground capitalize">{String(structured.volume_dry_up ?? "Not specified")}</strong>
+                </div>
+                <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
+                  <span className="text-muted-foreground">Tightening: </span>
+                  <strong className="text-foreground capitalize">{String(structured.progressive_tightening ?? "Not specified")}</strong>
                 </div>
               </div>
 
@@ -318,26 +271,26 @@ export function ProposalAttemptDetailPage() {
               ) : null}
             </div>
 
-            {/* Visual Contractions */}
+            {/* Candidate assessments */}
             <div className="rounded-lg border border-border/40 bg-background/50 p-3">
-              <div className="mb-2 text-[10px] uppercase font-semibold text-foreground">Visual Contractions</div>
-              {contractions.length > 0 ? (
+              <div className="mb-2 text-[10px] uppercase font-semibold text-foreground">Candidate Assessments</div>
+              {assessments.length > 0 ? (
                 <div className="max-h-40 overflow-y-auto">
                   <table className="w-full text-left text-[10px]">
                     <thead>
                       <tr className="border-b border-border/40 text-muted-foreground">
-                        <th className="py-1">Leg</th>
-                        <th className="py-1">Depth</th>
-                        <th className="py-1 text-right">High → Low</th>
+                        <th className="py-1">Index</th>
+                        <th className="py-1">Action</th>
+                        <th className="py-1 text-right">Merge</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/20">
-                      {contractions.map((leg: { index?: number; depth_pct?: number | string; high_price?: number | string; low_price?: number | string }, idx: number) => (
-                        <tr key={leg.index ?? idx}>
-                          <td className="py-1 font-mono text-muted-foreground">T{leg.index ?? idx + 1}</td>
-                          <td className="py-1 text-foreground">{Number(leg.depth_pct ?? 0).toFixed(1)}%</td>
-                          <td className="py-1 text-right font-mono font-semibold text-foreground">
-                            ₹{Number(leg.high_price ?? 0).toFixed(2)} → ₹{Number(leg.low_price ?? 0).toFixed(2)}
+                      {assessments.map((row: { index?: number; action?: string; merge_with_index?: number | null }, idx: number) => (
+                        <tr key={row.index ?? idx}>
+                          <td className="py-1 font-mono text-muted-foreground">#{row.index ?? idx + 1}</td>
+                          <td className="py-1 text-foreground">{row.action ?? "—"}</td>
+                          <td className="py-1 text-right font-mono text-foreground">
+                            {row.merge_with_index ?? "—"}
                           </td>
                         </tr>
                       ))}
@@ -345,7 +298,7 @@ export function ProposalAttemptDetailPage() {
                   </table>
                 </div>
               ) : (
-                <div className="text-[10px] text-muted-foreground">No visual contractions recorded.</div>
+                <div className="text-[10px] text-muted-foreground">No candidate assessments recorded.</div>
               )}
             </div>
           </div>

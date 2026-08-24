@@ -55,11 +55,14 @@ class PendingMigrationSelectionTests(unittest.TestCase):
             ["025_p10_proposal_prompt_v5.sql"],
         )
 
-    def test_repo_migrations_include_v5_and_are_numbered(self) -> None:
+    def test_repo_migrations_include_v6_and_are_numbered(self) -> None:
         files = sorted(DEFAULT_MIGRATIONS_DIR.glob("*.sql"))
         self.assertTrue(files)
         self.assertTrue(
             (DEFAULT_MIGRATIONS_DIR / "025_p10_proposal_prompt_v5.sql").is_file()
+        )
+        self.assertTrue(
+            (DEFAULT_MIGRATIONS_DIR / "026_p10_vision_rework.sql").is_file()
         )
         for path in files:
             self.assertIsNotNone(numeric_prefix(path.name), path.name)

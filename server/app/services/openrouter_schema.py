@@ -11,13 +11,15 @@ def gemini_compatible_json_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
     """Return a Gemini-via-OpenRouter-safe copy of a Pydantic JSON schema.
 
     Inlines ``$ref`` / ``$defs``, collapses Decimal ``anyOf`` number|string
-    unions to a number, and applies the same strict object rules used by VCP
+    unions to a number, collapses ``T | null`` unions to a JSON type list,
+    and applies the same strict object rules used by VCP
     vision (no defaults, every property required, ``additionalProperties``
     false, ``const`` rewritten as ``enum``).
     """
     normalized = copy.deepcopy(dict(schema))
     normalized = _inline_refs(normalized)
     _collapse_decimal_any_of(normalized)
+    _collapse_nullable_any_of(normalized)
     _make_strict(normalized)
     return normalized
 
@@ -102,6 +104,38 @@ def _collapse_decimal_any_of(node: Any) -> None:
     elif isinstance(node, list):
         for value in node:
             _collapse_decimal_any_of(value)
+
+
+def _collapse_nullable_any_of(node: Any) -> None:
+    """Rewrite ``T | null`` as a JSON type list so Gemini strict schema stays anyOf-free."""
+    if isinstance(node, dict):
+        options = node.get("anyOf")
+        if isinstance(options, list) and len(options) == 2:
+            null_opt = next(
+                (
+                    option
+                    for option in options
+                    if isinstance(option, dict) and option.get("type") == "null" and set(option) <= {"type"}
+                ),
+                None,
+            )
+            other = next((option for option in options if option is not null_opt), None)
+            if null_opt is not None and isinstance(other, dict) and "$ref" not in other:
+                node.pop("anyOf", None)
+                for key, value in other.items():
+                    node.setdefault(key, value)
+                other_type = other.get("type")
+                if isinstance(other_type, str):
+                    node["type"] = [other_type, "null"]
+                elif isinstance(other_type, list):
+                    node["type"] = list(dict.fromkeys([*other_type, "null"]))
+                if "enum" in node and None not in node["enum"]:
+                    node["enum"] = [*node["enum"], None]
+        for value in node.values():
+            _collapse_nullable_any_of(value)
+    elif isinstance(node, list):
+        for value in node:
+            _collapse_nullable_any_of(value)
 
 
 def _make_strict(node: Any) -> None:

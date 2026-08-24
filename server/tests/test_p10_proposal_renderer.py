@@ -28,7 +28,7 @@ class TestProposalRenderer(unittest.TestCase):
             stop_price=210.0,
         )
 
-        self.assertEqual(charts.renderer_version, "p10_mplfinance_v3")
+        self.assertEqual(charts.renderer_version, "p10_mplfinance_v4")
         self.assertTrue(charts.context_png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(charts.detail_png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertEqual(len(charts.context_hash), 64)

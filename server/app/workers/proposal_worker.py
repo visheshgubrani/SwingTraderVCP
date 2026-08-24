@@ -25,13 +25,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session
-from app.domain.p10_geometry import CandleData, derive_chart_geometry
+from app.domain.p10_geometry import CandleData, derive_chart_geometry, format_candidate_summary
 from app.domain.p10_sizing import TEMPLATE_CONFIG, EntryTemplate
 from app.redis_pool import redis_settings_from_config, tune_arq_redis_pool
 from app.services.distributed_lease import (
     acquire_distributed_lease,
     release_distributed_lease,
     renew_distributed_lease,
+)
+from app.services.p10_forming_watch import (
+    FORMING_RECHECK_CAP,
+    close_forming_watch,
+    expire_stale_forming_watches,
+    load_forming_rechecks,
+    upsert_forming_watch,
 )
 from app.services.proposal_generator import (
     GEOMETRY_VERSION,
@@ -167,6 +174,7 @@ async def _insert_attempt(
     source_hash: str,
     charts: Any,
     policy_version: int,
+    candidate_summary: str,
 ) -> str:
     result = await session.execute(
         text(
@@ -208,6 +216,7 @@ async def _insert_attempt(
             "geometry_version": GEOMETRY_VERSION,
             "prompt_hash": proposal_prompt_hash(
                 tick_size=Decimal(str(candidate.tick_size)),
+                candidate_summary=candidate_summary,
             ),
             "input_hash": hashlib.sha256(
                 json.dumps(
@@ -430,13 +439,8 @@ async def process_proposal_candidate(
 
     tick_size = Decimal(str(candidate.tick_size))
     annotations = derive_chart_geometry(candles, tick_size=tick_size)
-    charts = render_proposal_charts(
-        candles=candles,
-        symbol=candidate.symbol,
-        pivot_price=float(annotations.resistance),
-        stop_price=float(annotations.initial_stop),
-        contraction_anchors=annotations.anchors,
-    )
+    candidate_summary = format_candidate_summary(annotations.contractions)
+    charts = render_proposal_charts(candles=candles, symbol=candidate.symbol)
     source_hash = compute_frozen_source_hash(candles)
 
     for attempt_number in range(1, settings.proposal_max_attempts + 1):
@@ -453,6 +457,7 @@ async def process_proposal_candidate(
                 source_hash=source_hash,
                 charts=charts,
                 policy_version=int(policy["version"]),
+                candidate_summary=candidate_summary,
             )
         logger.info(
             "Processing candidate %s (attempt %s/%s) for automation run %s",
@@ -468,16 +473,17 @@ async def process_proposal_candidate(
                     detail_png=charts.detail_png,
                     model=settings.vcp_vision_model,
                     tick_size=tick_size,
+                    candidate_summary=candidate_summary,
                 ),
                 timeout=timeout,
             )
             logger.info(
-                "Gemini vision output for %s: verdict=%s, prior_uptrend=%s, volume_dry_up=%s, template=%s",
+                "Gemini vision output for %s: classification=%s, dry_up=%s, tightening=%s, confidence=%s",
                 candidate.symbol,
-                ai_output.verdict,
-                ai_output.prior_uptrend,
+                ai_output.classification,
                 ai_output.volume_dry_up,
-                ai_output.entry_template.value,
+                ai_output.progressive_tightening,
+                ai_output.confidence,
             )
         except TimeoutError as exc:
             logger.warning(
@@ -525,17 +531,19 @@ async def process_proposal_candidate(
             continue
 
         output_json = ai_output.model_dump(mode="json")
-        if ai_output.verdict != "valid":
-            if ai_output.verdict == "partial":
+        if ai_output.classification != "valid":
+            if ai_output.classification == "forming":
                 outcome: CandidateOutcome = "uncertain"
                 attempt_status = "partial"
-                ai_error_type = "proposal_ai_partial"
-                ai_error_message = "Gemini returned a partial VCP verdict."
+                ai_error_type = "proposal_ai_forming"
+                ai_error_message = "Gemini classified the pattern as forming."
             else:
                 outcome = "rejected"
                 attempt_status = "invalid"
                 ai_error_type = "proposal_ai_invalid"
-                ai_error_message = f"Gemini returned verdict={ai_output.verdict!r}."
+                ai_error_message = (
+                    f"Gemini returned classification={ai_output.classification!r}."
+                )
             async with async_session() as session:
                 await _finish_attempt(
                     session,
@@ -548,6 +556,41 @@ async def process_proposal_candidate(
                     error_type=ai_error_type,
                     error_message=ai_error_message,
                 )
+                if ai_output.classification == "forming":
+                    if ai_output.forming_state == "breaking_down":
+                        await close_forming_watch(
+                            session,
+                            instrument_id=str(candidate.instrument_id),
+                            status="broken_down",
+                        )
+                    else:
+                        await upsert_forming_watch(
+                            session,
+                            instrument_id=str(candidate.instrument_id),
+                            screening_result_id=str(candidate.screening_result_id),
+                            symbol=candidate.symbol,
+                            as_of_date=as_of_date,
+                            forming_state=ai_output.forming_state or "developing",
+                            llm_snapshot=output_json,
+                            python_candidates=[
+                                {
+                                    "index": wave.index,
+                                    "high_date": wave.high_date,
+                                    "low_date": wave.low_date,
+                                    "depth_pct": str(wave.depth_pct),
+                                }
+                                for wave in annotations.contractions
+                            ],
+                            attempt_id=attempt_id,
+                            holidays=_holiday_dates(),
+                        )
+                elif ai_output.classification == "not_vcp":
+                    await close_forming_watch(
+                        session,
+                        instrument_id=str(candidate.instrument_id),
+                        status="broken_down",
+                    )
+                await session.commit()
             return outcome
 
         build_result: ProposalBuildResult = generate_trade_proposal_from_analysis(
@@ -560,6 +603,7 @@ async def process_proposal_candidate(
             rendered_charts=charts,
             model=settings.vcp_vision_model,
             tick_size=tick_size,
+            python_candidates=annotations.contractions,
             risk_policy_id=str(policy["id"]),
             risk_policy_version=int(policy["version"]),
             risk_per_trade_pct=Decimal(str(policy["risk_per_trade_pct"])),
@@ -604,6 +648,11 @@ async def process_proposal_candidate(
                 request_id=request_id,
                 usage=usage,
                 cost=cost,
+            )
+            await close_forming_watch(
+                session,
+                instrument_id=str(candidate.instrument_id),
+                status="promoted",
             )
             await _finish_attempt(
                 session,
@@ -844,6 +893,41 @@ async def _process_automation_candidates(
             processed,
             len(candidates),
         )
+
+    async with async_session() as session:
+        holidays = _holiday_dates()
+        expired = await expire_stale_forming_watches(
+            session, as_of_date=as_of_date, holidays=holidays
+        )
+        if expired:
+            logger.info("Expired %s stale forming watches as_of=%s", expired, as_of_date)
+        rechecks = await load_forming_rechecks(session, as_of_date=as_of_date, cap=FORMING_RECHECK_CAP)
+        await session.commit()
+
+    shortlist_ids = {
+        str(c.screening_result_id)
+        for c in candidates
+        if getattr(c, "screening_result_id", None) is not None
+    }
+    for recheck in rechecks:
+        if dt.datetime.now(dt.timezone.utc) >= deadline:
+            break
+        if recheck.screening_result_id is None:
+            continue
+        if str(recheck.screening_result_id) in shortlist_ids:
+            continue
+        try:
+            outcome = await process_proposal_candidate(
+                automation_run_id=automation_run_id,
+                candidate=recheck,
+                as_of_date=as_of_date,
+                deadline=deadline,
+            )
+        except Exception:
+            logger.exception("Forming recheck %s failed", recheck.symbol)
+            outcome = "failed"
+        counts[outcome] = counts.get(outcome, 0) + 1
+        processed += 1
 
     terminal_status = "timed_out" if counts["timed_out"] else "completed"
     error_message = None

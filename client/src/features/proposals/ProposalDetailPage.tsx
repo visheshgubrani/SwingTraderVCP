@@ -1,16 +1,14 @@
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { useNavigate, useParams } from "react-router"
 import {
+  AlertCircleIcon,
   ArrowLeftIcon,
   CheckCircle2Icon,
   CrosshairIcon,
   CalculatorIcon,
-  Edit3Icon,
   LayersIcon,
   Maximize2Icon,
-  RotateCcwIcon,
   ShieldAlertIcon,
-  SlidersIcon,
   SparklesIcon,
   TargetIcon,
   TrendingUpIcon,
@@ -20,7 +18,6 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import {
   useTradeProposal,
@@ -83,32 +80,11 @@ export function ProposalDetailPage() {
   const [activeChartTab, setActiveChartTab] = useState<"both" | "detail" | "context">("both")
   const [imageModal, setImageModal] = useState<string | null>(null)
 
-  // Interactive Level Customizer State
-  const [customPivot, setCustomPivot] = useState<string>("")
-  const [customStop, setCustomStop] = useState<string>("")
-  const [customT1, setCustomT1] = useState<string>("")
-  const [customT2, setCustomT2] = useState<string>("")
-  const [customT3, setCustomT3] = useState<string>("")
-  const [customTemplate, setCustomTemplate] = useState<string>("")
-  const [customLeg2Price, setCustomLeg2Price] = useState<string>("")
-  const [isCustomizing, setIsCustomizing] = useState<boolean>(false)
-
   const { data: proposal, isLoading, error } = useTradeProposal(proposalId ?? null)
   const recordDecision = useRecordProposalDecision()
   const rollout = useP10Rollout()
   const entrySupervisor = useEntrySupervisorStatus()
   const approvalsAllowed = rollout.data?.approvals_allowed === true
-
-  useEffect(() => {
-    if (proposal && !customPivot) {
-      setCustomPivot(String(proposal.pivot_price))
-      setCustomStop(String(proposal.initial_stop))
-      setCustomT1(String(proposal.t1))
-      setCustomT2(String(proposal.t2))
-      setCustomT3(String(proposal.t3))
-      setCustomTemplate(proposal.entry_template)
-    }
-  }, [proposal])
 
   if (isLoading) {
     return (
@@ -139,15 +115,16 @@ export function ProposalDetailPage() {
   }
 
   const geometry = proposal.geometry ?? {}
-  const calcBasis = geometry.calculation_basis
-  const grounding = geometry.pivot_grounding
-  const t1R = formatR(geometry.t1_r ?? calcBasis?.targets.t1.r_at_ceiling)
-  const t2R = formatR(geometry.t2_r ?? calcBasis?.targets.t2.r_at_ceiling)
-  const t3R = formatR(geometry.t3_r ?? calcBasis?.targets.t3.r_at_ceiling)
-  const baseCeiling = asFiniteNumber(geometry.base_chase_ceiling ?? calcBasis?.entry_chase.base_chase_ceiling)
-  const lockedCeiling = Number(proposal.chase_ceiling)
-  const ceilingTightened =
-    baseCeiling != null && Number.isFinite(lockedCeiling) && baseCeiling > lockedCeiling
+  const t1R = formatR(geometry.t1_r)
+  const t2R = formatR(geometry.t2_r)
+  const t3R = formatR(geometry.t3_r)
+  const targetSlots = geometry.target_slots ?? {}
+  const mismatchBanner = Boolean(proposal.gemini_evidence?.mismatch_banner)
+  const pythonCount = proposal.gemini_evidence?.python_count
+  const llmCount = proposal.gemini_evidence?.llm_count
+  const calcBasis = (geometry.calculation_basis ?? {}) as Record<string, any>
+  const plannedEntry = asFiniteNumber(geometry.planned_entry)
+  const baseCeiling = asFiniteNumber(geometry.base_chase_ceiling)
 
   const isPending = proposal.status === "pending_approval"
   const isApproved = proposal.status === "approved"
@@ -158,11 +135,11 @@ export function ProposalDetailPage() {
     entrySupervisor.data?.status !== "active"
       ? "the entry supervisor is inactive"
       : `the market-data worker is ${entrySupervisor.data.market_data.status}`
-  const activePivot = customPivot ? Number(customPivot) : Number(proposal.pivot_price)
-  const activeStop = customStop ? Number(customStop) : Number(proposal.initial_stop)
-  const activeT1 = customT1 ? Number(customT1) : Number(proposal.t1)
-  const activeT2 = customT2 ? Number(customT2) : Number(proposal.t2)
-  const activeT3 = customT3 ? Number(customT3) : Number(proposal.t3)
+  const activePivot = Number(proposal.pivot_price)
+  const activeStop = Number(proposal.initial_stop)
+  const activeT1 = Number(proposal.t1)
+  const activeT2 = Number(proposal.t2)
+  const activeT3 = Number(proposal.t3)
 
   const liveStopDistPct = activePivot > 0 && activeStop > 0 ? ((activePivot - activeStop) / activePivot) * 100 : 0
   const liveRDistance = activePivot - activeStop
@@ -171,6 +148,7 @@ export function ProposalDetailPage() {
   const liveT3R = liveRDistance > 0 && activeT3 > activePivot ? ((activeT3 - activePivot) / liveRDistance).toFixed(2) : null
   const riskBudget = Number(proposal.approved_risk_budget_amount ?? 0)
   const liveShares = liveRDistance > 0 && riskBudget > 0 ? Math.floor(riskBudget / liveRDistance) : 0
+  const lockedCeiling = Number(proposal.chase_ceiling)
 
   const handleDecision = async (decision: "approved" | "rejected") => {
     try {
@@ -178,29 +156,6 @@ export function ProposalDetailPage() {
         decision,
         expected_proposal_hash: proposal.proposal_hash,
         notes: notes.trim() || undefined,
-      }
-      if (decision === "approved" && isCustomizing) {
-        if (customPivot && Number(customPivot) !== Number(proposal.pivot_price)) {
-          payload.adjusted_pivot_price = Number(customPivot)
-        }
-        if (customStop && Number(customStop) !== Number(proposal.initial_stop)) {
-          payload.adjusted_initial_stop = Number(customStop)
-        }
-        if (customT1 && Number(customT1) !== Number(proposal.t1)) {
-          payload.adjusted_t1 = Number(customT1)
-        }
-        if (customT2 && Number(customT2) !== Number(proposal.t2)) {
-          payload.adjusted_t2 = Number(customT2)
-        }
-        if (customT3 && Number(customT3) !== Number(proposal.t3)) {
-          payload.adjusted_t3 = Number(customT3)
-        }
-        if (customTemplate && customTemplate !== proposal.entry_template) {
-          payload.adjusted_entry_template = customTemplate as any
-        }
-        if (customLeg2Price) {
-          payload.adjusted_leg2_price = Number(customLeg2Price)
-        }
       }
       await recordDecision.mutateAsync({
         id: proposal.id,
@@ -277,7 +232,7 @@ export function ProposalDetailPage() {
       {/* Main Content Area */}
       <div className="mx-auto w-full max-w-7xl space-y-6 p-4 sm:p-6">
         {/* Key Numerical Levels Dashboard */}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
           <div className="rounded-lg border border-border/70 bg-card p-3 shadow-sm">
             <div className="flex items-center justify-between text-[10px] uppercase text-muted-foreground">
               <span>Pivot Breakout</span>
@@ -287,7 +242,7 @@ export function ProposalDetailPage() {
               ₹{Number(proposal.pivot_price).toFixed(2)}
             </div>
             <div className="mt-0.5 text-[10px] text-muted-foreground">
-              Trigger entry point
+              Trigger · planned ₹{(plannedEntry ?? Number(proposal.pivot_price)).toFixed(2)}
             </div>
           </div>
 
@@ -326,7 +281,7 @@ export function ProposalDetailPage() {
               ₹{Number(proposal.t1).toFixed(2)}
             </div>
             <div className="mt-0.5 text-[10px] text-emerald-400/80 font-semibold">
-              {t1R ? `${t1R} at ceiling` : "Primary 1R+"}
+              {targetSlots.t1 ? `${targetSlots.t1}${t1R ? ` · ${t1R}` : ""}` : t1R ?? "≥2R floor"}
             </div>
           </div>
 
@@ -339,7 +294,7 @@ export function ProposalDetailPage() {
               ₹{Number(proposal.t2).toFixed(2)}
             </div>
             <div className="mt-0.5 text-[10px] text-muted-foreground">
-              {t2R ? `${t2R} expansion` : "2R objective"}
+              {targetSlots.t2 ? `${targetSlots.t2}${t2R ? ` · ${t2R}` : ""}` : t2R ?? "measured / stretch"}
             </div>
           </div>
 
@@ -352,22 +307,33 @@ export function ProposalDetailPage() {
               ₹{Number(proposal.t3).toFixed(2)}
             </div>
             <div className="mt-0.5 text-[10px] text-muted-foreground">
-              {t3R ? `${t3R} major swing` : "3R objective"}
+              {targetSlots.t3 ? `${targetSlots.t3}${t3R ? ` · ${t3R}` : ""}` : t3R ?? "stretch / 3R"}
             </div>
           </div>
         </div>
 
-        {/* Interactive Customizer & Human Approval Checkpoint */}
+        {mismatchBanner && (
+          <Alert variant="destructive">
+            <AlertCircleIcon className="h-4 w-4" />
+            <AlertTitle>Contraction-count mismatch</AlertTitle>
+            <AlertDescription>
+              Python found {pythonCount ?? "?"} candidate(s) and Gemini resolved {llmCount ?? "?"} survivor(s).
+              Template is forced to single. Review both lists before approving.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* Human Approval Checkpoint */}
         {isPending && (
           <div className="rounded-xl border border-primary/40 bg-card p-4 shadow-sm space-y-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-border/50 pb-3">
               <div>
                 <div className="flex items-center gap-2 text-sm font-bold text-foreground">
-                  <SlidersIcon className="h-4 w-4 text-primary" />
-                  Interactive Trade Plan & Price Levels
+                  <CheckCircle2Icon className="h-4 w-4 text-primary" />
+                  Approve or reject this immutable plan
                 </div>
                 <p className="mt-1 text-[11px] text-muted-foreground">
-                  Review AI suggested levels, or fine-tune Entry (Cheat Pivot vs Base Breakout), Stop Loss, and Targets before arming automated execution.
+                  Pivot, stop, targets, and template are Python-owned. Approve accepts this version as-is.
                 </p>
                 {!approvalsAllowed && (
                   <p className="mt-1 text-[10px] text-amber-400">
@@ -375,167 +341,7 @@ export function ProposalDetailPage() {
                   </p>
                 )}
               </div>
-
-              <div className="flex items-center gap-2">
-                <Button
-                  variant={isCustomizing ? "default" : "outline"}
-                  size="xs"
-                  className="gap-1.5"
-                  onClick={() => setIsCustomizing(!isCustomizing)}
-                >
-                  <Edit3Icon className="h-3 w-3" />
-                  {isCustomizing ? "Customizing Active" : "Customize Levels"}
-                </Button>
-                {isCustomizing && (
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    className="gap-1 text-muted-foreground hover:text-foreground"
-                    onClick={() => {
-                      setCustomPivot(String(proposal.pivot_price))
-                      setCustomStop(String(proposal.initial_stop))
-                      setCustomT1(String(proposal.t1))
-                      setCustomT2(String(proposal.t2))
-                      setCustomT3(String(proposal.t3))
-                      setCustomTemplate(proposal.entry_template)
-                      setCustomLeg2Price("")
-                      setIsCustomizing(false)
-                    }}
-                  >
-                    <RotateCcwIcon className="h-3 w-3" /> Reset to AI
-                  </Button>
-                )}
-              </div>
             </div>
-
-            {/* Customizer Form Grid */}
-            {isCustomizing && (
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 bg-muted/10 p-3 rounded-lg border border-border/40">
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
-                    Leg 1 Entry Pivot (₹)
-                  </label>
-                  <Input
-                    type="number"
-                    step="0.05"
-                    value={customPivot}
-                    onChange={(e) => setCustomPivot(e.target.value)}
-                    className="h-8 font-mono text-xs"
-                    placeholder="Pivot price"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <div className="flex justify-between items-center">
-                    <label className="text-[10px] uppercase font-semibold text-muted-foreground">
-                      Initial Stop Loss (₹)
-                    </label>
-                    <div className="flex gap-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const p = Number(customPivot) || Number(proposal.pivot_price)
-                          setCustomStop((p * 0.995).toFixed(2))
-                        }}
-                        className="text-[9px] px-1 py-0.5 rounded bg-muted hover:bg-muted/80 text-muted-foreground"
-                      >
-                        -0.5%
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const p = Number(customPivot) || Number(proposal.pivot_price)
-                          setCustomStop((p * 0.99).toFixed(2))
-                        }}
-                        className="text-[9px] px-1 py-0.5 rounded bg-muted hover:bg-muted/80 text-muted-foreground"
-                      >
-                        -1.0%
-                      </button>
-                    </div>
-                  </div>
-                  <Input
-                    type="number"
-                    step="0.05"
-                    value={customStop}
-                    onChange={(e) => setCustomStop(e.target.value)}
-                    className="h-8 font-mono text-xs"
-                    placeholder="Stop loss price"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
-                    Execution Template
-                  </label>
-                  <select
-                    value={customTemplate}
-                    onChange={(e) => setCustomTemplate(e.target.value)}
-                    className="w-full h-8 rounded-md border border-input bg-background px-2 text-xs font-mono text-foreground"
-                  >
-                    <option value="single">Single Leg (100%)</option>
-                    <option value="two_leg_staged">2-Leg Staged (Cheat 50% + Breakout 50%)</option>
-                    <option value="two_leg">2-Leg Standard (60% / 40%)</option>
-                    <option value="three_leg_front">3-Leg Front (50% / 30% / 20%)</option>
-                    <option value="three_leg_balanced">3-Leg Balanced (40% / 30% / 30%)</option>
-                  </select>
-                </div>
-
-                {customTemplate === "two_leg_staged" && (
-                  <div className="space-y-1">
-                    <label className="text-[10px] uppercase font-semibold text-muted-foreground">
-                      Leg 2 Breakout Add (₹)
-                    </label>
-                    <Input
-                      type="number"
-                      step="0.05"
-                      value={customLeg2Price}
-                      onChange={(e) => setCustomLeg2Price(e.target.value)}
-                      className="h-8 font-mono text-xs"
-                      placeholder="Base Breakout price"
-                    />
-                  </div>
-                )}
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
-                    Target 1 (₹)
-                  </label>
-                  <Input
-                    type="number"
-                    step="0.05"
-                    value={customT1}
-                    onChange={(e) => setCustomT1(e.target.value)}
-                    className="h-8 font-mono text-xs"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
-                    Target 2 (₹)
-                  </label>
-                  <Input
-                    type="number"
-                    step="0.05"
-                    value={customT2}
-                    onChange={(e) => setCustomT2(e.target.value)}
-                    className="h-8 font-mono text-xs"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase font-semibold text-muted-foreground">
-                    Target 3 (₹)
-                  </label>
-                  <Input
-                    type="number"
-                    step="0.05"
-                    value={customT3}
-                    onChange={(e) => setCustomT3(e.target.value)}
-                    className="h-8 font-mono text-xs"
-                  />
-                </div>
-              </div>
-            )}
 
             {/* Live Metrics Feedback */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-muted/20 p-3 rounded-lg border border-border/30 text-[11px]">
@@ -588,7 +394,7 @@ export function ProposalDetailPage() {
                   onClick={() => handleDecision("approved")}
                 >
                   <CheckCircle2Icon className="mr-1.5 h-3.5 w-3.5" />
-                  {isCustomizing ? "Approve & Arm Custom Plan" : "Approve & Arm Leg 1"}
+                  Approve & Arm Leg 1
                 </Button>
               </div>
             </div>
@@ -680,7 +486,7 @@ export function ProposalDetailPage() {
             {(activeChartTab === "both" || activeChartTab === "detail") && (
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between text-[10px] text-muted-foreground uppercase">
-                  <span>Inference Detail · 126 Sessions (Annotated VCP Geometry + 21 EMA)</span>
+                  <span>LLM Chart · 126 Sessions (Clean log + MAs, no overlays)</span>
                   <button
                     type="button"
                     onClick={() => setImageModal(detailChartSrc)}
@@ -710,15 +516,13 @@ export function ProposalDetailPage() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
-            {/* 1. Pivot Price & Grounding Basis Card */}
+            {/* 1. Pivot from last surviving contraction */}
             <div className="flex flex-col rounded-xl border border-border/70 bg-card p-4 shadow-sm">
               <div className="flex items-center justify-between border-b border-border/50 pb-2">
                 <span className="flex items-center gap-2 font-bold text-foreground">
-                  <CrosshairIcon className="h-4 w-4 text-primary" /> 1. Pivot & Resistance Grounding
+                  <CrosshairIcon className="h-4 w-4 text-primary" /> 1. Pivot (Last Survivor High)
                 </span>
-                <Badge variant={grounding?.is_grounded ? "default" : "secondary"}>
-                  {grounding?.is_grounded ? "Grounded" : "Ungrounded"}
-                </Badge>
+                <Badge variant="outline">Python-owned</Badge>
               </div>
 
               <div className="mt-3 space-y-2 text-[11px]">
@@ -728,27 +532,29 @@ export function ProposalDetailPage() {
                 </div>
 
                 <div className="flex justify-between py-1 border-b border-border/30">
-                  <span className="text-muted-foreground">Grounded Resistance Zone:</span>
+                  <span className="text-muted-foreground">Planned Entry (pivot + 0.10×ATR14):</span>
                   <span className="text-foreground font-mono">
-                    ₹{calcBasis?.pivot.selected_zone_low ?? grounding?.selected_zone?.low ?? Number(proposal.pivot_price).toFixed(2)} – ₹{calcBasis?.pivot.selected_zone_high ?? grounding?.selected_zone?.high ?? Number(proposal.pivot_price).toFixed(2)}
+                    ₹{(plannedEntry ?? Number(proposal.pivot_price)).toFixed(2)}
                   </span>
                 </div>
 
                 <div className="flex justify-between py-1 border-b border-border/30">
-                  <span className="text-muted-foreground">ATR14 Tolerance (0.5×ATR14):</span>
-                  <span className="text-foreground">₹{calcBasis?.pivot.tolerance_atr ?? Number(geometry.anchor_merge_tolerance ?? 0).toFixed(2)}</span>
+                  <span className="text-muted-foreground">Final Survivor High Date:</span>
+                  <span className="text-foreground">
+                    {calcBasis?.pivot?.final_contraction_high_date ?? "—"}
+                  </span>
                 </div>
 
                 <div className="flex justify-between py-1 border-b border-border/30">
-                  <span className="text-muted-foreground">Distance to Resistance Boundary:</span>
-                  <span className="text-emerald-400">
-                    ₹{calcBasis?.pivot.boundary_distance ?? grounding?.boundary_distance ?? "0.00"}
+                  <span className="text-muted-foreground">Source:</span>
+                  <span className="text-foreground">
+                    {calcBasis?.pivot?.source ?? "final_surviving_contraction_high"}
                   </span>
                 </div>
 
                 <div className="mt-3 rounded bg-muted/20 p-2.5 text-[10px] leading-relaxed text-muted-foreground border border-border/40">
-                  <strong className="text-foreground">Grounding Basis: </strong>
-                  {calcBasis?.pivot.basis ?? `Pivot ₹${Number(proposal.pivot_price).toFixed(2)} is verified within 0.5×ATR14 tolerance of overhead resistance in the 126-session detail window.`}
+                  <strong className="text-foreground">Pivot Basis: </strong>
+                  {calcBasis?.pivot?.basis ?? `Pivot ₹${Number(proposal.pivot_price).toFixed(2)} is the snapped high of the latest-dated surviving contraction.`}
                 </div>
               </div>
             </div>
@@ -773,14 +579,14 @@ export function ProposalDetailPage() {
                 <div className="flex justify-between py-1 border-b border-border/30">
                   <span className="text-muted-foreground">Final Contraction Low Anchor:</span>
                   <span className="text-foreground">
-                    ₹{calcBasis?.stop_loss.final_contraction_low ?? geometry.final_contraction_low ?? "-"} {calcBasis?.stop_loss.final_contraction_low_date ? `(${calcBasis.stop_loss.final_contraction_low_date})` : ""}
+                    ₹{calcBasis?.stop_loss?.final_contraction_low ?? geometry.final_contraction_low ?? "-"} {calcBasis?.stop_loss?.final_contraction_low_date ? `(${calcBasis.stop_loss.final_contraction_low_date})` : ""}
                   </span>
                 </div>
 
                 <div className="flex justify-between py-1 border-b border-border/30">
                   <span className="text-muted-foreground">Frozen ATR14 & Buffer (0.25×ATR14):</span>
                   <span className="text-foreground">
-                    ATR14: ₹{Number(geometry.atr14 ?? 0).toFixed(2)} · Buffer: ₹{calcBasis?.stop_loss.stop_buffer_amount ?? (Number(geometry.atr14 ?? 0) * 0.25).toFixed(2)}
+                    ATR14: ₹{Number(geometry.atr14 ?? 0).toFixed(2)} · Buffer: ₹{calcBasis?.stop_loss?.stop_buffer_amount ?? (Number(geometry.atr14 ?? 0) * 0.25).toFixed(2)}
                   </span>
                 </div>
 
@@ -791,7 +597,7 @@ export function ProposalDetailPage() {
 
                 <div className="mt-3 rounded bg-muted/20 p-2.5 text-[10px] leading-relaxed text-muted-foreground border border-border/40">
                   <strong className="text-foreground">Stop Loss Basis: </strong>
-                  {calcBasis?.stop_loss.basis ?? `Initial stop loss is snapped below final contraction low with a 0.25×ATR14 structural buffer.`}
+                  {calcBasis?.stop_loss?.formula ?? `Final surviving low − 0.25×ATR14, snapped to tick.`}
                 </div>
               </div>
             </div>
@@ -802,16 +608,15 @@ export function ProposalDetailPage() {
                 <span className="flex items-center gap-2 font-bold text-foreground">
                   <TrendingUpIcon className="h-4 w-4 text-amber-400" /> 3. Entry Point & Chase Range
                 </span>
-                {ceilingTightened ? (
-                  <Badge variant="outline" className="text-amber-400 border-amber-500/30">
-                    Tightened for 1R Target
-                  </Badge>
-                ) : (
-                  <Badge variant="outline">Standard Ceiling</Badge>
-                )}
+                <Badge variant="outline">From planned entry</Badge>
               </div>
 
               <div className="mt-3 space-y-2 text-[11px]">
+                <div className="flex justify-between py-1 border-b border-border/30">
+                  <span className="text-muted-foreground">Planned Entry:</span>
+                  <strong className="text-foreground">₹{(plannedEntry ?? Number(proposal.pivot_price)).toFixed(2)}</strong>
+                </div>
+
                 <div className="flex justify-between py-1 border-b border-border/30">
                   <span className="text-muted-foreground">Entry Trigger:</span>
                   <strong className="text-foreground">₹{Number(proposal.pivot_price).toFixed(2)} (Pivot Breakout)</strong>
@@ -830,13 +635,13 @@ export function ProposalDetailPage() {
                 <div className="flex justify-between py-1 border-b border-border/30">
                   <span className="text-muted-foreground">Max Allowable Chase Margin:</span>
                   <span className="text-amber-300">
-                    +₹{(lockedCeiling - Number(proposal.pivot_price)).toFixed(2)} (+{(((lockedCeiling - Number(proposal.pivot_price)) / Number(proposal.pivot_price)) * 100).toFixed(2)}%)
+                    +₹{(lockedCeiling - (plannedEntry ?? Number(proposal.pivot_price))).toFixed(2)} (+{(((lockedCeiling - (plannedEntry ?? Number(proposal.pivot_price))) / (plannedEntry ?? Number(proposal.pivot_price))) * 100).toFixed(2)}%)
                   </span>
                 </div>
 
                 <div className="mt-3 rounded bg-muted/20 p-2.5 text-[10px] leading-relaxed text-muted-foreground border border-border/40">
                   <strong className="text-foreground">Chase Ceiling Basis: </strong>
-                  {calcBasis?.entry_chase.basis ?? `Chase ceiling is capped to ensure T1 achieves at least 1.00R even if filled at the worst allowable ceiling.`}
+                  {calcBasis?.entry_chase?.formula ?? `planned_entry + min(2% of entry, 0.5×R), floored to tick. Targets are frozen at planned entry.`}
                 </div>
               </div>
             </div>
@@ -848,27 +653,27 @@ export function ProposalDetailPage() {
                   <TargetIcon className="h-4 w-4 text-emerald-400" /> 4. Profit Targets & R:R Ratios
                 </span>
                 <Badge variant="outline" className="text-emerald-400 border-emerald-500/30">
-                  Strictly T1 &lt; T2 &lt; T3
+                  Frozen at planned entry
                 </Badge>
               </div>
 
               <div className="mt-3 space-y-2 text-[11px]">
                 <div className="flex justify-between py-1 border-b border-border/30">
-                  <span className="text-muted-foreground">Target 1 (Primary Measured Move):</span>
+                  <span className="text-muted-foreground">Target 1 ({targetSlots.t1 ?? "floor"}):</span>
                   <strong className="text-emerald-400">
-                    ₹{Number(proposal.t1).toFixed(2)} {t1R ? `(${t1R} at ceiling)` : ""}
+                    ₹{Number(proposal.t1).toFixed(2)} {t1R ? `(${t1R} at planned entry)` : ""}
                   </strong>
                 </div>
 
                 <div className="flex justify-between py-1 border-b border-border/30">
-                  <span className="text-muted-foreground">Target 2 (Secondary Expansion):</span>
+                  <span className="text-muted-foreground">Target 2 ({targetSlots.t2 ?? "measured"}):</span>
                   <span className="text-foreground">
                     ₹{Number(proposal.t2).toFixed(2)} {t2R ? `(${t2R})` : ""}
                   </span>
                 </div>
 
                 <div className="flex justify-between py-1 border-b border-border/30">
-                  <span className="text-muted-foreground">Target 3 (Major Swing / Runner):</span>
+                  <span className="text-muted-foreground">Target 3 ({targetSlots.t3 ?? "stretch"}):</span>
                   <span className="text-foreground">
                     ₹{Number(proposal.t3).toFixed(2)} {t3R ? `(${t3R})` : ""}
                   </span>
@@ -883,7 +688,9 @@ export function ProposalDetailPage() {
 
                 <div className="mt-3 rounded bg-muted/20 p-2.5 text-[10px] leading-relaxed text-muted-foreground border border-border/40">
                   <strong className="text-foreground">Target Basis: </strong>
-                  {calcBasis?.targets.basis ?? `Gemini structural upside objectives validated with T1 ≥ 1R at maximum chase ceiling.`}
+                  {calcBasis?.targets?.frozen_at_planned_entry
+                    ? "T1/T2/T3 are sorted unique levels ≥ 2R from planned entry (floor / measured / stretch). Prices freeze on the proposal."
+                    : `Gemini structural upside objectives validated with T1 ≥ 1R at maximum chase ceiling.`}
                 </div>
               </div>
             </div>
@@ -950,13 +757,34 @@ export function ProposalDetailPage() {
             <div className="lg:col-span-2 space-y-3">
               <div className="flex flex-wrap gap-2 text-[11px]">
                 <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
-                  <span className="text-muted-foreground">Prior Uptrend: </span>
-                  <strong className="text-foreground capitalize">{proposal.gemini_evidence?.prior_uptrend ?? proposal.gemini_evidence?.base_tightness ?? "—"}</strong>
+                  <span className="text-muted-foreground">Classification: </span>
+                  <strong className="text-foreground capitalize">{proposal.gemini_evidence?.classification ?? "—"}</strong>
+                </div>
+                <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
+                  <span className="text-muted-foreground">Stage 2: </span>
+                  <strong className="text-foreground capitalize">{proposal.gemini_evidence?.base_quality?.stage2_context ?? proposal.gemini_evidence?.prior_uptrend ?? "—"}</strong>
                 </div>
                 <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
                   <span className="text-muted-foreground">Volume Dry-Up: </span>
                   <strong className="text-foreground capitalize">{proposal.gemini_evidence?.volume_dry_up ?? proposal.gemini_evidence?.dry_up_quality ?? "—"}</strong>
                 </div>
+                <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
+                  <span className="text-muted-foreground">Tightening: </span>
+                  <strong className="text-foreground capitalize">{proposal.gemini_evidence?.progressive_tightening ?? "—"}</strong>
+                </div>
+                <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
+                  <span className="text-muted-foreground">Confidence: </span>
+                  <strong className="text-foreground">{proposal.gemini_evidence?.confidence ?? proposal.confidence ?? "—"}</strong>
+                </div>
+                <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
+                  <span className="text-muted-foreground">Counts: </span>
+                  <strong className="text-foreground">Python {pythonCount ?? "—"} / LLM {llmCount ?? "—"}</strong>
+                </div>
+                {(geometry.fifty_two_week_tags ?? []).map((tag) => (
+                  <div key={tag} className="rounded-md border border-border/40 bg-muted/20 px-3 py-1.5">
+                    <strong className="text-foreground">{tag.replaceAll("_", " ")}</strong>
+                  </div>
+                ))}
               </div>
 
               <div className="rounded-lg border border-border/40 bg-background/50 p-3 text-[11px] leading-relaxed text-muted-foreground">
@@ -975,9 +803,9 @@ export function ProposalDetailPage() {
               ) : null}
             </div>
 
-            {/* Visual Contractions */}
+            {/* Surviving contractions (Python-owned prices) */}
             <div className="rounded-lg border border-border/40 bg-background/50 p-3">
-              <div className="mb-2 text-[10px] uppercase font-semibold text-foreground">Visual Contractions</div>
+              <div className="mb-2 text-[10px] uppercase font-semibold text-foreground">Surviving Contractions</div>
               <div className="max-h-40 overflow-y-auto">
                 <table className="w-full text-left text-[10px]">
                   <thead>
@@ -988,12 +816,14 @@ export function ProposalDetailPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border/20">
-                    {(proposal.gemini_evidence?.contractions ?? []).map((leg) => (
-                      <tr key={leg.index}>
-                        <td className="py-1 font-mono text-muted-foreground">T{leg.index}</td>
-                        <td className="py-1 text-foreground">{Number(leg.depth_pct).toFixed(1)}%</td>
+                    {(geometry.survivors ?? []).map((leg, idx) => (
+                      <tr key={String(leg.index ?? idx)}>
+                        <td className="py-1 font-mono text-muted-foreground">
+                          T{Number(leg.index ?? idx + 1)} {leg.source ? `(${String(leg.source)})` : ""}
+                        </td>
+                        <td className="py-1 text-foreground">{Number(leg.depth_pct ?? 0).toFixed(1)}%</td>
                         <td className="py-1 text-right font-mono font-semibold text-foreground">
-                          ₹{Number(leg.high_price).toFixed(2)} → ₹{Number(leg.low_price).toFixed(2)}
+                          ₹{Number(leg.high_price ?? 0).toFixed(2)} → ₹{Number(leg.low_price ?? 0).toFixed(2)}
                         </td>
                       </tr>
                     ))}

@@ -23,8 +23,6 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import db_dep
-from app.domain.p10_geometry import MAX_STOP_DISTANCE_PCT, calculate_chase_ceiling, floor_to_tick
-from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
 from app.domain.p10_triggers import IST_TZ, entry_window_closed
 from app.services.execution_engine import publish_tick_subscriptions
 from app.schemas.proposals import (
@@ -825,6 +823,38 @@ async def get_attempt_chart_direct(
     return Response(content=bytes(row["image"]), media_type="image/png")
 
 
+@router.get("/forming-patterns")
+async def list_forming_patterns(
+    db: db_dep,
+    status_filter: Annotated[
+        Literal["watching", "promoted", "broken_down", "expired", "all"],
+        Query(alias="status"),
+    ] = "watching",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[dict[str, Any]]:
+    """Forming VCP watches — no pivot/entry/target math."""
+    where = "" if status_filter == "all" else "WHERE status = :status"
+    params: dict[str, Any] = {"limit": limit}
+    if status_filter != "all":
+        params["status"] = status_filter
+    result = await db.execute(
+        text(
+            f"""
+            SELECT id, instrument_id, screening_result_id, symbol,
+                   first_seen_as_of, last_as_of, forming_state, status,
+                   next_check_date, llm_snapshot, python_candidates,
+                   created_at, updated_at
+            FROM p10_forming_patterns
+            {where}
+            ORDER BY next_check_date ASC, created_at DESC
+            LIMIT :limit
+            """
+        ),
+        params,
+    )
+    return [dict(row._mapping) for row in result]
+
+
 @router.get("/proposals")
 async def list_trade_proposals(
     db: db_dep,
@@ -1045,128 +1075,17 @@ async def record_proposal_decision(
     decision_id = dec_res.scalar_one()
 
     if payload.decision == "approved":
-        has_adjustments = any([
-            payload.adjusted_pivot_price is not None,
-            payload.adjusted_initial_stop is not None,
-            payload.adjusted_t1 is not None,
-            payload.adjusted_t2 is not None,
-            payload.adjusted_t3 is not None,
-            payload.adjusted_entry_template is not None,
-            payload.adjusted_leg2_price is not None,
-        ])
+        await db.execute(text("""
+            UPDATE trade_proposals
+            SET status = 'approved', updated_at = now()
+            WHERE id = :id;
+        """), {"id": proposal_id})
 
-        if has_adjustments:
-            final_pivot = payload.adjusted_pivot_price or Decimal(str(prop.pivot_price))
-            final_stop = payload.adjusted_initial_stop or Decimal(str(prop.initial_stop))
-            final_t1 = payload.adjusted_t1 or Decimal(str(prop.t1))
-            final_t2 = payload.adjusted_t2 or Decimal(str(prop.t2))
-            final_t3 = payload.adjusted_t3 or Decimal(str(prop.t3))
-            final_template = payload.adjusted_entry_template or EntryTemplate(prop.entry_template)
-
-            if final_stop >= final_pivot:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Initial stop ({final_stop}) must be below entry pivot ({final_pivot})",
-                )
-
-            stop_distance_pct = ((final_pivot - final_stop) / final_pivot) * Decimal("100")
-            if stop_distance_pct > MAX_STOP_DISTANCE_PCT:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Stop distance {stop_distance_pct:.2f}% exceeds maximum {MAX_STOP_DISTANCE_PCT}%",
-                )
-
-            if not (final_pivot < final_t1 < final_t2 < final_t3):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Targets must satisfy pivot < t1 < t2 < t3 (got {final_pivot} < {final_t1} < {final_t2} < {final_t3})",
-                )
-
-            final_chase_ceiling, _ = calculate_chase_ceiling(final_pivot, final_stop)
-            tmpl_cfg = TEMPLATE_CONFIG[final_template]
-
-            await db.execute(text("""
-                UPDATE trade_proposals
-                SET status = 'approved',
-                    pivot_price = :pivot_price,
-                    initial_stop = :initial_stop,
-                    stop_distance_pct = :stop_distance_pct,
-                    chase_ceiling = :chase_ceiling,
-                    t1 = :t1,
-                    t2 = :t2,
-                    t3 = :t3,
-                    entry_template = :entry_template,
-                    leg_count = :leg_count,
-                    leg_risk_allocations = :leg_risk_allocations,
-                    relative_volume_threshold = :relative_volume_threshold,
-                    updated_at = now()
-                WHERE id = :id;
-            """), {
-                "id": proposal_id,
-                "pivot_price": final_pivot,
-                "initial_stop": final_stop,
-                "stop_distance_pct": stop_distance_pct,
-                "chase_ceiling": final_chase_ceiling,
-                "t1": final_t1,
-                "t2": final_t2,
-                "t3": final_t3,
-                "entry_template": final_template.value,
-                "leg_count": tmpl_cfg["leg_count"],
-                "leg_risk_allocations": json.dumps([str(a) for a in tmpl_cfg["leg_allocations"]]),
-                "relative_volume_threshold": tmpl_cfg["relative_volume_threshold"],
-            })
-
-            # Recreate legs with finalized template and prices
-            await db.execute(text("DELETE FROM entry_legs WHERE proposal_id = :id;"), {"id": proposal_id})
-            allocations = tmpl_cfg["leg_allocations"]
-            for leg_index, allocation in enumerate(allocations, start=1):
-                initial = leg_index == 1
-                hold_required = 0
-                base_required = 0
-                if not initial:
-                    hold_required = 1 if final_template == EntryTemplate.THREE_LEG_FRONT and leg_index == 2 else 2
-                    base_required = 2 if final_template == EntryTemplate.THREE_LEG_FRONT and leg_index == 2 else 3
-
-                leg_trigger_price = final_pivot if initial else (payload.adjusted_leg2_price or None)
-                leg_ceiling = final_chase_ceiling if initial else None
-                await db.execute(text("""
-                    INSERT INTO entry_legs (
-                        proposal_id, leg_index, risk_allocation_pct, status, trigger_type,
-                        trigger_price, chase_ceiling, relative_volume_threshold,
-                        hold_required, base_required, eligible_session_start, eligible_session_end
-                    ) VALUES (
-                        :proposal_id, :leg_index, :risk_allocation_pct, :status, :trigger_type,
-                        :trigger_price, :chase_ceiling, :relative_volume_threshold,
-                        :hold_required, :base_required, :eligible_start, :eligible_end
-                    )
-                """), {
-                    "proposal_id": proposal_id,
-                    "leg_index": leg_index,
-                    "risk_allocation_pct": allocation,
-                    "status": "armed" if initial else "planned",
-                    "trigger_type": "pivot" if initial else "base_breakout",
-                    "trigger_price": leg_trigger_price,
-                    "chase_ceiling": leg_ceiling,
-                    "relative_volume_threshold": tmpl_cfg["relative_volume_threshold"],
-                    "hold_required": hold_required,
-                    "base_required": base_required,
-                    "eligible_start": prop.entry_session_date if initial else None,
-                    "eligible_end": prop.entry_session_date if initial else None,
-                })
-        else:
-            # Transition proposal to approved without parameter changes
-            await db.execute(text("""
-                UPDATE trade_proposals
-                SET status = 'approved', updated_at = now()
-                WHERE id = :id;
-            """), {"id": proposal_id})
-
-            # Arm initial leg (L1)
-            await db.execute(text("""
-                UPDATE entry_legs
-                SET status = 'armed', updated_at = now()
-                WHERE proposal_id = :id AND leg_index = 1;
-            """), {"id": proposal_id})
+        await db.execute(text("""
+            UPDATE entry_legs
+            SET status = 'armed', updated_at = now()
+            WHERE proposal_id = :id AND leg_index = 1;
+        """), {"id": proposal_id})
         logger.info(f"Proposal {proposal_id} ({prop.symbol}) APPROVED and L1 ARMED")
     else:
         # Transition proposal to rejected

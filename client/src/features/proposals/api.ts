@@ -35,9 +35,34 @@ export interface TradeProposalItem {
   leg_risk_allocations: number[]
   relative_volume_threshold: number
   gemini_evidence: {
+    classification?: string
+    forming_state?: string | null
+    progressive_tightening?: string
+    volume_dry_up?: string
+    base_quality?: {
+      price_action?: string
+      climax_or_gap_violation?: string
+      stage2_context?: string
+    }
+    candidate_assessments?: Array<{
+      index: number
+      action: string
+      merge_with_index?: number | null
+      note?: string
+    }>
+    extra_windows?: Array<{
+      high_start: string
+      high_end: string
+      low_start: string
+      low_end: string
+      note?: string
+    }>
+    confidence?: number
+    python_count?: number
+    llm_count?: number
+    mismatch_banner?: boolean
     prior_uptrend?: string
     prior_uptrend_note?: string
-    volume_dry_up?: string
     volume_dry_up_note?: string
     contractions?: Array<{
       index: number
@@ -49,11 +74,10 @@ export interface TradeProposalItem {
     evidence_summary: string
     base_tightness?: string
     dry_up_quality?: string
-    resistance_room?: string
-    contraction_anchors?: Array<{ date: string; price?: number | string; anchor_type?: string; evidence?: string }>
   }
   geometry: {
     atr14?: number | string
+    planned_entry?: string
     r_distance?: number | string
     pivot_r_distance?: string
     worst_entry_r_distance?: string
@@ -69,98 +93,15 @@ export interface TradeProposalItem {
     t3_below_3r?: boolean
     tick_size?: string
     final_contraction_low?: string
-    anchor_merge_tolerance?: string
-    pivot_grounding?: {
-      is_grounded: boolean
-      boundary_distance?: string | null
-      tolerance?: string
-      subreason?: string | null
-      selected_zone?: {
-        low: string
-        high: string
-        median: string
-        most_recent_date: string
-        members?: Array<{ date: string; price: string; anchor_type: string }>
-      } | null
-      eligible_anchors?: Array<{ date: string; price: string; anchor_type: string; eligibility: string }>
-      audit_flags?: string[]
-    }
-    calculation_basis?: {
-      pivot: {
-        pivot_price: string
-        grounding_status: string
-        selected_zone_low?: string
-        selected_zone_high?: string
-        selected_zone_median?: string
-        selected_zone_recent_date?: string
-        boundary_distance?: string | null
-        tolerance_atr: string
-        tolerance_rule: string
-        basis: string
-      }
-      stop_loss: {
-        initial_stop: string
-        final_contraction_low: string
-        final_contraction_low_date: string
-        atr14: string
-        stop_buffer_multiplier: string
-        stop_buffer_amount: string
-        stop_distance: string
-        stop_distance_pct: string
-        max_allowed_stop_pct: string
-        formula: string
-        basis: string
-      }
-      entry_chase: {
-        pivot_entry: string
-        base_chase_ceiling?: string | null
-        rr_adjusted_chase_ceiling?: string | null
-        final_chase_ceiling: string
-        ceiling_tightened_for_1r: boolean
-        max_chase_margin: string
-        max_chase_pct: string
-        worst_entry_r_distance: string
-        formula: string
-        basis: string
-      }
-      targets: {
-        t1: {
-          price: string
-          r_at_ceiling?: string | null
-          r_at_pivot?: string | null
-          min_required_r: string
-          objective: string
-        }
-        t2: {
-          price: string
-          r_at_ceiling?: string | null
-          below_2r_flag?: boolean
-          objective: string
-        }
-        t3: {
-          price: string
-          r_at_ceiling?: string | null
-          below_3r_flag?: boolean
-          objective: string
-        }
-        basis: string
-      }
-      sizing_and_risk: {
-        entry_template: string
-        leg_count: number
-        leg_risk_allocations: number[]
-        relative_volume_threshold: number
-        risk_per_trade_pct: string
-        approved_risk_budget_amount?: string | null
-        risk_policy_version: number
-        prior_uptrend?: string
-        volume_dry_up?: string
-        base_tightness?: string
-        dry_up_quality?: string
-        resistance_room?: string
-        basis: string
-      }
-    }
+    python_candidates?: Array<Record<string, unknown>>
+    survivors?: Array<Record<string, unknown>>
+    target_slots?: { t1?: string; t2?: string; t3?: string }
+    fifty_two_week_tags?: string[]
+    distance_to_52w_pct?: string | null
+    wide_risk_flag?: boolean
+    template_policy_version?: string
+    template_reason?: string
+    calculation_basis?: Record<string, unknown>
   }
   context_image_hash: string | null
   detail_image_hash: string | null
@@ -195,13 +136,20 @@ export interface DecisionPayload {
   decision: "approved" | "rejected"
   expected_proposal_hash: string
   notes?: string
-  adjusted_pivot_price?: number
-  adjusted_initial_stop?: number
-  adjusted_t1?: number
-  adjusted_t2?: number
-  adjusted_t3?: number
-  adjusted_entry_template?: "single" | "two_leg" | "two_leg_staged" | "three_leg_front" | "three_leg_balanced"
-  adjusted_leg2_price?: number
+}
+
+export interface FormingPatternItem {
+  id: string
+  instrument_id: string
+  screening_result_id: string | null
+  symbol: string
+  first_seen_as_of: string
+  last_as_of: string
+  forming_state: string
+  status: "watching" | "promoted" | "broken_down" | "expired"
+  next_check_date: string
+  llm_snapshot: Record<string, unknown>
+  python_candidates: Array<Record<string, unknown>>
 }
 
 export interface CapacityConflict {
@@ -404,6 +352,7 @@ export interface ProposalRunSummary {
 }
 
 const operationsKeys = {
+  proposals: ["automation", "proposals"] as const,
   marketContext: ["automation", "market-context", "latest"] as const,
   stopStreak: (mode: "paper" | "live") => ["automation", "stop-streak", mode] as const,
   rollout: ["automation", "rollout"] as const,
@@ -563,6 +512,17 @@ export function useProposalBatches(limit: number = 30) {
         `/automation/proposal-batches?limit=${limit}`,
       ),
     refetchInterval: 5000,
+  })
+}
+
+export function useFormingPatterns(statusFilter: string = "watching") {
+  return useQuery<FormingPatternItem[]>({
+    queryKey: [...operationsKeys.proposals, "forming", statusFilter],
+    queryFn: () =>
+      apiRequest<FormingPatternItem[]>(
+        `/automation/forming-patterns?status=${statusFilter}`,
+      ),
+    refetchInterval: 15000,
   })
 }
 

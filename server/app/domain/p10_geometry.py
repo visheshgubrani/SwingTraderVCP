@@ -7,13 +7,20 @@ chase ceiling, and target validation according to AGENTS.md §5.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Sequence
 
 
 DEFAULT_TICK_SIZE = Decimal("0.05")
 MAX_STOP_DISTANCE_PCT = Decimal("8.0")
+WIDE_RISK_FLAG_PCT = Decimal("5.0")
+CHART_LOOKBACK_SESSIONS = 126
+ENTRY_BUFFER_ATR = Decimal("0.10")
+STOP_BUFFER_ATR = Decimal("0.25")
+DEPTH_REGRESSION_TOLERANCE_PP = Decimal("0.5")
+NEAR_52W_PCT = Decimal("3.0")
+FRESH_HIGH_ATR_TOLERANCE = Decimal("0.25")
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,7 @@ class ProposalGeometry:
     r_distance: Decimal
     is_valid: bool
     rejection_reason: str | None = None
+    planned_entry: Decimal | None = None
     base_chase_ceiling: Decimal | None = None
     rr_adjusted_chase_ceiling: Decimal | None = None
     r_at_pivot: Decimal | None = None
@@ -57,6 +65,10 @@ class ProposalGeometry:
     t3_r: Decimal | None = None
     t2_below_2r: bool = False
     t3_below_3r: bool = False
+    target_slots: tuple[str, str, str] | None = None
+    wide_risk_flag: bool = False
+    fifty_two_week_tags: tuple[str, ...] = ()
+    distance_to_52w_pct: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,40 @@ class VcpContractionWave:
     low_date: str
     low_price: Decimal
     depth_pct: Decimal
+    vol_adv20: Decimal | None = None
+    vol_adv50: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class SurvivingContraction:
+    index: int
+    high_date: str
+    high_price: Decimal
+    low_date: str
+    low_price: Decimal
+    depth_pct: Decimal
+    vol_adv20: Decimal | None
+    vol_adv50: Decimal | None
+    source: str
+    member_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class SurvivorResolution:
+    survivors: tuple[SurvivingContraction, ...]
+    python_count: int
+    llm_count: int
+    rejection_reason: str | None = None
+
+    @property
+    def is_valid(self) -> bool:
+        return self.rejection_reason is None
+
+    @property
+    def final_contraction(self) -> SurvivingContraction | None:
+        if not self.survivors:
+            return None
+        return self.survivors[-1]
 
 
 @dataclass(frozen=True)
@@ -418,7 +464,7 @@ def compute_atr14(candles: Sequence[CandleData]) -> Decimal:
 def detect_vcp_swings_and_contractions(
     candles: Sequence[CandleData],
     *,
-    lookback_sessions: int = 60,
+    lookback_sessions: int = CHART_LOOKBACK_SESSIONS,
     fractal_k: int = 2,
     tick_size: Decimal = DEFAULT_TICK_SIZE,
 ) -> tuple[tuple[ChartGeometryAnchor, ...], tuple[VcpContractionWave, ...], Decimal, Decimal, Decimal | None, Decimal | None]:
@@ -522,21 +568,554 @@ def detect_vcp_swings_and_contractions(
     return tuple(anchors_list), tuple(contractions_list), resistance, final_low, cheat_pivot, cheat_stop
 
 
+def _candle_date(candle: CandleData) -> dt.date | None:
+    if candle.date is None:
+        return None
+    try:
+        return dt.date.fromisoformat(candle.date)
+    except ValueError:
+        return None
+
+
+def _mean_volume(candles: Sequence[CandleData]) -> Decimal | None:
+    if not candles:
+        return None
+    total = sum(int(c.volume) for c in candles)
+    return Decimal(str(total)) / Decimal(str(len(candles)))
+
+
+def _adv_ending_before(
+    dated: Sequence[tuple[dt.date, CandleData]],
+    *,
+    before: dt.date,
+    window: int,
+) -> Decimal | None:
+    prior = [candle for date, candle in dated if date < before]
+    if len(prior) < window:
+        prior = [candle for _, candle in dated[:window]]
+    return _mean_volume(prior[-window:])
+
+
+def annotate_contraction_volume(
+    candles: Sequence[CandleData],
+    contractions: Sequence[VcpContractionWave],
+) -> tuple[VcpContractionWave, ...]:
+    """Attach volume vs ADV20/ADV50 ratios to each contraction window."""
+    dated: list[tuple[dt.date, CandleData]] = []
+    for candle in candles:
+        parsed = _candle_date(candle)
+        if parsed is not None:
+            dated.append((parsed, candle))
+    annotated: list[VcpContractionWave] = []
+    for wave in contractions:
+        try:
+            high_date = dt.date.fromisoformat(wave.high_date)
+            low_date = dt.date.fromisoformat(wave.low_date)
+        except ValueError:
+            annotated.append(wave)
+            continue
+        start, end = (high_date, low_date) if high_date <= low_date else (low_date, high_date)
+        window_candles = [c for d, c in dated if start <= d <= end]
+        mean_vol = _mean_volume(window_candles)
+        adv20 = _adv_ending_before(dated, before=high_date, window=20)
+        adv50 = _adv_ending_before(dated, before=high_date, window=50)
+        vol_adv20 = (mean_vol / adv20) if mean_vol is not None and adv20 else None
+        vol_adv50 = (mean_vol / adv50) if mean_vol is not None and adv50 else None
+        annotated.append(
+            VcpContractionWave(
+                index=wave.index,
+                high_date=wave.high_date,
+                high_price=wave.high_price,
+                low_date=wave.low_date,
+                low_price=wave.low_price,
+                depth_pct=wave.depth_pct,
+                vol_adv20=vol_adv20,
+                vol_adv50=vol_adv50,
+            )
+        )
+    return tuple(annotated)
+
+
+def snap_extrema_in_window(
+    candles: Sequence[CandleData],
+    *,
+    start: dt.date,
+    end: dt.date,
+    extrema: str,
+) -> tuple[dt.date, Decimal] | None:
+    """Snap a date window to the exact high or low in frozen candles."""
+    if end < start:
+        return None
+    picked: tuple[dt.date, Decimal] | None = None
+    for candle in candles:
+        parsed = _candle_date(candle)
+        if parsed is None or parsed < start or parsed > end:
+            continue
+        price = Decimal(str(candle.high if extrema == "high" else candle.low))
+        if picked is None:
+            picked = (parsed, price)
+            continue
+        if extrema == "high" and price > picked[1]:
+            picked = (parsed, price)
+        elif extrema == "low" and price < picked[1]:
+            picked = (parsed, price)
+    return picked
+
+
+def _depth_pct(high: Decimal, low: Decimal) -> Decimal:
+    if high <= 0:
+        return Decimal("0")
+    return ((high - low) / high) * Decimal("100")
+
+
+def _find_parent(parent: dict[int, int], index: int) -> int:
+    while parent[index] != index:
+        parent[index] = parent[parent[index]]
+        index = parent[index]
+    return index
+
+
+def format_candidate_summary(contractions: Sequence[VcpContractionWave]) -> str:
+    """Short text packet sent with the 126-session chart. Not a raw OHLCV table."""
+    if not contractions:
+        return "No Python swing-detector candidates in the 126-session window."
+    lines = []
+    for wave in contractions:
+        vol20 = f"{wave.vol_adv20:.2f}" if wave.vol_adv20 is not None else "n/a"
+        vol50 = f"{wave.vol_adv50:.2f}" if wave.vol_adv50 is not None else "n/a"
+        lines.append(
+            f"C{wave.index}: {wave.high_date}→{wave.low_date} "
+            f"depth {wave.depth_pct:.1f}% vol/ADV20 {vol20} vol/ADV50 {vol50}"
+        )
+    return "\n".join(lines)
+
+
+def resolve_surviving_contractions(
+    *,
+    candidates: Sequence[VcpContractionWave],
+    assessments: Sequence[Any],
+    extra_windows: Sequence[Any],
+    candles: Sequence[CandleData],
+) -> SurvivorResolution:
+    """Confirm/merge/reject/extra resolution. Never reads a rejected candidate's H/L."""
+    python_count = len(candidates)
+    by_index = {wave.index: wave for wave in candidates}
+    expected = set(by_index)
+    action_by_index: dict[int, Any] = {}
+    for row in assessments:
+        action_by_index[row.index] = row
+    if set(action_by_index) != expected:
+        return SurvivorResolution(
+            survivors=(),
+            python_count=python_count,
+            llm_count=0,
+            rejection_reason="candidate_assessments must contain exactly one row per Python candidate",
+        )
+
+    for row in assessments:
+        if row.action != "merge":
+            continue
+        target = action_by_index.get(row.merge_with_index)
+        if target is None:
+            return SurvivorResolution(
+                survivors=(),
+                python_count=python_count,
+                llm_count=0,
+                rejection_reason=f"merge_with_index {row.merge_with_index} is not a sent candidate",
+            )
+        if target.action == "reject":
+            return SurvivorResolution(
+                survivors=(),
+                python_count=python_count,
+                llm_count=0,
+                rejection_reason="merge target must not itself be reject",
+            )
+
+    parent = {index: index for index in by_index}
+    active = {index for index, row in action_by_index.items() if row.action != "reject"}
+    for row in assessments:
+        if row.action != "merge" or row.index not in active:
+            continue
+        target_index = int(row.merge_with_index)
+        if target_index not in active:
+            return SurvivorResolution(
+                survivors=(),
+                python_count=python_count,
+                llm_count=0,
+                rejection_reason="merge target must not itself be reject",
+            )
+        ra, rb = _find_parent(parent, row.index), _find_parent(parent, target_index)
+        if ra != rb:
+            parent[rb] = ra
+
+    groups: dict[int, list[int]] = {}
+    for index in sorted(active):
+        root = _find_parent(parent, index)
+        groups.setdefault(root, []).append(index)
+
+    survivors: list[SurvivingContraction] = []
+    next_index = 1
+    window = candles[-CHART_LOOKBACK_SESSIONS:] if len(candles) >= CHART_LOOKBACK_SESSIONS else candles
+    for members in groups.values():
+        highs: list[tuple[dt.date, Decimal]] = []
+        lows: list[tuple[dt.date, Decimal]] = []
+        vol20s: list[Decimal] = []
+        vol50s: list[Decimal] = []
+        for index in members:
+            wave = by_index[index]
+            highs.append((dt.date.fromisoformat(wave.high_date), wave.high_price))
+            lows.append((dt.date.fromisoformat(wave.low_date), wave.low_price))
+            if wave.vol_adv20 is not None:
+                vol20s.append(wave.vol_adv20)
+            if wave.vol_adv50 is not None:
+                vol50s.append(wave.vol_adv50)
+        high_date, high_price = max(highs, key=lambda item: item[1])
+        low_date, low_price = min(lows, key=lambda item: item[1])
+        source = "merge" if len(members) > 1 else "confirm"
+        survivors.append(
+            SurvivingContraction(
+                index=next_index,
+                high_date=high_date.isoformat(),
+                high_price=high_price,
+                low_date=low_date.isoformat(),
+                low_price=low_price,
+                depth_pct=_depth_pct(high_price, low_price),
+                vol_adv20=(sum(vol20s) / Decimal(str(len(vol20s)))) if vol20s else None,
+                vol_adv50=(sum(vol50s) / Decimal(str(len(vol50s)))) if vol50s else None,
+                source=source,
+                member_indices=tuple(sorted(members)),
+            )
+        )
+        next_index += 1
+
+    for extra in extra_windows:
+        high = snap_extrema_in_window(
+            window, start=extra.high_start, end=extra.high_end, extrema="high"
+        )
+        low = snap_extrema_in_window(
+            window, start=extra.low_start, end=extra.low_end, extrema="low"
+        )
+        if high is None or low is None or high[1] <= low[1]:
+            return SurvivorResolution(
+                survivors=(),
+                python_count=python_count,
+                llm_count=0,
+                rejection_reason="extra_windows could not be snapped to frozen highs/lows",
+            )
+        high_date, high_price = high
+        low_date, low_price = low
+        start, end = (high_date, low_date) if high_date <= low_date else (low_date, high_date)
+        window_candles = [
+            c for c in window
+            if (parsed := _candle_date(c)) is not None and start <= parsed <= end
+        ]
+        dated = [
+            (parsed, c)
+            for c in candles
+            if (parsed := _candle_date(c)) is not None
+        ]
+        mean_vol = _mean_volume(window_candles)
+        adv20 = _adv_ending_before(dated, before=high_date, window=20)
+        adv50 = _adv_ending_before(dated, before=high_date, window=50)
+        survivors.append(
+            SurvivingContraction(
+                index=next_index,
+                high_date=high_date.isoformat(),
+                high_price=high_price,
+                low_date=low_date.isoformat(),
+                low_price=low_price,
+                depth_pct=_depth_pct(high_price, low_price),
+                vol_adv20=(mean_vol / adv20) if mean_vol is not None and adv20 else None,
+                vol_adv50=(mean_vol / adv50) if mean_vol is not None and adv50 else None,
+                source="extra",
+                member_indices=(),
+            )
+        )
+        next_index += 1
+
+    ordered = tuple(
+        sorted(
+            survivors,
+            key=lambda item: (item.high_date, item.low_date),
+        )
+    )
+    relabeled = tuple(
+        SurvivingContraction(
+            index=idx,
+            high_date=item.high_date,
+            high_price=item.high_price,
+            low_date=item.low_date,
+            low_price=item.low_price,
+            depth_pct=item.depth_pct,
+            vol_adv20=item.vol_adv20,
+            vol_adv50=item.vol_adv50,
+            source=item.source,
+            member_indices=item.member_indices,
+        )
+        for idx, item in enumerate(ordered, start=1)
+    )
+    return SurvivorResolution(
+        survivors=relabeled,
+        python_count=python_count,
+        llm_count=len(relabeled),
+    )
+
+
+def depths_non_increasing(
+    survivors: Sequence[SurvivingContraction],
+    *,
+    tolerance_pp: Decimal = DEPTH_REGRESSION_TOLERANCE_PP,
+) -> bool:
+    if len(survivors) < 2:
+        return False
+    for prev, curr in zip(survivors, survivors[1:]):
+        if curr.depth_pct > prev.depth_pct + tolerance_pp:
+            return False
+    return True
+
+
+def compute_base_high(
+    candles: Sequence[CandleData],
+    survivors: Sequence[SurvivingContraction],
+) -> Decimal | None:
+    """Highest high in the 126-session window on or before first survivor high, inclusive."""
+    if not survivors:
+        return None
+    first_high = dt.date.fromisoformat(survivors[0].high_date)
+    window = candles[-CHART_LOOKBACK_SESSIONS:] if len(candles) >= CHART_LOOKBACK_SESSIONS else candles
+    picked: Decimal | None = None
+    for candle in window:
+        parsed = _candle_date(candle)
+        if parsed is None or parsed > first_high:
+            continue
+        high = Decimal(str(candle.high))
+        if picked is None or high > picked:
+            picked = high
+    return picked
+
+
+def fifty_two_week_high(
+    candles: Sequence[CandleData],
+) -> Decimal | None:
+    if not candles:
+        return None
+    return max(Decimal(str(c.high)) for c in candles)
+
+
+def fifty_two_week_tags(
+    *,
+    pivot: Decimal,
+    final_high: Decimal,
+    measured: Decimal,
+    planned_entry: Decimal,
+    week52_high: Decimal | None,
+    atr14: Decimal,
+) -> tuple[tuple[str, ...], Decimal | None]:
+    if week52_high is None or week52_high <= 0:
+        return (), None
+    distance_pct = ((week52_high - pivot) / week52_high) * Decimal("100")
+    tags: list[str] = []
+    if abs(distance_pct) <= NEAR_52W_PCT:
+        tags.append("near_52w_high")
+    if abs(final_high - week52_high) <= atr14 * FRESH_HIGH_ATR_TOLERANCE:
+        tags.append("fresh_high_breakout")
+    lo, hi = (planned_entry, measured) if planned_entry <= measured else (measured, planned_entry)
+    if lo < week52_high < hi:
+        tags.append("level_to_watch")
+    return tuple(tags), distance_pct
+
+
+def calculate_planned_entry(
+    pivot: Decimal,
+    atr14: Decimal,
+    tick_size: Decimal = DEFAULT_TICK_SIZE,
+) -> Decimal:
+    return floor_to_tick(pivot + (atr14 * ENTRY_BUFFER_ATR), tick_size)
+
+
+def assign_frozen_targets(
+    *,
+    planned_entry: Decimal,
+    initial_stop: Decimal,
+    pivot: Decimal,
+    base_high: Decimal,
+    deepest_low: Decimal,
+    tick_size: Decimal = DEFAULT_TICK_SIZE,
+) -> tuple[Decimal, Decimal, Decimal, tuple[str, str, str]] | None:
+    """Lock T1/T2/T3 at planned-entry R-multiples. Monitor consumes these frozen prices."""
+    risk = planned_entry - initial_stop
+    if risk <= 0:
+        return None
+    floor = snap_to_tick(planned_entry + (Decimal("2") * risk), tick_size)
+    stretch = snap_to_tick(planned_entry + (Decimal("3") * risk), tick_size)
+    measured_height = base_high - deepest_low
+    measured = snap_to_tick(pivot + measured_height, tick_size)
+    two_r = planned_entry + (Decimal("2") * risk)
+    labeled = [
+        ("floor", floor),
+        ("measured", measured),
+        ("stretch", stretch),
+    ]
+    eligible = [(name, price) for name, price in labeled if price >= two_r]
+    unique: list[tuple[str, Decimal]] = []
+    seen: set[Decimal] = set()
+    for name, price in sorted(eligible, key=lambda item: item[1]):
+        if price in seen:
+            continue
+        seen.add(price)
+        unique.append((name, price))
+    if len(unique) < 2:
+        return None
+    if len(unique) == 2:
+        unique.append(("synthetic_4r", snap_to_tick(planned_entry + (Decimal("4") * risk), tick_size)))
+    t1_name, t1 = unique[0]
+    t2_name, t2 = unique[1]
+    t3_name, t3 = unique[2]
+    if not (t1 < t2 < t3):
+        return None
+    return t1, t2, t3, (t1_name, t2_name, t3_name)
+
+
+def construct_python_owned_levels(
+    *,
+    survivors: Sequence[SurvivingContraction],
+    candles: Sequence[CandleData],
+    atr14: Decimal,
+    tick_size: Decimal = DEFAULT_TICK_SIZE,
+) -> ProposalGeometry:
+    """Pivot/entry/stop/targets from surviving windows. No LLM prices."""
+    empty = ProposalGeometry(
+        atr14=atr14,
+        pivot_price=Decimal("0"),
+        initial_stop=Decimal("0"),
+        stop_distance_pct=Decimal("0"),
+        chase_ceiling=Decimal("0"),
+        t1=Decimal("0"),
+        t2=Decimal("0"),
+        t3=Decimal("0"),
+        r_distance=Decimal("0"),
+        is_valid=False,
+    )
+    if len(survivors) < 2:
+        return replace(empty, rejection_reason="Need at least 2 surviving contractions")
+    final = survivors[-1]
+    pivot = floor_to_tick(final.high_price, tick_size)
+    planned_entry = calculate_planned_entry(pivot, atr14, tick_size)
+    stop = calculate_structural_stop(final.low_price, atr14, tick_size)
+    if stop >= planned_entry or stop >= pivot:
+        return replace(
+            empty,
+            pivot_price=pivot,
+            planned_entry=planned_entry,
+            initial_stop=stop,
+            rejection_reason="Structural stop is at or above planned entry",
+        )
+    r_distance = planned_entry - stop
+    stop_dist_pct = (r_distance / planned_entry) * Decimal("100")
+    if stop_dist_pct > MAX_STOP_DISTANCE_PCT:
+        return replace(
+            empty,
+            pivot_price=pivot,
+            planned_entry=planned_entry,
+            initial_stop=stop,
+            stop_distance_pct=stop_dist_pct,
+            r_distance=r_distance,
+            wide_risk_flag=stop_dist_pct > WIDE_RISK_FLAG_PCT,
+            rejection_reason=f"Stop distance {stop_dist_pct:.2f}% exceeds maximum 8.0%",
+        )
+    base_high = compute_base_high(candles, survivors)
+    deepest_low = min(item.low_price for item in survivors)
+    if base_high is None:
+        return replace(
+            empty,
+            pivot_price=pivot,
+            planned_entry=planned_entry,
+            initial_stop=stop,
+            stop_distance_pct=stop_dist_pct,
+            rejection_reason="base_high could not be derived from the 126-session window",
+        )
+    assigned = assign_frozen_targets(
+        planned_entry=planned_entry,
+        initial_stop=stop,
+        pivot=pivot,
+        base_high=base_high,
+        deepest_low=deepest_low,
+        tick_size=tick_size,
+    )
+    if assigned is None:
+        return replace(
+            empty,
+            pivot_price=pivot,
+            planned_entry=planned_entry,
+            initial_stop=stop,
+            stop_distance_pct=stop_dist_pct,
+            r_distance=r_distance,
+            rejection_reason="Could not build three ordered targets with T1 at or above 2R",
+        )
+    t1, t2, t3, slots = assigned
+    ceiling, _ = calculate_chase_ceiling(planned_entry, stop, tick_size)
+    week52 = fifty_two_week_high(candles)
+    tags, distance_52w = fifty_two_week_tags(
+        pivot=pivot,
+        final_high=final.high_price,
+        measured=snap_to_tick(pivot + (base_high - deepest_low), tick_size),
+        planned_entry=planned_entry,
+        week52_high=week52,
+        atr14=atr14,
+    )
+    valid, reason = validate_proposal_targets(
+        pivot=planned_entry,
+        initial_stop=stop,
+        chase_ceiling=ceiling,
+        t1=t1,
+        t2=t2,
+        t3=t3,
+        tick_size=tick_size,
+    )
+    rr_fields = _rr_audit_fields(planned_entry, stop, ceiling, ceiling, t1, t2, t3)
+    return ProposalGeometry(
+        atr14=atr14,
+        pivot_price=pivot,
+        planned_entry=planned_entry,
+        initial_stop=stop,
+        stop_distance_pct=stop_dist_pct,
+        chase_ceiling=ceiling,
+        t1=t1,
+        t2=t2,
+        t3=t3,
+        r_distance=r_distance,
+        is_valid=valid,
+        rejection_reason=reason,
+        target_slots=slots,
+        wide_risk_flag=stop_dist_pct > WIDE_RISK_FLAG_PCT,
+        fifty_two_week_tags=tags,
+        distance_to_52w_pct=distance_52w,
+        **rr_fields,
+    )
+
+
 def derive_chart_geometry(
     candles: Sequence[CandleData],
     *,
     tick_size: Decimal = DEFAULT_TICK_SIZE,
 ) -> DeterministicChartGeometry:
     """Derive reproducible chart annotations without model involvement."""
-    if len(candles) < 60:
-        raise ValueError("Need at least 60 candles to derive chart geometry")
-    if any(candle.date is None for candle in candles[-60:]):
+    if len(candles) < CHART_LOOKBACK_SESSIONS:
+        raise ValueError(
+            f"Need at least {CHART_LOOKBACK_SESSIONS} candles to derive chart geometry"
+        )
+    if any(candle.date is None for candle in candles[-CHART_LOOKBACK_SESSIONS:]):
         raise ValueError("Dated candles are required to derive chart geometry")
 
     atr14 = compute_atr14(candles)
     anchors, contractions, resistance, final_low, cheat_pivot, cheat_stop = (
-        detect_vcp_swings_and_contractions(candles, tick_size=tick_size)
+        detect_vcp_swings_and_contractions(
+            candles,
+            lookback_sessions=CHART_LOOKBACK_SESSIONS,
+            tick_size=tick_size,
+        )
     )
+    contractions = annotate_contraction_volume(candles, contractions)
 
     initial_stop = calculate_structural_stop(final_low, atr14, tick_size)
     calculated_cheat_stop = (
@@ -569,23 +1148,23 @@ def calculate_structural_stop(
 
 
 def calculate_chase_ceiling(
-    pivot: Decimal,
+    entry: Decimal,
     initial_stop: Decimal,
     tick_size: Decimal = DEFAULT_TICK_SIZE,
 ) -> tuple[Decimal, Decimal]:
-    """Base maximum acceptable entry = pivot + min(2% of pivot, 0.5 * (pivot - initial_stop)).
+    """Maximum acceptable fill = entry + min(2% of entry, 0.5 * (entry - stop)).
 
-    Returns (base_chase_ceiling, pivot_r_distance). R:R may later shrink this
-    ceiling so T1 still provides at least 1R at the worst allowed fill.
+    Callers pass planned entry (pivot + 0.10×ATR14). T1–T3 stay locked at
+    planned-entry values; this ceiling only caps MPP overshoot.
     """
-    r_distance = pivot - initial_stop
+    r_distance = entry - initial_stop
     if r_distance <= 0:
-        raise ValueError(f"Pivot ({pivot}) must be greater than initial stop ({initial_stop})")
+        raise ValueError(f"Entry ({entry}) must be greater than initial stop ({initial_stop})")
 
-    cap_pct = pivot * Decimal("0.02")
+    cap_pct = entry * Decimal("0.02")
     cap_r = r_distance * Decimal("0.50")
     max_slippage = min(cap_pct, cap_r)
-    raw_ceiling = pivot + max_slippage
+    raw_ceiling = entry + max_slippage
     return floor_to_tick(raw_ceiling, tick_size), r_distance
 
 

@@ -18,6 +18,9 @@ class FakeResult:
         self._rows = rows or []
         self._scalar = scalar
 
+    def mappings(self):
+        return self
+
     def all(self):
         return self._rows
 
@@ -117,6 +120,7 @@ class TestProposalBatchDeadline(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_rejected_batch_completes_without_trade_proposal_rows(self) -> None:
         candidate = SimpleNamespace(
+            screening_result_id=uuid4(),
             symbol="NSE:EXAMPLE-EQ",
             as_of_date=dt.date(2026, 8, 18),
             scan_completed_at=self.now,

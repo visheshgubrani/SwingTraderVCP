@@ -1251,7 +1251,7 @@ CREATE TABLE trade_proposals (
     source_hash text NOT NULL,
     renderer_version text NOT NULL,
     model text NOT NULL,
-    confidence numeric(5, 4) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    confidence numeric(5, 2) NOT NULL CHECK (confidence >= 0 AND confidence <= 100),
     entry_template text NOT NULL CHECK (
         entry_template IN ('single', 'two_leg', 'three_leg_front', 'three_leg_balanced')
     ),
@@ -1565,7 +1565,7 @@ CREATE TABLE proposal_attempts (
     renderer_version text NOT NULL,
     prompt_version text NOT NULL,
     schema_version text NOT NULL,
-    geometry_version text NOT NULL DEFAULT 'p10_geometry_rr_adjusted_chase_v4',
+    geometry_version text NOT NULL DEFAULT 'p10_python_owned_levels_v5',
     prompt_hash text NOT NULL,
     input_hash text NOT NULL,
     model text NOT NULL,
@@ -1585,6 +1585,38 @@ CREATE TABLE proposal_attempts (
     completed_at timestamptz,
     UNIQUE (automation_run_id, screening_result_id, attempt_number)
 );
+
+CREATE TABLE p10_forming_patterns (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    instrument_id uuid NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    screening_result_id uuid REFERENCES screening_results(id) ON DELETE SET NULL,
+    symbol text NOT NULL,
+    first_seen_as_of date NOT NULL,
+    last_as_of date NOT NULL,
+    forming_state text NOT NULL CHECK (forming_state IN ('developing', 'breaking_down')),
+    status text NOT NULL DEFAULT 'watching' CHECK (
+        status IN ('watching', 'promoted', 'broken_down', 'expired')
+    ),
+    next_check_date date NOT NULL,
+    llm_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+    python_candidates jsonb NOT NULL DEFAULT '[]'::jsonb,
+    last_attempt_id uuid REFERENCES proposal_attempts(id) ON DELETE SET NULL,
+    promoted_proposal_id uuid REFERENCES trade_proposals(id) ON DELETE SET NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER p10_forming_patterns_set_updated_at
+BEFORE UPDATE ON p10_forming_patterns
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE UNIQUE INDEX p10_forming_patterns_watching_instrument_idx
+ON p10_forming_patterns (instrument_id)
+WHERE status = 'watching';
+
+CREATE INDEX p10_forming_patterns_status_next_check_idx
+ON p10_forming_patterns (status, next_check_date);
 
 CREATE UNIQUE INDEX trade_proposals_input_version_uidx
 ON trade_proposals (

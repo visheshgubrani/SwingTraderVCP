@@ -6,17 +6,24 @@ from decimal import Decimal
 from app.domain.p10_geometry import (
     CandleData,
     ValidatedPatternAnchor,
+    VcpContractionWave,
     adjust_chase_ceiling_for_t1_rr,
+    assign_frozen_targets,
     build_resistance_zones,
     compute_atr14,
     construct_and_validate_proposal,
+    construct_python_owned_levels,
+    depths_non_increasing,
     entry_vwap_invalidates_t1_rr,
     ground_pivot_to_resistance_zones,
+    resolve_surviving_contractions,
     snap_to_tick,
     calculate_structural_stop,
     calculate_chase_ceiling,
+    SurvivingContraction,
     validate_proposal_targets,
 )
+from app.schemas.proposals import GeminiCandidateAssessment, GeminiExtraWindow
 
 
 class TestP10Geometry(unittest.TestCase):
@@ -367,11 +374,18 @@ class TestPivotResistanceZones(unittest.TestCase):
             ("2026-08-17", 373.55, 373.55, 363.8, 364.9, 1019177),
             ("2026-08-18", 363.7, 372.95, 361.8, 371.75, 609731),
         ]
-        # Pad to 60 candles with earlier drift
-        prefix = [
-            (f"2026-05-{i:02d}", 300 + i, 305 + i, 298 + i, 302 + i, 500000)
-            for i in range(1, 26)
-        ]
+        needed = 126 - len(raw_data)
+        first_date = dt.date.fromisoformat(raw_data[0][0])
+        first_bar = raw_data[0]
+        prefix = []
+        cursor = first_date - dt.timedelta(days=1)
+        while len(prefix) < needed:
+            if cursor.weekday() < 5:
+                prefix.append(
+                    (cursor.isoformat(), first_bar[1], first_bar[2], first_bar[3], first_bar[4], first_bar[5])
+                )
+            cursor -= dt.timedelta(days=1)
+        prefix.reverse()
         candles = [
             CandleData(open=o, high=h, low=l, close=c, volume=v, date=d)
             for d, o, h, l, c, v in prefix + raw_data
@@ -390,5 +404,240 @@ class TestPivotResistanceZones(unittest.TestCase):
         self.assertEqual(geom.resistance, Decimal("398.65"))
 
 
+def _wave(
+    index: int,
+    high_date: str,
+    high: str,
+    low_date: str,
+    low: str,
+    vol20: str = "1.00",
+) -> VcpContractionWave:
+    high_p = Decimal(high)
+    low_p = Decimal(low)
+    return VcpContractionWave(
+        index=index,
+        high_date=high_date,
+        high_price=high_p,
+        low_date=low_date,
+        low_price=low_p,
+        depth_pct=((high_p - low_p) / high_p) * Decimal("100"),
+        vol_adv20=Decimal(vol20),
+        vol_adv50=Decimal("1.00"),
+    )
+
+
+def _assess(*rows: tuple) -> list[GeminiCandidateAssessment]:
+    out: list[GeminiCandidateAssessment] = []
+    for row in rows:
+        index, action = row[0], row[1]
+        merge = row[2] if len(row) > 2 else None
+        out.append(
+            GeminiCandidateAssessment(
+                index=index,
+                action=action,
+                merge_with_index=merge,
+                note=f"{action} {index}",
+            )
+        )
+    return out
+
+
+class TestSurvivorResolution(unittest.TestCase):
+    def setUp(self) -> None:
+        start = dt.date(2026, 1, 5)
+        self.candles = [
+            CandleData(
+                open=100 + i * 0.1,
+                high=101 + i * 0.1,
+                low=99 + i * 0.1,
+                close=100.5 + i * 0.1,
+                volume=100000,
+                date=(start + dt.timedelta(days=i)).isoformat(),
+            )
+            for i in range(252)
+        ]
+        self.c1 = _wave(1, self.candles[-80].date, "120.00", self.candles[-70].date, "100.00", "1.20")
+        self.c2 = _wave(2, self.candles[-40].date, "118.00", self.candles[-30].date, "108.00", "0.90")
+        self.c3 = _wave(3, self.candles[-15].date, "124.00", self.candles[-8].date, "116.00", "0.60")
+
+    def test_merge_group_counts_as_one_survivor(self) -> None:
+        resolution = resolve_surviving_contractions(
+            candidates=(self.c1, self.c2, self.c3),
+            assessments=_assess((1, "confirm"), (2, "merge", 3), (3, "confirm")),
+            extra_windows=(),
+            candles=self.candles,
+        )
+        self.assertTrue(resolution.is_valid, resolution.rejection_reason)
+        self.assertEqual(resolution.python_count, 3)
+        self.assertEqual(resolution.llm_count, 2)
+        sources = {item.source for item in resolution.survivors}
+        self.assertIn("merge", sources)
+        self.assertIn("confirm", sources)
+
+    def test_reject_last_candidate_shifts_final_pivot_window(self) -> None:
+        resolution = resolve_surviving_contractions(
+            candidates=(self.c1, self.c2, self.c3),
+            assessments=_assess((1, "confirm"), (2, "confirm"), (3, "reject")),
+            extra_windows=(),
+            candles=self.candles,
+        )
+        self.assertTrue(resolution.is_valid, resolution.rejection_reason)
+        self.assertEqual(resolution.llm_count, 2)
+        final = resolution.final_contraction
+        self.assertIsNotNone(final)
+        self.assertEqual(final.high_price, Decimal("118.00"))
+        self.assertNotEqual(final.high_price, self.c3.high_price)
+
+    def test_merge_into_reject_is_invalid(self) -> None:
+        resolution = resolve_surviving_contractions(
+            candidates=(self.c1, self.c2),
+            assessments=_assess((1, "merge", 2), (2, "reject")),
+            extra_windows=(),
+            candles=self.candles,
+        )
+        self.assertFalse(resolution.is_valid)
+        self.assertIn("reject", resolution.rejection_reason)
+
+    def test_extra_window_can_satisfy_two_survivor_gate(self) -> None:
+        high_candle = self.candles[-40]
+        low_candle = self.candles[-39]
+        extra = GeminiExtraWindow(
+            high_start=dt.date.fromisoformat(high_candle.date),
+            high_end=dt.date.fromisoformat(high_candle.date),
+            low_start=dt.date.fromisoformat(low_candle.date),
+            low_end=dt.date.fromisoformat(low_candle.date),
+            note="Missed second pullback in the mid window.",
+        )
+        resolution = resolve_surviving_contractions(
+            candidates=(self.c1,),
+            assessments=_assess((1, "confirm")),
+            extra_windows=(extra,),
+            candles=self.candles,
+        )
+        self.assertTrue(resolution.is_valid, resolution.rejection_reason)
+        self.assertEqual(resolution.python_count, 1)
+        self.assertEqual(resolution.llm_count, 2)
+        self.assertEqual(resolution.survivors[-1].source, "extra")
+
+    def test_depth_tolerance_allows_half_point_regression(self) -> None:
+        first = SurvivingContraction(
+            index=1,
+            high_date="2026-06-01",
+            high_price=Decimal("100"),
+            low_date="2026-06-10",
+            low_price=Decimal("90"),
+            depth_pct=Decimal("10.0"),
+            vol_adv20=Decimal("1.2"),
+            vol_adv50=Decimal("1.0"),
+            source="confirm",
+            member_indices=(1,),
+        )
+        second = SurvivingContraction(
+            index=2,
+            high_date="2026-07-01",
+            high_price=Decimal("100"),
+            low_date="2026-07-08",
+            low_price=Decimal("89.60"),
+            depth_pct=Decimal("10.4"),
+            vol_adv20=Decimal("0.8"),
+            vol_adv50=Decimal("0.9"),
+            source="confirm",
+            member_indices=(2,),
+        )
+        self.assertTrue(depths_non_increasing((first, second)))
+        too_deep = SurvivingContraction(
+            index=2,
+            high_date="2026-07-01",
+            high_price=Decimal("100"),
+            low_date="2026-07-08",
+            low_price=Decimal("89.40"),
+            depth_pct=Decimal("10.6"),
+            vol_adv20=Decimal("0.8"),
+            vol_adv50=Decimal("0.9"),
+            source="confirm",
+            member_indices=(2,),
+        )
+        self.assertFalse(depths_non_increasing((first, too_deep)))
+
+
+class TestPythonOwnedLevels(unittest.TestCase):
+    def test_targets_lock_at_planned_entry_not_chase(self) -> None:
+        planned_entry = Decimal("100.20")
+        stop = Decimal("94.00")
+        assigned = assign_frozen_targets(
+            planned_entry=planned_entry,
+            initial_stop=stop,
+            pivot=Decimal("100.00"),
+            base_high=Decimal("120.00"),
+            deepest_low=Decimal("90.00"),
+        )
+        self.assertIsNotNone(assigned)
+        t1, t2, t3, slots = assigned
+        self.assertEqual(slots[0], "floor")
+        self.assertLess(t1, t2)
+        self.assertLess(t2, t3)
+        risk = planned_entry - stop
+        self.assertGreaterEqual(t1, planned_entry + (Decimal("2") * risk) - Decimal("0.05"))
+
+    def test_construct_python_owned_levels_from_last_survivor(self) -> None:
+        start = dt.date(2026, 1, 5)
+        candles = [
+            CandleData(
+                open=100,
+                high=101,
+                low=99,
+                close=100.5,
+                volume=100000,
+                date=(start + dt.timedelta(days=i)).isoformat(),
+            )
+            for i in range(252)
+        ]
+        candles[-80] = CandleData(100, 120, 99, 110, 100000, candles[-80].date)
+        candles[-70] = CandleData(100, 101, 100, 100.5, 80000, candles[-70].date)
+        candles[-20] = CandleData(110, 124, 110, 120, 90000, candles[-20].date)
+        candles[-10] = CandleData(118, 119, 116, 117, 50000, candles[-10].date)
+        survivors = (
+            SurvivingContraction(
+                index=1,
+                high_date=candles[-80].date,
+                high_price=Decimal("120.00"),
+                low_date=candles[-70].date,
+                low_price=Decimal("100.00"),
+                depth_pct=Decimal("16.67"),
+                vol_adv20=Decimal("1.20"),
+                vol_adv50=Decimal("1.10"),
+                source="confirm",
+                member_indices=(1,),
+            ),
+            SurvivingContraction(
+                index=2,
+                high_date=candles[-20].date,
+                high_price=Decimal("124.00"),
+                low_date=candles[-10].date,
+                low_price=Decimal("116.00"),
+                depth_pct=Decimal("6.45"),
+                vol_adv20=Decimal("0.70"),
+                vol_adv50=Decimal("0.80"),
+                source="confirm",
+                member_indices=(2,),
+            ),
+        )
+        atr14 = compute_atr14(candles)
+        geom = construct_python_owned_levels(
+            survivors=survivors,
+            candles=candles,
+            atr14=atr14,
+        )
+        self.assertTrue(geom.is_valid, geom.rejection_reason)
+        self.assertEqual(geom.pivot_price, Decimal("124.00"))
+        self.assertIsNotNone(geom.planned_entry)
+        self.assertGreater(geom.planned_entry, geom.pivot_price)
+        self.assertEqual(geom.chase_ceiling, calculate_chase_ceiling(geom.planned_entry, geom.initial_stop)[0])
+        self.assertEqual(len(geom.target_slots), 3)
+        self.assertLess(geom.t1, geom.t2)
+        self.assertLess(geom.t2, geom.t3)
+
+
 if __name__ == "__main__":
     unittest.main()
+

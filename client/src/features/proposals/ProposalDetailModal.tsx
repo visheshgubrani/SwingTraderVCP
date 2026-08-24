@@ -44,10 +44,10 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
   const t1R = formatR(geometry.t1_r)
   const t2R = formatR(geometry.t2_r)
   const t3R = formatR(geometry.t3_r)
-  const baseCeiling = asFiniteNumber(geometry.base_chase_ceiling)
+  const targetSlots = geometry.target_slots ?? {}
+  const plannedEntry = asFiniteNumber(geometry.planned_entry)
   const lockedCeiling = Number(activeProposal.chase_ceiling)
-  const ceilingTightened =
-    baseCeiling != null && Number.isFinite(lockedCeiling) && baseCeiling > lockedCeiling
+  const mismatchBanner = Boolean(activeProposal.gemini_evidence?.mismatch_banner)
 
   const isPending = activeProposal.status === "pending_approval"
   const isApproved = activeProposal.status === "approved"
@@ -108,14 +108,11 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
           {/* Key Price Levels */}
           <div className="grid grid-cols-3 gap-2">
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
-              <div className="text-[10px] text-muted-foreground uppercase">Pivot Entry</div>
+              <div className="text-[10px] text-muted-foreground uppercase">Pivot / Planned Entry</div>
               <div className="text-sm font-bold text-foreground">₹{Number(activeProposal.pivot_price).toFixed(2)}</div>
-              <div className="text-[9px] text-muted-foreground">Ceiling: ₹{lockedCeiling.toFixed(2)}</div>
-              {ceilingTightened && baseCeiling != null && (
-                <div className="text-[9px] text-amber-400">
-                  Tightened from ₹{baseCeiling.toFixed(2)} to keep T1 ≥ 1R
-                </div>
-              )}
+              <div className="text-[9px] text-muted-foreground">
+                Planned ₹{(plannedEntry ?? Number(activeProposal.pivot_price)).toFixed(2)} · Ceiling ₹{lockedCeiling.toFixed(2)}
+              </div>
             </div>
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
               <div className="text-[10px] text-muted-foreground uppercase">Structural Stop</div>
@@ -125,7 +122,7 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
               <div className="text-[10px] text-muted-foreground uppercase">Target 1</div>
               <div className="text-sm font-bold text-emerald-400">₹{Number(activeProposal.t1).toFixed(2)}</div>
-              <div className="text-[9px] text-muted-foreground">{t1R ? `${t1R} at ceiling` : "Structural objective"}</div>
+              <div className="text-[9px] text-muted-foreground">{targetSlots.t1 ? `${targetSlots.t1}${t1R ? ` · ${t1R}` : ""}` : t1R ?? "≥2R floor"}</div>
             </div>
           </div>
 
@@ -133,7 +130,7 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
               <div className="text-[10px] text-muted-foreground uppercase">Target 2</div>
               <div className="text-sm font-bold text-foreground">₹{Number(activeProposal.t2).toFixed(2)}</div>
-              <div className="text-[9px] text-muted-foreground">{t2R ?? "Structural objective"}</div>
+              <div className="text-[9px] text-muted-foreground">{targetSlots.t2 ? `${targetSlots.t2}${t2R ? ` · ${t2R}` : ""}` : t2R ?? "measured / stretch"}</div>
               {geometry.t2_below_2r && (
                 <div className="text-[9px] text-amber-400">Below 2R — audit flag, not a reject</div>
               )}
@@ -141,7 +138,7 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
               <div className="text-[10px] text-muted-foreground uppercase">Target 3</div>
               <div className="text-sm font-bold text-foreground">₹{Number(activeProposal.t3).toFixed(2)}</div>
-              <div className="text-[9px] text-muted-foreground">{t3R ?? "Structural objective"}</div>
+              <div className="text-[9px] text-muted-foreground">{targetSlots.t3 ? `${targetSlots.t3}${t3R ? ` · ${t3R}` : ""}` : t3R ?? "stretch / 3R"}</div>
               {geometry.t3_below_3r && (
                 <div className="text-[9px] text-amber-400">Below 3R — audit flag, not a reject</div>
               )}
@@ -154,10 +151,16 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
               <img className="w-full rounded-lg border border-border/60 bg-black" src={`/api/v1/automation/proposals/${activeProposal.id}/charts/context`} alt={`${activeProposal.symbol} frozen context chart`} />
             </div>
             <div>
-              <div className="mb-1 text-[10px] uppercase text-muted-foreground">Deterministically annotated 126-session detail</div>
-              <img className="w-full rounded-lg border border-border/60 bg-black" src={`/api/v1/automation/proposals/${activeProposal.id}/charts/detail`} alt={`${activeProposal.symbol} annotated detail chart`} />
+              <div className="mb-1 text-[10px] uppercase text-muted-foreground">126-session LLM chart (no overlays)</div>
+              <img className="w-full rounded-lg border border-border/60 bg-black" src={`/api/v1/automation/proposals/${activeProposal.id}/charts/detail`} alt={`${activeProposal.symbol} 126-session LLM chart`} />
             </div>
           </div>
+
+          {mismatchBanner && (
+            <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-[11px] text-rose-200">
+              Python found {activeProposal.gemini_evidence?.python_count ?? "?"} candidate(s) and Gemini resolved {activeProposal.gemini_evidence?.llm_count ?? "?"} survivor(s). Template is forced to single.
+            </div>
+          )}
 
           {/* AI Evidence & Quality */}
           <div className="rounded-lg border border-border/60 bg-muted/10 p-3 flex flex-col gap-2">
@@ -165,10 +168,12 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
               <span className="font-semibold text-foreground flex items-center gap-1.5">
                 <TargetIcon className="h-3.5 w-3.5 text-primary" /> Gemini VCP Assessment
               </span>
-              <div className="flex gap-1.5 text-[10px]">
-                <span className="text-muted-foreground">Prior trend: <strong className="text-foreground">{activeProposal.gemini_evidence?.prior_uptrend ?? activeProposal.gemini_evidence?.base_tightness ?? "—"}</strong></span>
+              <div className="flex flex-wrap gap-1.5 text-[10px]">
+                <span className="text-muted-foreground">Class: <strong className="text-foreground">{activeProposal.gemini_evidence?.classification ?? "—"}</strong></span>
                 <span>•</span>
-                <span className="text-muted-foreground">Volume dry-up: <strong className="text-foreground">{activeProposal.gemini_evidence?.volume_dry_up ?? activeProposal.gemini_evidence?.dry_up_quality ?? "—"}</strong></span>
+                <span className="text-muted-foreground">Dry-up: <strong className="text-foreground">{activeProposal.gemini_evidence?.volume_dry_up ?? "—"}</strong></span>
+                <span>•</span>
+                <span className="text-muted-foreground">Tightening: <strong className="text-foreground">{activeProposal.gemini_evidence?.progressive_tightening ?? "—"}</strong></span>
               </div>
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">

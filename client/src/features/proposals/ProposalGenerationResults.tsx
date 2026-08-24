@@ -91,7 +91,7 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
         <div className="divide-y divide-border/50">
           {data.results.map((attempt) => {
             const expanded = expandedId === attempt.id
-            const verdict = attempt.structured_output?.verdict
+            const classification = attempt.structured_output?.classification ?? attempt.structured_output?.verdict
             return (
               <div key={attempt.id} className="px-3 py-2.5">
                 <div className="flex flex-wrap items-center gap-2">
@@ -100,7 +100,7 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
                     {attempt.symbol}
                   </span>
                   {statusBadge(attempt)}
-                  {verdict ? <Badge variant="outline">Gemini {verdict}</Badge> : null}
+                  {classification ? <Badge variant="outline">Gemini {String(classification)}</Badge> : null}
                   <span className="ml-auto text-[10px] text-muted-foreground">
                     attempt {attempt.attempt_number}
                   </span>

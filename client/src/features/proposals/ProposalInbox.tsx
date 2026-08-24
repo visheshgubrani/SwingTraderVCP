@@ -31,6 +31,7 @@ import {
   useProposalBatch,
   useProposalBatches,
   useTriggerProposalBatch,
+  useFormingPatterns,
 } from "./api"
 import { MarketContextPanel } from "./MarketContextPanel"
 import { ProposalGenerationResults } from "./ProposalGenerationResults"
@@ -68,6 +69,7 @@ export function ProposalInbox() {
 
   const isRejectedTab = statusFilter === "system_rejected"
   const isEntryExpiredTab = statusFilter === "entry_expired"
+  const isFormingTab = statusFilter === "forming"
 
   const proposalQueryParams = useMemo(() => ({
     symbol: symbolSearch.trim() || null,
@@ -76,7 +78,7 @@ export function ProposalInbox() {
   }), [symbolSearch, selectedRunId, isEntryExpiredTab])
 
   const { data: rawProposals = [], isLoading: isProposalsLoading, error: proposalsError } = useTradeProposals(
-    isRejectedTab ? "all" : isEntryExpiredTab ? "approved" : statusFilter,
+    isRejectedTab || isFormingTab ? "all" : isEntryExpiredTab ? "approved" : statusFilter,
     proposalQueryParams,
   )
 
@@ -86,11 +88,19 @@ export function ProposalInbox() {
     automationRunId: selectedRunId !== "all" && selectedRunId !== "latest" ? selectedRunId : null,
   })
 
+  const { data: rawForming = [], isLoading: isFormingLoading, error: formingError } = useFormingPatterns("watching")
+
   const proposals = useMemo(() => {
     if (!symbolSearch.trim()) return rawProposals
     const query = symbolSearch.trim().toUpperCase()
     return rawProposals.filter((p) => p.symbol.toUpperCase().includes(query))
   }, [rawProposals, symbolSearch])
+
+  const formingPatterns = useMemo(() => {
+    if (!symbolSearch.trim()) return rawForming
+    const query = symbolSearch.trim().toUpperCase()
+    return rawForming.filter((row) => row.symbol.toUpperCase().includes(query))
+  }, [rawForming, symbolSearch])
 
   const rejectedAttempts = useMemo(() => {
     if (!symbolSearch.trim()) return rawRejected
@@ -334,6 +344,7 @@ export function ProposalInbox() {
               {[
                 { key: "pending_approval", label: "Pending Approval" },
                 { key: "approved", label: "Approved" },
+                { key: "forming", label: "Forming Watch" },
                 { key: "entry_expired", label: "Entry Expired" },
                 { key: "system_rejected", label: "Rejected by System" },
                 { key: "rejected", label: "Rejected by Operator" },
@@ -350,6 +361,11 @@ export function ProposalInbox() {
                   }`}
                 >
                   {tab.label}
+                  {tab.key === "forming" && formingPatterns.length > 0 && (
+                    <span className="ml-1.5 rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[9px] text-amber-300 font-bold">
+                      {formingPatterns.length}
+                    </span>
+                  )}
                   {tab.key === "system_rejected" && rejectedAttempts.length > 0 && (
                     <span className="ml-1.5 rounded-full bg-rose-500/20 px-1.5 py-0.5 text-[9px] text-rose-300 font-bold">
                       {rejectedAttempts.length}
@@ -372,8 +388,61 @@ export function ProposalInbox() {
             </div>
           </div>
 
-          {/* REJECTED BY SYSTEM TABLE */}
-          {isRejectedTab ? (
+          {/* FORMING WATCH TABLE */}
+          {isFormingTab ? (
+            isFormingLoading ? (
+              <div className="flex h-48 items-center justify-center rounded-lg border border-border/60 bg-card text-muted-foreground">
+                <div className="flex flex-col items-center gap-2">
+                  <Spinner className="h-5 w-5 text-primary" />
+                  <span>Loading forming-pattern watches…</span>
+                </div>
+              </div>
+            ) : formingError ? (
+              <div className="flex h-48 items-center justify-center rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-400">
+                Error loading forming-pattern watches
+              </div>
+            ) : formingPatterns.length === 0 ? (
+              <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-lg border border-border/60 bg-card/40 text-muted-foreground p-4 text-center">
+                <AlertCircleIcon className="h-8 w-8 text-muted-foreground/40" />
+                <p>
+                  {symbolSearch
+                    ? `No forming watches matching symbol "${symbolSearch}".`
+                    : "No forming VCP watches. Gemini forming classifications appear here until they complete, break down, or expire after 10 NSE sessions."}
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-border/60 bg-card overflow-hidden shadow-sm">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-border/60 bg-muted/30 text-[10px] text-muted-foreground uppercase tracking-wider">
+                      <th className="py-2.5 px-3 font-semibold">Symbol</th>
+                      <th className="py-2.5 px-3 font-semibold">State</th>
+                      <th className="py-2.5 px-3 font-semibold">First Seen</th>
+                      <th className="py-2.5 px-3 font-semibold">Last As-Of</th>
+                      <th className="py-2.5 px-3 font-semibold">Next Check</th>
+                      <th className="py-2.5 px-3 font-semibold">Python Candidates</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/40 text-[11px]">
+                    {formingPatterns.map((row) => (
+                      <tr key={row.id} className="hover:bg-muted/20 transition-colors">
+                        <td className="py-2.5 px-3 font-bold text-foreground">{row.symbol}</td>
+                        <td className="py-2.5 px-3">
+                          <Badge variant="outline" className="text-[10px] text-amber-300 border-amber-500/30">
+                            {row.forming_state.replaceAll("_", " ").toUpperCase()}
+                          </Badge>
+                        </td>
+                        <td className="py-2.5 px-3 text-muted-foreground">{row.first_seen_as_of}</td>
+                        <td className="py-2.5 px-3 text-muted-foreground">{row.last_as_of}</td>
+                        <td className="py-2.5 px-3 text-muted-foreground">{row.next_check_date}</td>
+                        <td className="py-2.5 px-3 text-muted-foreground">{row.python_candidates?.length ?? 0}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          ) : isRejectedTab ? (
             isRejectedLoading ? (
               <div className="flex h-48 items-center justify-center rounded-lg border border-border/60 bg-card text-muted-foreground">
                 <div className="flex flex-col items-center gap-2">
@@ -400,9 +469,8 @@ export function ProposalInbox() {
                   <thead>
                     <tr className="border-b border-border/60 bg-muted/30 text-[10px] text-muted-foreground uppercase tracking-wider">
                       <th className="py-2.5 px-3 font-semibold">Symbol</th>
-                      <th className="py-2.5 px-3 font-semibold">Gemini Verdict</th>
-                      <th className="py-2.5 px-3 font-semibold">Proposed Pivot</th>
-                      <th className="py-2.5 px-3 font-semibold">Proposed SL</th>
+                      <th className="py-2.5 px-3 font-semibold">Classification</th>
+                      <th className="py-2.5 px-3 font-semibold">Python / LLM</th>
                       <th className="py-2.5 px-3 font-semibold">System Rejection Reason</th>
                       <th className="py-2.5 px-3 font-semibold">Date</th>
                       <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
@@ -411,8 +479,7 @@ export function ProposalInbox() {
                   <tbody className="divide-y divide-border/40 text-[11px]">
                     {rejectedAttempts.map((attempt) => {
                       const structured = attempt.structured_output ?? {}
-                      const pivot = structured.pivot_price != null ? Number(structured.pivot_price) : null
-                      const verdict = structured.verdict ?? attempt.status
+                      const classification = structured.classification ?? structured.verdict ?? attempt.status
 
                       return (
                         <tr
@@ -429,19 +496,14 @@ export function ProposalInbox() {
                           <td className="py-2.5 px-3">
                             <div className="flex items-center gap-1.5">
                               <Badge variant="outline" className="text-[10px]">
-                                {String(verdict).toUpperCase()}
+                                {String(classification).toUpperCase()}
                               </Badge>
                             </div>
                           </td>
-                          <td className="py-2.5 px-3 font-semibold text-foreground">
-                            {pivot != null ? `₹${pivot.toFixed(2)}` : "-"}
-                          </td>
-                          <td className="py-2.5 px-3 text-rose-400">
-                            {attempt.error_type === "proposal_geometry_invalid" ? (
-                              <span className="font-semibold">{attempt.error_message?.split(";")[0] ?? "Invalid SL"}</span>
-                            ) : (
-                              "-"
-                            )}
+                          <td className="py-2.5 px-3 text-muted-foreground">
+                            {structured.python_count != null || structured.llm_count != null
+                              ? `${structured.python_count ?? "—"} / ${structured.llm_count ?? "—"}`
+                              : "—"}
                           </td>
                           <td className="py-2.5 px-3 text-rose-300/90 max-w-xs truncate" title={attempt.error_message || ""}>
                             <span className="font-semibold text-rose-400">{attempt.error_type ?? "rejected"}:</span>{" "}

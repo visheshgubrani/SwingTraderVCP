@@ -57,12 +57,13 @@ the Fyers API. It is built for a single user, not a multi-tenant product.
 
 The core principle governing every design choice below:
 
-> Screening and trade-plan generation are automated. Gemini reads only the
-> chart pattern and returns a strict structured opinion. Deterministic Python
-> owns every money and risk decision. A human must approve or reject the
-> resulting immutable proposal before any entry can become eligible. Once
-> approved, entry, scale-in, SL, targets, trailing, and reconciliation are
-> automated.
+> Screening and trade-plan generation are automated. Python swing-detects
+> first and sends Gemini a chart plus a short candidate summary. Gemini
+> returns only qualitative judgments and window pointers — never a price,
+> stop, target, or template. Deterministic Python owns every money and risk
+> decision. A human must approve or reject the resulting immutable proposal
+> before any entry can become eligible. Once approved, entry, scale-in, SL,
+> targets, trailing, and reconciliation are automated.
 
 That boundary — automated proposal → **manual approval checkpoint** →
 deterministic execution/management — is the single most important invariant.
@@ -74,11 +75,12 @@ Mental model:
 
 ```
              AUTOMATED / NO MONEY                     HUMAN               AUTOMATED MONEY PATH
-[EOD → scanner → charts → Gemini pattern read → Python proposal] → [approve/reject] → [entry supervisor]
-                                                                                              │
-                                                                                              ▼
-                                                                                [execute → monitor → exit]
-                                                                                     + reconcile + journal
+[EOD → scanner → Python swings → chart+summary → Gemini audit → Python plan]
+        → [approve/reject] → [entry supervisor]
+                                      │
+                                      ▼
+                        [execute → monitor → exit]
+                             + reconcile + journal
 ```
 
 ---
@@ -98,7 +100,7 @@ Do not substitute these without an explicit instruction from the user.
 | Market data & orders | Fyers API (REST + WebSocket)                      | See §2.1 for which Fyers surfaces we use                                                                                                            |
 | Fundamentals         | Upstox Company Fundamentals API + official NSE corporate filings | Upstox remains primary; official NSE shareholding and integrated-filing XBRL are read-only risk enrichment for technical survivors only; never prices, sockets, or orders |
 | Fundamental LLM inference | OpenRouter (`openai/gpt-5.6-luna-pro`)      | Blind structured second opinion over normalized snapshots; Python's deterministic fit remains authoritative. No tools or money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
-| VCP vision inference | OpenRouter (`google/gemini-3.7-flash`)            | P10 proposal reader: serial chart-only pattern interpretation over standardized captures (no OHLCV table). Advisory screener VCP still sends frozen OHLCV. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
+| VCP vision inference | OpenRouter (`google/gemini-3.7-flash`)            | P10 proposal reader: serial audit of Python swing candidates over a standardized 126-session chart plus a short candidate summary (not a raw OHLCV table). Advisory screener VCP still sends frozen OHLCV. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
 
 ### 2.1 Locked Fyers / trading product decisions
 
@@ -109,7 +111,7 @@ Do not substitute these without an explicit instruction from the user.
 | Default product type  | **CNC**                                        | Multi-day swing. Per-trade override may be added later; default CNC   |
 | Order placement API   | **Async** (`/api/v3/orders/async`)             | Correlate via **Order WebSocket** (`id_fyers` → exchange order id)    |
 | Order rate limit      | Internal ≤ **10 OPS** token bucket             | Align with Fyers; queue bursts inside the engine                      |
-| AI / LLM              | **Pattern read only**                         | May return verdict, visual contractions, pivot, T1–T3, evidence, and an entry-template enum; never stop/quantity/risk/exposure/trailing arithmetic, confirmation, confidence scores, or execution |
+| AI / LLM              | **Pattern audit only**                        | May return classification, qualitative flags, candidate confirm/merge/reject actions, extra date-window pointers, evidence, and a display-only confidence score; never prices, stops, targets, templates, quantity/risk/exposure/trailing arithmetic, confirmation, or execution. Confidence may feed the Python template scorer only; it must not approve, arm, rank, or execute |
 | P7 fundamental source | **Upstox primary + official NSE filings enrichment** | Consolidated Upstox statements by default; known NSE pledge/leverage risks transparently reduce only the deterministic fundamental score; neither source is used for trading |
 
 **Explicit non-goals (v1 unless user reopens):**
@@ -208,11 +210,15 @@ money-path workers into the API process.
   order.**
 - **Proposal / VCP vision worker** — a dedicated `arq` process with
   concurrency `1`, separate from core cron/reconciliation work. For the
-  scanner's existing selected top 20 it freezes EOD OHLCV, renders a raw
-  252-session context chart and deterministically annotated 126-session detail
-  chart, calls Gemini serially with a strict schema, and lets deterministic
-  Python build or reject an immutable proposal. Every renderer, geometry,
-  prompt, input, provider attempt, and policy version is audited. The worker
+  scanner's existing selected top 20 it freezes EOD OHLCV, runs Python
+  swing detection on the same 126-session window the chart will show,
+  renders a clean 126-session chart (plus a 252-session context chart for
+  humans only), sends Gemini the 126-session image and a short candidate
+  summary, then lets deterministic Python resolve survivors and build or
+  reject an immutable proposal. Forming (`classification=forming`) names
+  are persisted to `p10_forming_patterns` and rechecked after the new
+  shortlist, at most 10 per batch. Every renderer, geometry, prompt,
+  input, provider attempt, and policy version is audited. The worker
   has a **45-minute hard batch budget** from shortlist freeze, a 90-second
   per-attempt timeout, at most one retry when budget remains, and must not
   start an attempt after the deadline. Remaining candidates become
@@ -264,7 +270,7 @@ without updating this file.
 | Execution engine service     | order_intents + paper-broker or Fyers async REST place/modify/cancel |
 | Position monitor worker      | positions / position_events; calls execution engine for exits   |
 | Screener / LLM jobs          | scan_runs, screening_results                                    |
-| Proposal worker              | frozen charts, vision attempts, immutable trade proposals       |
+| Proposal worker              | frozen charts, vision attempts, immutable trade proposals, `p10_forming_patterns` |
 | Entry supervisor             | triggers, legs, risk snapshots, allocation ledger; calls execution engine |
 | Reconcile / scheduler        | job_runs, reconciliation_*, broker-auth readiness, system_events |
 | Journal processor (arq)      | journal_entries, journal_fill_outbox, market_regime_snapshots     |
@@ -286,77 +292,136 @@ Nifty 500 → technical scan → existing selected top 20
         ├── Upstox fundamentals + official NSE risk enrichment (P7)
         │
         ▼
-freeze EOD OHLCV + deterministic Python geometry
+freeze 252 EOD OHLCV + Python swing detection on the 126-session window
         │
         ▼
-raw 252-session chart + annotated 126-session chart
+clean 126-session chart + short candidate summary (252 context is human-only)
         │
         ▼
-Gemini strict pattern read (no broker/account/money context)
+Gemini qualitative audit (no broker/account/money context, no prices)
         │
         ▼
-Python schema/geometry/R:R/risk-policy validation
+Python survivor resolution → prices/targets/template → numeric gates
         │
-        ▼
-immutable proposal → human approve/reject
+        ├── forming → p10_forming_patterns (no pivot/entry/target)
+        ├── numeric-gate fail or not_vcp → audited non-proposal
+        └── valid + gates pass → immutable proposal → human approve/reject
 ```
 
-The proposal worker never places an order. Gemini output is one audited input;
-Python is authoritative for proposal validity and every monetary rule.
+The proposal worker never places an order. Gemini output is one audited
+qualitative input; Python is authoritative for survivor windows, proposal
+validity, and every monetary rule. `classification=valid` is necessary but
+not sufficient — independent numeric gates may still produce a non-proposal.
 
 ### 5.1 Standardized proposal charts and geometry
 
-- Freeze the selected candidate's EOD OHLCV and `source_hash` before rendering
-  or inference. Reuse is allowed only when source, geometry, renderer, prompt,
-  schema, model, and risk-policy version hashes all match. Frozen OHLCV is for
-  charts, `source_hash`, ATR, stop, and pivot snap — it is **not** sent to Gemini.
+- Freeze the selected candidate's EOD OHLCV (252 sessions) and `source_hash`
+  before rendering or inference. Reuse is allowed only when source, geometry,
+  renderer, prompt, schema, model, and risk-policy version hashes all match.
+  Frozen OHLCV is for charts, `source_hash`, ATR, SMA200, 52-week high, stop,
+  and pivot snap. Gemini does **not** receive a raw OHLCV table.
 - Render two fixed 1280×720, log-price PNGs using pinned
-  `matplotlib`/`mplfinance` Agg versions: a raw 252-session context chart and an
-  annotated 126-session detail chart. Fix colors, fonts, DPI, candle/volume
-  layout, EMA21, SMA50/150/200, axes, margins, and encoding.
-- Python derives candidate contraction geometry using ATR14, dated extrema,
-  and a `0.5×ATR14` anchor-merge tolerance. Gemini reads the charts only and
-  may not rewrite the frozen OHLCV.
-- Missing/stale candles, ungrounded pivot, hash/render mismatch, invalid
-  schema, provider failure, or timeout produces an audited non-proposal state.
+  `matplotlib`/`mplfinance` Agg versions. The **LLM payload is the 126-session
+  chart only** (EMA21, SMA50/150/200 computed on the 252 freeze and plotted on
+  the last 126; volume pane; **no contraction overlays**). The 252-session
+  context chart is for the human review UI and is not sent to Gemini. Fix
+  colors, fonts, DPI, candle/volume layout, MAs, axes, margins, and encoding.
+- Python swing-detects first on the **same 126-session window** the chart
+  shows (fractal k=2). Each candidate includes exact high/low dates, `%`
+  depth, and volume vs ADV20/ADV50. Gemini receives that short text summary
+  with the 126-session image and may confirm, merge, reject, or add extra
+  date-window pointers. It may not rewrite the frozen OHLCV or emit prices.
+- Missing/stale candles, failed survivor resolution, hash/render mismatch,
+  invalid schema, provider failure, numeric-gate failure, or timeout produces
+  an audited non-proposal state.
 
 ### 5.2 Gemini contract
 
 Gemini must return strict JSON (`additionalProperties: false`) containing only:
 
-- `verdict`: `valid | partial | invalid`
-- `prior_uptrend` / `volume_dry_up`: `yes | no`, each with a short note
-- 1–6 visual `contractions` (index, approximate `%` depth, visual high/low;
-  no session dates)
-- absolute `pivot_price` and exactly three absolute targets `t1`, `t2`, `t3`
-- `entry_template`:
-  `single | two_leg | two_leg_staged | three_leg_front | three_leg_balanced`
+- `classification`: `valid | forming | not_vcp`
+- `forming_state`: `developing | breaking_down | null` (required when `forming`)
+- `progressive_tightening`: `yes | no`
+- `volume_dry_up`: `clearly | somewhat | not_really`
+- `base_quality`: `price_action` (`orderly | choppy`),
+  `climax_or_gap_violation` (`yes | no`), `stage2_context` (`yes | no`)
+- `candidate_assessments`: exactly one row per Python candidate (`index`,
+  `action` `confirm | merge | reject`, optional note). `merge_with_index` is
+  **required** when `action=merge` and forbidden otherwise. Merging into a
+  `reject` row is a validation failure, not a silent skip.
+- `extra_windows`: optional date-range pointers for contractions Python
+  missed (`high_start`/`high_end`, `low_start`/`low_end`) — no prices
+- `confidence`: integer 0–100 (display + template-scorer input only)
 - `red_flags` and a concise `evidence_summary`
 
-The schema must not contain a stop, quantity, capital, monetary risk, position
-or sector exposure, daily-loss, add-size, target-size, trailing, confidence, or
-dated OHLCV-grounded anchor field. Do not persist or display provider
-`reasoning_details`. Only `verdict=valid` with `prior_uptrend=yes`,
-`volume_dry_up=yes`, and 2–6 strictly decreasing contraction depths may
-proceed; Python then snaps the visual pivot to frozen geometry.
+The schema must not contain a pivot, stop, target, entry, quantity, capital,
+monetary risk, position or sector exposure, daily-loss, add-size,
+target-size, trailing, template, or a free `contraction_count`. Do not
+persist or display provider `reasoning_details`. Python derives `llm_count`
+from survivors after resolution; that derived count is the only LLM-side
+count used by disagreement and template scoring.
+
+Survivor resolution (authoritative, before any price):
+
+1. Start from Python candidates indexed as sent to Gemini.
+2. Drop every `reject`.
+3. Fold `merge` rows transitively with `merge_with_index` into one window per
+   group: snapped high = max high in the group, snapped low = min low in the
+   group. The group counts as one survivor.
+4. Each `confirm` is one survivor, snapped to exact high/low in its window.
+5. Each `extra_windows` entry is one survivor, snapped inside the pointed
+   date ranges.
+6. `llm_count` = number of survivors. `python_count` remains the raw
+   detector count.
+7. Sort survivors by `high_date` then `low_date`.
+8. **Final contraction** = the last survivor in that sort. Pivot and stop
+   come from that window, including when Gemini rejected Python's last
+   candidate.
+
+`classification=valid` may proceed to price construction only when the
+numeric gates in §5.3 also pass. `forming` writes `p10_forming_patterns`
+and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
 
 ### 5.3 Deterministic proposal construction
 
-- Initial structural stop = final-contraction low minus `0.25×ATR14`, snapped
-  to the instrument tick. Reject stop distance above 8%.
-- Planned entry = pivot. The base chase ceiling is
-  `pivot + min(2% of pivot, 0.5 × (pivot - initial_stop))`, floored to tick.
-- Gemini's T1/T2/T3 are structural chart objectives. Python never repairs an
-  AI target.
-- Python may only shrink the chase ceiling so T1 still provides at least 1R
-  at the final ceiling: `max_entry_for_1R = (T1 + initial_stop) / 2`, then
-  `chase_ceiling = min(base_ceiling, floor_to_tick(max_entry_for_1R))`, never
-  below pivot. Reject only if even pivot cannot achieve 1R to T1, or if
-  prices fail tick or order checks
-  (`pivot <= chase_ceiling < T1 < T2 < T3`).
-- Persist T1/T2/T3 R multiples at the final chase ceiling. T2 below 2R or T3
-  below 3R is an audit/quality flag, not a rejection.
-- Gemini selects the template; Python maps it to maximum approved-risk shares:
+- **Pivot** = snapped high of the final surviving contraction.
+- **Planned entry** = pivot plus `0.10×ATR14`, tick-snapped.
+- **Initial structural stop** = snapped low of that same final survivor
+  minus `0.25×ATR14`, tick-snapped. Reject stop distance above 8%. Flag
+  (do not reject) above 5%.
+- **`base_high`** = the highest high in the 126-session chart window on or
+  before the high date of the first surviving contraction, inclusive of
+  that high. Measured-move height = `base_high − deepest surviving low`.
+- Chase ceiling caps MPP overshoot from planned entry:
+  `entry + min(2% of entry, 0.5 × (entry − stop))`, floored to tick.
+  Order check: `entry <= chase_ceiling < T1 < T2 < T3`.
+- **Targets are computed by Python from planned entry and frozen on the
+  proposal.** The position monitor uses those frozen prices; do not
+  recompute targets from fill VWAP. Accept realized-RR drift inside the
+  chase band (a fill at `entry + 0.5R` yields 1.5R to locked T1). Invalid
+  fill still fires if VWAP exceeds chase or T1 provides less than 1R from
+  that VWAP.
+  - `R = entry − stop` (planned entry)
+  - `floor = entry + 2R`
+  - `measured = pivot + (base_high − deepest surviving low)`
+  - `stretch = entry + 3R`
+  - Drop any level below 2R from the exit ladder; T1 must stay ≥ 2R.
+  - Sort remaining unique tick-distinct prices ascending into T1/T2/T3.
+  - If only two levels remain, synthesize T3 = `entry + 4R` (`synthetic_4r`).
+  - Persist which formula landed in which slot.
+- 52-week high is informational (`near_52w_high`, `fresh_high_breakout`,
+  `level_to_watch`). It is never a rejection.
+- Independent numeric gates (any failure → audited non-proposal):
+  - `classification = valid`
+  - `llm_count` ≥ 2 (survivors, including extras, after merges)
+  - Survivor depths non-increasing with ≤ 0.5 percentage-point regression
+    allowed between consecutive survivors (from snapped data, not Gemini)
+  - `stage2_context = yes`
+  - `volume_dry_up` in `{clearly, somewhat}`
+  - last-survivor vol/ADV20 ≤ first-survivor vol/ADV20
+- Python selects the template from a versioned rules table
+  (`p10_template_score_v1`). Gemini does not pick a template. Static
+  template configs still map to maximum approved-risk shares:
 
 | Template | Risk by leg | Required relative volume |
 | --- | --- | --- |
@@ -364,6 +429,11 @@ proceed; Python then snaps the visual pivot to frozen geometry.
 | `three_leg_front` | 50% / 30% / 20% | 2.0× |
 | `two_leg` | 60% / 40% | 1.75× |
 | `three_leg_balanced` | 40% / 30% / 30% | 1.5× |
+
+V1 of the scorer emits only `single`, `two_leg`, or `three_leg_front`.
+`|llm_count − python_count| > 1` forces `single` and a review-UI mismatch
+banner; it does not auto-reject if survivors still pass the numeric gates.
+Confidence may be an input to this scorer only.
 
 These percentages divide the approved monetary risk budget, not raw shares or
 notional. The relative-volume ladder deliberately follows capital committed:
@@ -397,6 +467,26 @@ proof. No template may create more than three entry legs.
   immutable version and fresh approval. The active risk policy may tighten or
   block an approved proposal at execution, but may never enlarge it without
   reapproval.
+
+### 5.5 Forming-pattern watch
+
+`classification=forming` never produces a `trade_proposals` row and never
+computes pivot, entry, stop, or targets. The proposal worker upserts
+`p10_forming_patterns` (`watching | promoted | broken_down | expired`) and
+does not write LTP `watchlists`.
+
+- `promoted` — a later run produces `classification=valid` that passes
+  numeric gates and inserts a `trade_proposals` row.
+- `broken_down` — Gemini returns `forming_state=breaking_down` or
+  `classification=not_vcp`.
+- `expired` — 10 completed NSE sessions have elapsed since
+  `first_seen_as_of` without promotion, or the instrument is no longer in
+  the Nifty 500 screened universe at that EOD. Expired rows are terminal;
+  a later shortlist hit may start a fresh watch.
+
+Each proposal batch processes the new top-N shortlist first, then rechecks
+at most **10** `watching` rows (oldest `next_check_date` first) if wall-clock
+budget remains. Never start a forming attempt after the 45-minute deadline.
 
 ---
 
@@ -643,11 +733,16 @@ converted to proposals.
 
 The thin API exposes proposal-run status, proposal list/detail, one immutable
 approve/reject decision endpoint with expected version/hash, capacity-conflict
-list/decision, versioned risk-policy read/update, and entry-supervisor health.
-The proposal UI shows both source charts, scanner rank, Gemini evidence,
-deterministic validation, pivot/T1–T3, stop/risk rules, template, TTL, and live
-leg/correction/recovery state. It must not offer quantity, stop, target, or
-template edits for a scanner-sourced live proposal.
+list/decision, versioned risk-policy read/update, forming-watch list, and
+entry-supervisor health.
+The proposal UI shows both source charts (252 context for humans, 126-session
+chart sent to Gemini), scanner rank, Gemini qualitative evidence, Python
+candidate vs resolved-survivor lists, a mismatch banner when
+`|llm_count − python_count| > 1`, 52-week tags, formula-labeled T1/T2/T3,
+pivot/entry/stop/risk, template, TTL, and live leg/correction/recovery state.
+It must not offer quantity, stop, target, or template edits for a
+scanner-sourced live proposal. Confidence is display-only and must not
+auto-approve.
 
 ### 6.11 P9 deterministic market context
 
@@ -746,7 +841,7 @@ Do not build one “AI god service.” Split:
 | Surface            | Role                                              | Touches money? |
 | ------------------ | ------------------------------------------------- | -------------- |
 | Fundamental pass   | Python-authoritative fit plus blind AI pass/fail/uncertain second opinion | No          |
-| VCP proposal reader | Serial chart-only VCP verdict, visual contractions, pivot, T1–T3, and template enum; Python validates frozen geometry and owns money rules | No |
+| VCP proposal reader | Serial audit of Python swing candidates: classification, qualitative flags, window pointers, and display-only confidence; Python resolves survivors and owns every price, template, and money rule | No |
 | Journal coach      | Post-trade patterns/mistakes from closed trades   | No             |
 
 P9 market context is deliberately absent from this table: it is pure,
@@ -755,8 +850,10 @@ model, prompt, provider call, broker/account input, or order-side effect.
 
 Hard rule: **LLM/AI never confirms a proposal, reads broker funds/account
 state, computes money/risk/quantity/trailing rules, or calls the execution
-engine.** A Gemini `entry_template` is a pattern classification; deterministic
-Python owns the template's fixed risk allocation and all execution decisions.
+engine.** Gemini does not select an `entry_template`; a versioned Python
+rules table maps qualitative flags plus computed numbers onto the static
+template configs. Deterministic Python owns the template's fixed risk
+allocation and all execution decisions.
 Frontend AI SDK streaming is fine only for read-only context.
 
 ---
@@ -868,14 +965,22 @@ the phase table above is authoritative going forward.
 
 - Golden charts/source hashes: identical frozen inputs and versions generate
   identical packets; changed renderer/geometry versions cannot silently reuse.
-- Gemini schema: reject extra/missing fields, money fields, confidence,
-  dated OHLCV anchors, non-decreasing contraction depths, bad templates,
-  unordered targets, and T1 that cannot provide 1R even at pivot.
-- Pure rules: geometry, ATR/tick snapping, chase ceiling including R:R
-  shrinkage to preserve 1R to T1, T2/T3 below 2R/3R accepted with flags, all
-  template/relative-volume mappings, Hold/Base/EMA21, add expiry,
+- Gemini schema: reject extra/missing fields, money fields, pivot/targets/
+  template, and a free `contraction_count`; require `merge_with_index` on
+  merge; reject merge-into-reject; allow confidence and date-window pointers.
+- Survivor resolution: merge groups fold to one window; `llm_count` is
+  derived; extras count toward the ≥2 gate; rejecting Python's last candidate
+  shifts pivot/stop to the new latest survivor.
+- Pure rules: geometry, ATR/tick snapping, planned-entry buffers, chase
+  ceiling from entry (no AI-T1 shrink), T1–T3 built from floor/measured/
+  stretch with 2R floor and optional synthetic 4R, 0.5pp depth tolerance,
+  `base_high` inclusive definition, 52-week tags, template scorer v1
+  (disagreement forces `single`), Hold/Base/EMA21, add expiry,
   25/25/25/25 apportionment, stop ratchets, daily-loss accounting, P9
   market/sector classification, and the consecutive-stop circuit breaker.
+  Frozen proposal T1–T3 are unchanged by a chase fill.
+- Forming watch: no `trade_proposals` row and no geometry prices; expiry at
+  10 sessions or universe drop; batch cap of 10 rechecks.
 - Five-minute replay: first-15-minute exclusion, robust profile, two-bar
   confirmation, stale volume, reconciliation drift, lost capacity, and fresh
   re-trigger behavior.

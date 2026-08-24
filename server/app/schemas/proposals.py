@@ -13,56 +13,102 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.domain.p10_sizing import EntryTemplate
-
-
-VerdictType = Literal["valid", "partial", "invalid"]
+ClassificationType = Literal["valid", "forming", "not_vcp"]
+FormingStateType = Literal["developing", "breaking_down"]
 YesNoType = Literal["yes", "no"]
+VolumeDryUpType = Literal["clearly", "somewhat", "not_really"]
+PriceActionType = Literal["orderly", "choppy"]
+CandidateActionType = Literal["confirm", "merge", "reject"]
 DecisionType = Literal["approved", "rejected"]
 ProposalStatusType = Literal["pending_approval", "approved", "rejected", "expired_unapproved"]
 ProposalAttemptStatusType = Literal[
     "running", "valid", "invalid", "uncertain", "partial", "failed", "timed_out"
 ]
+FormingWatchStatusType = Literal["watching", "promoted", "broken_down", "expired"]
 
 
-class GeminiContractionLeg(BaseModel):
-    """One visual contraction wave estimated from the chart images."""
+class GeminiBaseQuality(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    price_action: PriceActionType
+    climax_or_gap_violation: YesNoType
+    stage2_context: YesNoType
+
+
+class GeminiCandidateAssessment(BaseModel):
+    """One audit row for a Python swing-detector candidate."""
 
     model_config = ConfigDict(extra="forbid")
 
     index: int = Field(ge=1, le=6)
-    depth_pct: Decimal = Field(gt=0, le=100)
-    high_price: Decimal = Field(gt=0)
-    low_price: Decimal = Field(gt=0)
+    action: CandidateActionType
+    merge_with_index: int | None = Field(default=None, ge=1, le=6)
+    note: str = Field(min_length=1, max_length=300)
 
     @model_validator(mode="after")
-    def validate_high_above_low(self) -> "GeminiContractionLeg":
-        if self.high_price <= self.low_price:
-            raise ValueError("high_price must be greater than low_price")
+    def validate_merge_target(self) -> "GeminiCandidateAssessment":
+        if self.action == "merge":
+            if self.merge_with_index is None:
+                raise ValueError("merge_with_index is required when action=merge")
+            if self.merge_with_index == self.index:
+                raise ValueError("merge_with_index must reference a different candidate")
+        elif self.merge_with_index is not None:
+            raise ValueError("merge_with_index is forbidden unless action=merge")
+        return self
+
+
+class GeminiExtraWindow(BaseModel):
+    """Date-range pointer for a contraction Python missed. No prices."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    high_start: dt.date
+    high_end: dt.date
+    low_start: dt.date
+    low_end: dt.date
+    note: str = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def validate_window_order(self) -> "GeminiExtraWindow":
+        if self.high_end < self.high_start:
+            raise ValueError("high_end must be on or after high_start")
+        if self.low_end < self.low_start:
+            raise ValueError("low_end must be on or after low_start")
         return self
 
 
 class GeminiVcpProposalOutput(BaseModel):
-    """Strict JSON schema for serial Gemini VCP pattern reading.
-    Contains NO money, stop, quantity, risk, confidence, or dated OHLCV fields.
+    """Strict JSON schema for serial Gemini VCP pattern audit.
+
+    Contains NO pivot, stop, target, entry, template, or free contraction_count.
+    Confidence is display/template-scorer input only.
     """
+
     model_config = ConfigDict(extra="forbid")
 
-    verdict: VerdictType
-    prior_uptrend: YesNoType
-    prior_uptrend_note: str = Field(min_length=1, max_length=300)
-    volume_dry_up: YesNoType
-    volume_dry_up_note: str = Field(min_length=1, max_length=300)
-    contractions: list[GeminiContractionLeg] = Field(min_length=1, max_length=6)
-    pivot_price: Decimal = Field(gt=0)
-    t1: Decimal = Field(gt=0)
-    t2: Decimal = Field(gt=0)
-    t3: Decimal = Field(gt=0)
-    entry_template: EntryTemplate
+    classification: ClassificationType
+    forming_state: FormingStateType | None = None
+    progressive_tightening: YesNoType
+    volume_dry_up: VolumeDryUpType
+    base_quality: GeminiBaseQuality
+    candidate_assessments: list[GeminiCandidateAssessment] = Field(
+        min_length=1,
+        max_length=6,
+    )
+    extra_windows: list[GeminiExtraWindow] = Field(default_factory=list, max_length=6)
+    confidence: int = Field(ge=0, le=100)
     red_flags: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
         max_length=8,
     )
     evidence_summary: str = Field(min_length=1, max_length=600)
+
+    @model_validator(mode="after")
+    def validate_forming_state(self) -> "GeminiVcpProposalOutput":
+        if self.classification == "forming" and self.forming_state is None:
+            raise ValueError("forming_state is required when classification=forming")
+        if self.classification != "forming" and self.forming_state is not None:
+            raise ValueError("forming_state is forbidden unless classification=forming")
+        return self
 
 
 class ProposalDecisionRequest(BaseModel):
@@ -71,13 +117,6 @@ class ProposalDecisionRequest(BaseModel):
     decision: DecisionType
     expected_proposal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     notes: str | None = Field(default=None, max_length=2000)
-    adjusted_pivot_price: Decimal | None = Field(default=None, gt=0)
-    adjusted_initial_stop: Decimal | None = Field(default=None, gt=0)
-    adjusted_t1: Decimal | None = Field(default=None, gt=0)
-    adjusted_t2: Decimal | None = Field(default=None, gt=0)
-    adjusted_t3: Decimal | None = Field(default=None, gt=0)
-    adjusted_entry_template: EntryTemplate | None = None
-    adjusted_leg2_price: Decimal | None = Field(default=None, gt=0)
 
 
 class TradeProposalDetailResponse(BaseModel):

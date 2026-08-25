@@ -641,14 +641,14 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             await session.commit()
             logger.info("Saved screening results to database.")
 
-        # P7 is intentionally a separate background job. Enqueue failures are
-        # recorded on the annotations and never turn a valid technical scan
-        # into a failed scan.
-        proposal_should_enqueue_now = not (
+        # P7 and P10 proposal batches are for personal scans only.
+        is_personal_scan = config.visibility == "personal"
+        proposal_should_enqueue_now = is_personal_scan and not (
             settings.p7_fundamental_pass_enabled and config.fundamental_limit > 0
         )
         if (
             survivors
+            and is_personal_scan
             and settings.p7_fundamental_pass_enabled
             and config.fundamental_limit > 0
         ):
@@ -662,7 +662,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     _job_id=f"fundamental-pass:{scan_run_id}",
                 )
             except Exception as enqueue_error:
-                proposal_should_enqueue_now = True
+                proposal_should_enqueue_now = is_personal_scan
                 logger.exception(
                     "Could not enqueue P7 for scan %s",
                     scan_run_id,
@@ -736,7 +736,12 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     )
                     await session.commit()
 
-        if survivors and proposal_should_enqueue_now and settings.proposal_automation_enabled:
+        if (
+            survivors
+            and is_personal_scan
+            and proposal_should_enqueue_now
+            and settings.proposal_automation_enabled
+        ):
             redis = ctx.get("redis")
             if redis is None:
                 logger.error("P10 proposal batch was not queued: arq Redis context unavailable")

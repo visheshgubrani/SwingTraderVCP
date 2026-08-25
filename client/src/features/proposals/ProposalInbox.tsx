@@ -108,9 +108,10 @@ export function ProposalInbox() {
     return rawRejected.filter((a) => a.symbol.toUpperCase().includes(query))
   }, [rawRejected, symbolSearch])
 
+  const [isPendingTrigger, setIsPendingTrigger] = useState(false)
   const supervisorActive = supervisorStatus?.status === "active"
   const batchRunning =
-    proposalBatch.data?.status === "running" || triggerBatch.isPending
+    proposalBatch.data?.status === "running" || triggerBatch.isPending || isPendingTrigger
   const batchMessage = useMemo(() => {
     if (triggerBatch.error instanceof ApiError || triggerBatch.error instanceof Error) {
       return triggerBatch.error.message
@@ -204,7 +205,14 @@ export function ProposalInbox() {
           <Button
             className="h-8 gap-1.5 font-bold uppercase"
             disabled={batchRunning || !latestScan || latestScan.status !== "succeeded"}
-            onClick={() => triggerBatch.mutate(latestScanId)}
+            onClick={() => {
+              setIsPendingTrigger(true)
+              triggerBatch.mutate(latestScanId, {
+                onSettled: () => {
+                  setTimeout(() => setIsPendingTrigger(false), 2000)
+                },
+              })
+            }}
             size="sm"
             type="button"
           >

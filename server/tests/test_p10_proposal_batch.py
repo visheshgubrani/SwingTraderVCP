@@ -178,3 +178,42 @@ class TestProposalBatchDeadline(unittest.IsolatedAsyncioTestCase):
             result = await run_single_proposal({}, str(uuid4()))
         self.assertEqual(result["status"], "no_candidates")
 
+    def test_proposal_worker_settings_has_max_tries_one_and_no_retry(self) -> None:
+        self.assertEqual(WorkerSettings.max_tries, 1)
+        self.assertFalse(WorkerSettings.retry_jobs)
+
+    async def test_auto_batch_skips_when_run_already_exists(self) -> None:
+        existing_run_id = uuid4()
+        scan_run_id = uuid4()
+
+        class FakeDedupeSession:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def execute(self, statement, params=None):
+                sql = str(statement)
+                if "SELECT enabled" in sql:
+                    return FakeResult(scalar=False)
+                if "FROM automation_runs" in sql:
+                    return FakeResult(rows=[{"id": existing_run_id, "status": "completed"}])
+                return FakeResult()
+
+            async def commit(self):
+                return None
+
+        with patch("app.workers.proposal_worker.async_session", FakeDedupeSession()):
+            result = await run_eod_proposal_batch(
+                {}, str(scan_run_id), limit=10, manual=False
+            )
+
+        self.assertEqual(result["status"], "already_exists")
+        self.assertEqual(result["scan_run_id"], str(scan_run_id))
+        self.assertEqual(result["automation_run_id"], str(existing_run_id))
+
+

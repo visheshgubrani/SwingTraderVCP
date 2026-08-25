@@ -440,7 +440,9 @@ async def process_proposal_candidate(
     tick_size = Decimal(str(candidate.tick_size))
     annotations = derive_chart_geometry(candles, tick_size=tick_size)
     candidate_summary = format_candidate_summary(annotations.contractions)
-    charts = render_proposal_charts(candles=candles, symbol=candidate.symbol)
+    charts = await asyncio.to_thread(
+        render_proposal_charts, candles=candles, symbol=candidate.symbol
+    )
     source_hash = compute_frozen_source_hash(candles)
 
     for attempt_number in range(1, settings.proposal_max_attempts + 1):
@@ -682,6 +684,36 @@ async def run_eod_proposal_batch(
     async with async_session() as session:
         if await _control_is_paused(session, "proposal_processing_paused"):
             return {"status": "paused", "scan_run_id": scan_run_id}
+
+        if not manual:
+            existing = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT id, status
+                        FROM automation_runs
+                        WHERE scan_run_id = :scan_run_id
+                          AND status IN ('running', 'completed')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"scan_run_id": scan_run_id},
+                )
+            ).mappings().one_or_none()
+            if existing is not None:
+                logger.info(
+                    "Automatic proposal batch for scan %s already exists (id=%s, status=%s); skipping duplicate",
+                    scan_run_id,
+                    existing["id"],
+                    existing["status"],
+                )
+                return {
+                    "status": "already_exists",
+                    "scan_run_id": scan_run_id,
+                    "automation_run_id": str(existing["id"]),
+                }
+
         result = await session.execute(
             text(
                 """
@@ -693,6 +725,8 @@ async def run_eod_proposal_batch(
                 JOIN instruments i ON i.id = sr.instrument_id
                 JOIN scan_runs r ON r.id = sr.scan_run_id
                 WHERE sr.scan_run_id = :scan_run_id
+                  AND r.visibility = 'personal'
+                  AND r.triggered_by <> 'manual_shadow'
                   AND sr.technical_passed = true
                   AND sr.result_rank IS NOT NULL
                   AND (
@@ -747,6 +781,7 @@ async def run_eod_proposal_batch(
         as_of_date=as_of_date,
         deadline=deadline,
         manual=manual,
+        include_forming_rechecks=True,
     )
 
 
@@ -825,6 +860,7 @@ async def run_single_proposal(
         as_of_date=as_of_date,
         deadline=deadline,
         manual=True,
+        include_forming_rechecks=False,
     )
 
 
@@ -836,6 +872,7 @@ async def _process_automation_candidates(
     as_of_date: dt.date,
     deadline: dt.datetime,
     manual: bool,
+    include_forming_rechecks: bool = True,
 ) -> dict[str, Any]:
     counts = {key: 0 for key in ("generated", "rejected", "uncertain", "failed", "timed_out")}
     processed = 0
@@ -894,40 +931,49 @@ async def _process_automation_candidates(
             len(candidates),
         )
 
-    async with async_session() as session:
-        holidays = _holiday_dates()
-        expired = await expire_stale_forming_watches(
-            session, as_of_date=as_of_date, holidays=holidays
-        )
-        if expired:
-            logger.info("Expired %s stale forming watches as_of=%s", expired, as_of_date)
-        rechecks = await load_forming_rechecks(session, as_of_date=as_of_date, cap=FORMING_RECHECK_CAP)
-        await session.commit()
-
-    shortlist_ids = {
-        str(c.screening_result_id)
-        for c in candidates
-        if getattr(c, "screening_result_id", None) is not None
-    }
-    for recheck in rechecks:
-        if dt.datetime.now(dt.timezone.utc) >= deadline:
-            break
-        if recheck.screening_result_id is None:
-            continue
-        if str(recheck.screening_result_id) in shortlist_ids:
-            continue
+    if include_forming_rechecks:
         try:
-            outcome = await process_proposal_candidate(
-                automation_run_id=automation_run_id,
-                candidate=recheck,
-                as_of_date=as_of_date,
-                deadline=deadline,
-            )
+            async with async_session() as session:
+                holidays = _holiday_dates()
+                expired = await expire_stale_forming_watches(
+                    session, as_of_date=as_of_date, holidays=holidays
+                )
+                if expired:
+                    logger.info("Expired %s stale forming watches as_of=%s", expired, as_of_date)
+                rechecks = await load_forming_rechecks(
+                    session, as_of_date=as_of_date, cap=FORMING_RECHECK_CAP
+                )
+                await session.commit()
+
+            shortlist_ids = {
+                str(c.screening_result_id)
+                for c in candidates
+                if getattr(c, "screening_result_id", None) is not None
+            }
+            for recheck in rechecks:
+                if dt.datetime.now(dt.timezone.utc) >= deadline:
+                    break
+                if recheck.screening_result_id is None:
+                    continue
+                if str(recheck.screening_result_id) in shortlist_ids:
+                    continue
+                try:
+                    outcome = await process_proposal_candidate(
+                        automation_run_id=automation_run_id,
+                        candidate=recheck,
+                        as_of_date=as_of_date,
+                        deadline=deadline,
+                    )
+                except Exception:
+                    logger.exception("Forming recheck %s failed", recheck.symbol)
+                    outcome = "failed"
+                counts[outcome] = counts.get(outcome, 0) + 1
+                processed += 1
         except Exception:
-            logger.exception("Forming recheck %s failed", recheck.symbol)
-            outcome = "failed"
-        counts[outcome] = counts.get(outcome, 0) + 1
-        processed += 1
+            logger.exception(
+                "Error processing forming watch rechecks for automation run %s",
+                automation_run_id,
+            )
 
     terminal_status = "timed_out" if counts["timed_out"] else "completed"
     error_message = None
@@ -976,6 +1022,7 @@ async def _process_automation_candidates(
 
 
 async def _renew_proposal_worker_lease(redis: Any, worker_id: str) -> None:
+    missed_count = 0
     while True:
         await asyncio.sleep(_LOCK_REFRESH_SECONDS)
         refreshed = await renew_distributed_lease(
@@ -984,10 +1031,18 @@ async def _renew_proposal_worker_lease(redis: Any, worker_id: str) -> None:
             worker_id,
             _LOCK_TTL_SECONDS,
         )
-        if not refreshed:
-            logger.critical("Proposal worker lost its singleton lease; stopping.")
-            os.kill(os.getpid(), signal.SIGTERM)
-            return
+        if refreshed:
+            missed_count = 0
+        else:
+            missed_count += 1
+            logger.warning(
+                "Proposal worker failed to renew singleton lease (consecutive misses: %d)",
+                missed_count,
+            )
+            if missed_count >= 3:
+                logger.critical("Proposal worker lost its singleton lease after 3 attempts; stopping.")
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
 
 
 async def worker_on_startup(ctx: dict[str, Any]) -> None:
@@ -1033,6 +1088,8 @@ class WorkerSettings:
     ]
     queue_name = settings.proposal_queue_name
     max_jobs = 1
+    max_tries = 1
+    retry_jobs = False
     job_timeout = settings.proposal_batch_budget_minutes * 60 + 60
     on_startup = worker_on_startup
     on_shutdown = worker_on_shutdown

@@ -132,7 +132,8 @@ class Settings(BaseSettings):
     execution_mode: Literal["paper", "live"] = "paper"
     live_order_placement_enabled: bool = False
     # Fake P10 paper seed in INR. Keep aligned with deployable_capital_override.
-    paper_initial_capital: Decimal = Decimal("100000")
+    paper_initial_capital: Decimal = Decimal("500000")
+    paper_auto_arm_proposals: bool = True
     fyers_async_orders_url: str = "https://api-t1.fyers.in/api/v3/orders/async"
     fyers_api_base_url: str = "https://api-t1.fyers.in/api/v3"
     fyers_order_timeout_seconds: float = Field(default=10.0, gt=0, le=30)

@@ -6,6 +6,8 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.routers.automation import (
+    PROPOSAL_BATCH_DEADLINE_MESSAGE,
+    _effective_proposal_batch_state,
     get_proposal_generation_chart,
     get_proposal_generation_results,
 )
@@ -40,6 +42,7 @@ class ProposalGenerationResultsApiTests(unittest.IsolatedAsyncioTestCase):
             "proposals_rejected": 1,
             "proposals_uncertain": 0,
             "proposals_failed": 0,
+            "batch_deadline": now + dt.timedelta(minutes=45),
             "error_message": None,
             "started_at": now,
             "completed_at": now,
@@ -95,6 +98,50 @@ class ProposalGenerationResultsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DISTINCT ON (screening_result_id)", attempts_sql)
         self.assertIn("attempt_number DESC", attempts_sql)
         self.assertIn("error_details", attempts_sql)
+
+    def test_running_batch_past_deadline_is_presented_as_timed_out(self) -> None:
+        deadline = dt.datetime(2026, 8, 19, 4, 0, tzinfo=dt.timezone.utc)
+        status, message = _effective_proposal_batch_state(
+            {
+                "status": "running",
+                "batch_deadline": deadline,
+                "error_message": None,
+            },
+            now=deadline + dt.timedelta(seconds=1),
+        )
+
+        self.assertEqual(status, "timed_out")
+        self.assertEqual(message, PROPOSAL_BATCH_DEADLINE_MESSAGE)
+
+    async def test_inflight_attempt_is_presented_as_timed_out_with_its_batch(self) -> None:
+        run = dict(self.run)
+        run.update(
+            status="running",
+            candidates_processed=0,
+            batch_deadline=dt.datetime(
+                2020, 1, 1, 0, 0, tzinfo=dt.timezone.utc
+            ),
+            completed_at=None,
+        )
+        attempt = dict(self.attempt)
+        attempt.update(
+            status="running",
+            error_type=None,
+            error_message=None,
+            completed_at=None,
+        )
+        db = AsyncMock()
+        db.execute.side_effect = [mappings_one(run), mappings_all([attempt])]
+
+        response = await get_proposal_generation_results(self.run_id, db)
+
+        self.assertEqual(response.status, "timed_out")
+        self.assertEqual(response.candidates_processed, 1)
+        self.assertEqual(response.results[0].status, "timed_out")
+        self.assertEqual(
+            response.results[0].error_type,
+            "proposal_batch_deadline_exceeded",
+        )
 
     async def test_missing_run_is_not_exposed(self) -> None:
         db = AsyncMock()

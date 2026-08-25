@@ -267,7 +267,15 @@ class WorkerSingletonLeaseTests(unittest.IsolatedAsyncioTestCase):
         mock_release.return_value = True
         ctx = {"redis": AsyncMock()}
 
-        await worker_on_startup(ctx)
+        with (
+            patch("app.workers.proposal_worker.async_session") as session_factory,
+            patch(
+                "app.workers.proposal_worker.recover_interrupted_proposal_runs",
+                new=AsyncMock(return_value=0),
+            ),
+        ):
+            session_factory.return_value.__aenter__.return_value = AsyncMock()
+            await worker_on_startup(ctx)
         self.assertIn("lease_owner", ctx)
         self.assertIn("lease_renew_task", ctx)
 

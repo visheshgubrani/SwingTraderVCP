@@ -429,6 +429,11 @@ def generate_trade_proposal_from_analysis(
         completed_at = completed_at.replace(tzinfo=dt.timezone.utc)
     live_cutoff = dt.datetime.combine(entry_session, dt.time(8, 30), tzinfo=IST_TZ)
     live_eligible = completed_at.astimezone(IST_TZ) <= live_cutoff
+    proposal_status = (
+        "pending_approval"
+        if completed_at.astimezone(IST_TZ) < approval_deadline
+        else "expired_unapproved"
+    )
     calc_basis = _serialize_calculation_basis(
         geom=geom,
         ai_output=ai_output,
@@ -447,7 +452,7 @@ def generate_trade_proposal_from_analysis(
         "instrument_id": instrument_id,
         "symbol": symbol,
         "as_of_date": as_of_date,
-        "status": "pending_approval",
+        "status": proposal_status,
         "approval_deadline": approval_deadline,
         "entry_session_date": entry_session,
         "source_hash": source_hash,
@@ -777,5 +782,4 @@ def parse_proposal_openrouter_response(
                 "payload": _provider_payload_snippet(original),
             },
         ) from exc
-
 

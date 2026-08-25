@@ -66,6 +66,13 @@ export function ProposalInbox() {
     }
     return selectedRunId
   }, [selectedRunId, proposalBatch.data?.automation_run_id, pastRuns])
+  const selectedBatchGenerated = useMemo(() => {
+    if (!effectiveRunId) return 0
+    if (proposalBatch.data?.automation_run_id === effectiveRunId) {
+      return proposalBatch.data.proposals_generated
+    }
+    return pastRuns.find((run) => run.id === effectiveRunId)?.proposals_generated ?? 0
+  }, [effectiveRunId, pastRuns, proposalBatch.data])
 
   const isRejectedTab = statusFilter === "system_rejected"
   const isEntryExpiredTab = statusFilter === "entry_expired"
@@ -73,9 +80,9 @@ export function ProposalInbox() {
 
   const proposalQueryParams = useMemo(() => ({
     symbol: symbolSearch.trim() || null,
-    automationRunId: selectedRunId !== "all" && selectedRunId !== "latest" ? selectedRunId : null,
+    automationRunId: selectedRunId === "all" ? null : effectiveRunId,
     entryState: isEntryExpiredTab ? "expired" : null,
-  }), [symbolSearch, selectedRunId, isEntryExpiredTab])
+  }), [symbolSearch, selectedRunId, effectiveRunId, isEntryExpiredTab])
 
   const { data: rawProposals = [], isLoading: isProposalsLoading, error: proposalsError } = useTradeProposals(
     isRejectedTab || isFormingTab ? "all" : isEntryExpiredTab ? "approved" : statusFilter,
@@ -85,7 +92,7 @@ export function ProposalInbox() {
   const { data: rawRejected = [], isLoading: isRejectedLoading, error: rejectedError } = useRejectedAttempts({
     status: "all",
     symbol: symbolSearch.trim() || null,
-    automationRunId: selectedRunId !== "all" && selectedRunId !== "latest" ? selectedRunId : null,
+    automationRunId: selectedRunId === "all" ? null : effectiveRunId,
   })
 
   const { data: rawForming = [], isLoading: isFormingLoading, error: formingError } = useFormingPatterns("watching")
@@ -560,7 +567,11 @@ export function ProposalInbox() {
                   {symbolSearch
                     ? `No proposals found matching symbol "${symbolSearch}".`
                     : statusFilter === "pending_approval"
-                      ? "No proposals are waiting for approval. Generate a batch from the latest scan to review candidates."
+                      ? selectedBatchGenerated
+                        ? `This run reports ${selectedBatchGenerated} generated proposal(s), but none are pending. Check Expired or All Trades; proposals from D0 stop accepting approval at 09:00 IST on D1.`
+                        : "No proposals are waiting for approval. Generate a batch from the latest scan to review candidates."
+                      : statusFilter === "approved"
+                        ? "No proposals have been approved by you for this run. Generated proposals remain Pending until you explicitly approve them."
                       : `No proposals found for ${statusFilter.replaceAll("_", " ")}.`}
                 </p>
               </div>
@@ -660,4 +671,3 @@ export function ProposalInbox() {
     </div>
   )
 }
-

@@ -61,6 +61,10 @@ from app.services.risk_stop_streak import reset_stop_streak, synchronize_stop_st
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/automation", tags=["automation"])
 MARKET_DATA_HEARTBEAT_MAX_AGE_SECONDS = 30
+PROPOSAL_BATCH_DEADLINE_MESSAGE = (
+    "The proposal batch passed its hard deadline before the worker persisted a "
+    "terminal state. It is treated as timed out and may be generated again."
+)
 
 
 def _as_uuid(value: Any) -> UUID:
@@ -195,6 +199,28 @@ def derive_proposal_entry_state(
     return None
 
 
+def _effective_proposal_batch_state(
+    row: Any,
+    *,
+    now: dt.datetime | None = None,
+) -> tuple[str, str | None]:
+    """Derive a terminal read state for an orphaned run past its hard deadline."""
+    status = str(row["status"] or "failed")
+    error_message = row.get("error_message")
+    deadline = row.get("batch_deadline")
+    if status == "running" and isinstance(deadline, dt.datetime):
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=dt.timezone.utc)
+        checked_at = now or dt.datetime.now(dt.timezone.utc)
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=dt.timezone.utc)
+        if checked_at >= deadline:
+            return "timed_out", error_message or PROPOSAL_BATCH_DEADLINE_MESSAGE
+    if status not in {"running", "completed", "timed_out", "failed", "idle"}:
+        return "failed", error_message
+    return status, error_message
+
+
 @router.get("/runs/{run_id}")
 async def get_automation_run(
     run_id: UUID,
@@ -213,13 +239,17 @@ async def get_automation_run(
     row = res.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Automation run not found")
-    return dict(row._mapping)
+    result = dict(row._mapping)
+    result["status"], result["error_message"] = _effective_proposal_batch_state(
+        result
+    )
+    return result
 
 
 def _proposal_batch_status(row: Any | None) -> ProposalBatchStatusResponse:
     if row is None:
         return ProposalBatchStatusResponse()
-    status = str(row["status"] or "idle")
+    status, error_message = _effective_proposal_batch_state(row)
     if status not in {"running", "completed", "timed_out", "failed"}:
         status = "failed"
     return ProposalBatchStatusResponse(
@@ -232,7 +262,7 @@ def _proposal_batch_status(row: Any | None) -> ProposalBatchStatusResponse:
         proposals_rejected=int(row["proposals_rejected"] or 0),
         proposals_uncertain=int(row["proposals_uncertain"] or 0),
         proposals_failed=int(row["proposals_failed"] or 0),
-        error_message=row["error_message"],
+        error_message=error_message,
         started_at=row["started_at"],
         completed_at=row["completed_at"],
     )
@@ -249,7 +279,8 @@ async def get_latest_proposal_batch(
             """
             SELECT id, scan_run_id, status, candidates_total, candidates_processed,
                    proposals_generated, proposals_rejected, proposals_uncertain,
-                   proposals_failed, error_message, started_at, completed_at
+                   proposals_failed, batch_deadline, error_message,
+                   started_at, completed_at
             FROM automation_runs
             ORDER BY created_at DESC
             LIMIT 1
@@ -262,7 +293,8 @@ async def get_latest_proposal_batch(
         """
         SELECT id, scan_run_id, status, candidates_total, candidates_processed,
                proposals_generated, proposals_rejected, proposals_uncertain,
-               proposals_failed, error_message, started_at, completed_at
+               proposals_failed, batch_deadline, error_message,
+               started_at, completed_at
         FROM automation_runs
         WHERE scan_run_id = :scan_run_id
         ORDER BY created_at DESC
@@ -284,7 +316,8 @@ async def list_proposal_batches(
     stmt = text("""
         SELECT ar.id, ar.scan_run_id, ar.status, ar.candidates_total, ar.candidates_processed,
                ar.proposals_generated, ar.proposals_rejected, ar.proposals_uncertain,
-               ar.proposals_failed, ar.error_message, ar.started_at, ar.completed_at,
+               ar.proposals_failed, ar.batch_deadline, ar.error_message,
+               ar.started_at, ar.completed_at,
                ar.created_at, sr.as_of_date,
                (
                    SELECT pa.symbol
@@ -300,9 +333,7 @@ async def list_proposal_batches(
     rows = (await db.execute(stmt, {"limit": limit})).mappings().all()
     results = []
     for r in rows:
-        status_val = str(r["status"] or "failed")
-        if status_val not in {"running", "completed", "timed_out", "failed", "idle"}:
-            status_val = "failed"
+        status_val, error_message = _effective_proposal_batch_state(r)
         total = int(r["candidates_total"] or 0)
         run_type = "single" if total == 1 else "batch"
         results.append(
@@ -319,7 +350,7 @@ async def list_proposal_batches(
                 run_type=run_type,
                 single_symbol=r["single_symbol"] if run_type == "single" else None,
                 as_of_date=r["as_of_date"],
-                error_message=r["error_message"],
+                error_message=error_message,
                 started_at=r["started_at"],
                 completed_at=r["completed_at"],
                 created_at=r["created_at"],
@@ -407,7 +438,9 @@ async def trigger_proposal_batch(
             text(
                 """
                 SELECT id FROM automation_runs
-                WHERE scan_run_id = :scan_run_id AND status = 'running'
+                WHERE scan_run_id = :scan_run_id
+                  AND status = 'running'
+                  AND batch_deadline > now()
                 ORDER BY created_at DESC LIMIT 1
                 """
             ),
@@ -584,7 +617,8 @@ async def get_proposal_generation_results(
                 """
                 SELECT id, scan_run_id, status, candidates_total, candidates_processed,
                        proposals_generated, proposals_rejected, proposals_uncertain,
-                       proposals_failed, error_message, started_at, completed_at
+                       proposals_failed, batch_deadline, error_message,
+                       started_at, completed_at
                 FROM automation_runs
                 WHERE id = :automation_run_id
                 """
@@ -616,23 +650,39 @@ async def get_proposal_generation_results(
         )
     ).mappings().all()
 
-    status = str(run["status"] or "failed")
+    status, error_message = _effective_proposal_batch_state(run)
     if status not in {"running", "completed", "timed_out", "failed"}:
         status = "failed"
+    result_rows: list[dict[str, Any]] = []
+    for attempt in attempts:
+        item = dict(attempt)
+        if item["status"] == "running" and status in {"timed_out", "failed"}:
+            item["status"] = status
+            item["error_type"] = item["error_type"] or (
+                "proposal_batch_deadline_exceeded"
+                if status == "timed_out"
+                else "proposal_worker_interrupted"
+            )
+            item["error_message"] = item["error_message"] or error_message
+        result_rows.append(item)
+    candidates_processed = max(
+        int(run["candidates_processed"] or 0),
+        sum(1 for item in result_rows if item["status"] != "running"),
+    )
     return ProposalGenerationResultsResponse(
         automation_run_id=run["id"],
         scan_run_id=run["scan_run_id"],
         status=status,  # type: ignore[arg-type]
         candidates_total=int(run["candidates_total"] or 0),
-        candidates_processed=int(run["candidates_processed"] or 0),
+        candidates_processed=candidates_processed,
         proposals_generated=int(run["proposals_generated"] or 0),
         proposals_rejected=int(run["proposals_rejected"] or 0),
         proposals_uncertain=int(run["proposals_uncertain"] or 0),
         proposals_failed=int(run["proposals_failed"] or 0),
-        error_message=run["error_message"],
+        error_message=error_message,
         started_at=run["started_at"],
         completed_at=run["completed_at"],
-        results=[dict(attempt) for attempt in attempts],
+        results=result_rows,
     )
 
 

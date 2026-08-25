@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import signal
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import uuid4
@@ -61,6 +62,13 @@ PROPOSAL_BATCH_HARD_CAP = 20
 _LOCK_KEY = "proposal_worker:singleton"
 _LOCK_TTL_SECONDS = 30
 _LOCK_REFRESH_SECONDS = 10
+
+
+@dataclass(frozen=True)
+class ProposalPersistenceResult:
+    proposal_id: str
+    created: bool
+    status: str
 
 
 def proposal_batch_deadline(
@@ -123,6 +131,117 @@ async def expire_unapproved_job(ctx: dict[str, Any]) -> int:
     del ctx
     async with async_session() as session:
         return await expire_unapproved_proposals(session)
+
+
+async def finalize_interrupted_proposal_run(
+    session: AsyncSession,
+    *,
+    automation_run_id: str,
+    batch_deadline: dt.datetime,
+    now: dt.datetime | None = None,
+    reason: str = "The proposal worker stopped before the batch reached a terminal state.",
+) -> bool:
+    """Close an orphaned run and any in-flight attempt without retrying inference."""
+    current = now or dt.datetime.now(dt.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=dt.timezone.utc)
+    if batch_deadline.tzinfo is None:
+        batch_deadline = batch_deadline.replace(tzinfo=dt.timezone.utc)
+
+    run_status = "timed_out" if current >= batch_deadline else "failed"
+    attempt_status = "timed_out" if run_status == "timed_out" else "failed"
+    error_code = (
+        "proposal_batch_deadline_exceeded"
+        if run_status == "timed_out"
+        else "proposal_worker_interrupted"
+    )
+    message = (
+        f"{reason} Batch deadline: {batch_deadline.isoformat()}. "
+        "No inference request was retried automatically."
+    )
+    attempts = await session.execute(
+        text(
+            """
+            UPDATE proposal_attempts
+            SET status = :attempt_status,
+                error_type = COALESCE(error_type, :error_code),
+                error_message = COALESCE(error_message, :error_message),
+                completed_at = COALESCE(completed_at, :now)
+            WHERE automation_run_id = :run_id
+              AND status = 'running'
+            RETURNING id
+            """
+        ),
+        {
+            "run_id": automation_run_id,
+            "attempt_status": attempt_status,
+            "error_code": error_code,
+            "error_message": message,
+            "now": current,
+        },
+    )
+    interrupted_attempts = len(attempts.all())
+    result = await session.execute(
+        text(
+            """
+            UPDATE automation_runs
+            SET status = :status,
+                candidates_processed = LEAST(
+                    candidates_total,
+                    candidates_processed + :interrupted_attempts
+                ),
+                proposals_failed = proposals_failed + :failed_attempts,
+                error_code = :error_code,
+                error_message = :error_message,
+                completed_at = :now,
+                updated_at = :now
+            WHERE id = :run_id
+              AND status = 'running'
+            RETURNING id
+            """
+        ),
+        {
+            "run_id": automation_run_id,
+            "status": run_status,
+            "interrupted_attempts": interrupted_attempts,
+            "failed_attempts": interrupted_attempts if run_status == "failed" else 0,
+            "error_code": error_code,
+            "error_message": message,
+            "now": current,
+        },
+    )
+    finalized = result.scalar_one_or_none() is not None
+    await session.commit()
+    return finalized
+
+
+async def recover_interrupted_proposal_runs(session: AsyncSession) -> int:
+    """Finalize runs left running by a previous proposal-worker process."""
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT id, batch_deadline
+                FROM automation_runs
+                WHERE status = 'running'
+                ORDER BY started_at
+                FOR UPDATE
+                """
+            )
+        )
+    ).mappings().all()
+    recovered = 0
+    now = dt.datetime.now(dt.timezone.utc)
+    for row in rows:
+        finalized = await finalize_interrupted_proposal_run(
+            session,
+            automation_run_id=str(row["id"]),
+            batch_deadline=row["batch_deadline"],
+            now=now,
+            reason="The proposal worker restarted while this batch was active.",
+        )
+        recovered += int(finalized)
+    return recovered
 
 
 async def _load_frozen_candles(
@@ -301,7 +420,7 @@ async def _persist_proposal(
     request_id: str | None,
     usage: dict[str, Any],
     cost: float,
-) -> None:
+) -> ProposalPersistenceResult:
     result = await session.execute(
         text(
             """
@@ -354,8 +473,30 @@ async def _persist_proposal(
     )
     proposal_id = result.scalar_one_or_none()
     if proposal_id is None:
-        await session.rollback()
-        return
+        existing = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, status
+                    FROM trade_proposals
+                    WHERE screening_result_id = :screening_result_id
+                      AND source_hash = :source_hash
+                      AND model = :model
+                      AND prompt_version = :prompt_version
+                      AND schema_version = :schema_version
+                      AND renderer_version = :renderer_version
+                      AND geometry_version = :geometry_version
+                      AND risk_policy_version = :risk_policy_version
+                    """
+                ),
+                proposal,
+            )
+        ).mappings().one()
+        return ProposalPersistenceResult(
+            proposal_id=str(existing["id"]),
+            created=False,
+            status=str(existing["status"]),
+        )
 
     template = EntryTemplate(proposal["entry_template"])
     allocations = TEMPLATE_CONFIG[template]["leg_allocations"]
@@ -395,6 +536,11 @@ async def _persist_proposal(
             },
         )
     await session.commit()
+    return ProposalPersistenceResult(
+        proposal_id=str(proposal_id),
+        created=True,
+        status=str(proposal["status"]),
+    )
 
 
 async def process_proposal_candidate(
@@ -642,7 +788,7 @@ async def process_proposal_candidate(
             return "rejected"
 
         async with async_session() as session:
-            await _persist_proposal(
+            persistence = await _persist_proposal(
                 session,
                 automation_run_id=automation_run_id,
                 proposal=build_result.proposal,
@@ -651,10 +797,33 @@ async def process_proposal_candidate(
                 usage=usage,
                 cost=cost,
             )
+            if not persistence.created:
+                message = (
+                    "An identical immutable proposal already exists with status "
+                    f"{persistence.status!r}; no new proposal row was created. "
+                    "Open the matching status tab or All Trades to review it."
+                )
+                await _finish_attempt(
+                    session,
+                    attempt_id=attempt_id,
+                    status="invalid",
+                    output=output_json,
+                    usage=usage,
+                    cost=cost,
+                    request_id=request_id,
+                    error_type="proposal_already_exists",
+                    error_message=message,
+                    error_details={
+                        "existing_proposal_id": persistence.proposal_id,
+                        "existing_proposal_status": persistence.status,
+                    },
+                )
+                return "rejected"
             await close_forming_watch(
                 session,
                 instrument_id=str(candidate.instrument_id),
                 status="promoted",
+                proposal_id=persistence.proposal_id,
             )
             await _finish_attempt(
                 session,
@@ -774,15 +943,32 @@ async def run_eod_proposal_batch(
         automation_run_id = str(run_result.scalar_one())
         await session.commit()
 
-    return await _process_automation_candidates(
-        automation_run_id=automation_run_id,
-        scan_run_id=scan_run_id,
-        candidates=candidates,
-        as_of_date=as_of_date,
-        deadline=deadline,
-        manual=manual,
-        include_forming_rechecks=True,
-    )
+    try:
+        return await _process_automation_candidates(
+            automation_run_id=automation_run_id,
+            scan_run_id=scan_run_id,
+            candidates=candidates,
+            as_of_date=as_of_date,
+            deadline=deadline,
+            manual=manual,
+            include_forming_rechecks=True,
+        )
+    except asyncio.CancelledError:
+        async with async_session() as session:
+            await finalize_interrupted_proposal_run(
+                session,
+                automation_run_id=automation_run_id,
+                batch_deadline=deadline,
+            )
+        raise
+    except Exception:
+        async with async_session() as session:
+            await finalize_interrupted_proposal_run(
+                session,
+                automation_run_id=automation_run_id,
+                batch_deadline=deadline,
+            )
+        raise
 
 
 async def run_single_proposal(
@@ -853,15 +1039,32 @@ async def run_single_proposal(
         automation_run_id = str(run_result.scalar_one())
         await session.commit()
 
-    return await _process_automation_candidates(
-        automation_run_id=automation_run_id,
-        scan_run_id=scan_run_id,
-        candidates=[candidate],
-        as_of_date=as_of_date,
-        deadline=deadline,
-        manual=True,
-        include_forming_rechecks=False,
-    )
+    try:
+        return await _process_automation_candidates(
+            automation_run_id=automation_run_id,
+            scan_run_id=scan_run_id,
+            candidates=[candidate],
+            as_of_date=as_of_date,
+            deadline=deadline,
+            manual=True,
+            include_forming_rechecks=False,
+        )
+    except asyncio.CancelledError:
+        async with async_session() as session:
+            await finalize_interrupted_proposal_run(
+                session,
+                automation_run_id=automation_run_id,
+                batch_deadline=deadline,
+            )
+        raise
+    except Exception:
+        async with async_session() as session:
+            await finalize_interrupted_proposal_run(
+                session,
+                automation_run_id=automation_run_id,
+                batch_deadline=deadline,
+            )
+        raise
 
 
 async def _process_automation_candidates(
@@ -1056,6 +1259,13 @@ async def worker_on_startup(ctx: dict[str, Any]) -> None:
         _LOCK_TTL_SECONDS,
     ):
         raise RuntimeError("Another proposal worker owns the singleton lease.")
+    async with async_session() as session:
+        recovered = await recover_interrupted_proposal_runs(session)
+    if recovered:
+        logger.warning(
+            "Finalized %s proposal batch(es) left running by an earlier worker process.",
+            recovered,
+        )
     ctx["lease_renew_task"] = asyncio.create_task(
         _renew_proposal_worker_lease(ctx["redis"], worker_id)
     )

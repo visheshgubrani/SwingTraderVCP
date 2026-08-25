@@ -16,6 +16,9 @@ interface ProposalGenerationResultsProps {
 }
 
 function statusBadge(attempt: ProposalGenerationAttempt) {
+  if (attempt.error_type === "proposal_already_exists") {
+    return <Badge variant="outline">Already exists</Badge>
+  }
   if (attempt.status === "valid") return <Badge variant="default">Generated</Badge>
   if (attempt.status === "uncertain") return <Badge variant="secondary">Uncertain</Badge>
   if (attempt.status === "partial") return <Badge variant="secondary">Partial</Badge>
@@ -25,9 +28,11 @@ function statusBadge(attempt: ProposalGenerationAttempt) {
   return <Badge variant="destructive">Rejected</Badge>
 }
 
-function outcomeIcon(status: ProposalGenerationAttempt["status"]) {
-  if (status === "valid") return <CheckCircle2Icon aria-hidden="true" className="text-emerald-400" />
-  if (status === "uncertain" || status === "partial" || status === "running" || status === "timed_out") {
+function outcomeIcon(attempt: ProposalGenerationAttempt) {
+  if (attempt.status === "valid" || attempt.error_type === "proposal_already_exists") {
+    return <CheckCircle2Icon aria-hidden="true" className="text-emerald-400" />
+  }
+  if (attempt.status === "uncertain" || attempt.status === "partial" || attempt.status === "running" || attempt.status === "timed_out") {
     return <Clock3Icon aria-hidden="true" className="text-amber-300" />
   }
   return <XCircleIcon aria-hidden="true" className="text-rose-400" />
@@ -54,6 +59,10 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
   }
 
   const isTerminal = data?.status === "completed" || data?.status === "timed_out" || data?.status === "failed"
+  const existingCount = data?.results.filter(
+    (attempt) => attempt.error_type === "proposal_already_exists",
+  ).length ?? 0
+  const rejectedCount = Math.max(0, (data?.proposals_rejected ?? 0) - existingCount)
 
   return (
     <section className="mx-4 mt-3 overflow-hidden rounded-lg border border-border/70 bg-card/45 font-mono text-xs">
@@ -69,12 +78,13 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
               ? "Reading audited attempts…"
               : error instanceof Error
                 ? error.message
-                : `Run ${automationRunId.slice(0, 8)} · ${data?.candidates_processed ?? 0}/${data?.candidates_total ?? 0} candidates processed`}
+                : `Run ${automationRunId.slice(0, 8)} · ${data?.candidates_processed ?? 0}/${data?.candidates_total ?? 0} candidates processed · batch audit is independent of the proposal status tabs`}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
           <Badge variant="default">Generated {data?.proposals_generated ?? 0}</Badge>
-          <Badge variant="destructive">Rejected {data?.proposals_rejected ?? 0}</Badge>
+          {existingCount ? <Badge variant="outline">Existing {existingCount}</Badge> : null}
+          <Badge variant="destructive">Rejected {rejectedCount}</Badge>
           <Badge variant="secondary">Uncertain {data?.proposals_uncertain ?? 0}</Badge>
           <Badge variant="destructive">Failed {data?.proposals_failed ?? 0}</Badge>
           {data?.status === "timed_out" ? <Badge variant="secondary">Batch timed out</Badge> : null}
@@ -96,7 +106,7 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
               <div key={attempt.id} className="px-3 py-2.5">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="flex items-center gap-1.5 font-semibold text-foreground">
-                    {outcomeIcon(attempt.status)}
+                    {outcomeIcon(attempt)}
                     {attempt.symbol}
                   </span>
                   {statusBadge(attempt)}

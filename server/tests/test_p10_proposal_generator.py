@@ -166,6 +166,18 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v5")
         self.assertEqual(len(locked["geometry"]["target_slots"]), 3)
 
+    def test_proposal_generated_after_d1_deadline_starts_expired(self):
+        proposal = self._generate(
+            _ai_output(),
+            generated_at=dt.datetime(
+                2026, 8, 18, 9, 1, tzinfo=ZoneInfo("Asia/Kolkata")
+            ),
+        )
+
+        self.assertTrue(proposal.accepted, proposal.rejection_message)
+        self.assertEqual(proposal.proposal["status"], "expired_unapproved")
+        self.assertFalse(proposal.proposal["live_eligible"])
+
     def test_generate_trade_proposal_rejects_not_vcp(self):
         result = self._generate(_ai_output(classification="not_vcp"))
         self.assertFalse(result.accepted)

@@ -6,7 +6,9 @@ from uuid import uuid4
 
 from app.workers.proposal_worker import (
     WorkerSettings,
+    _persist_proposal,
     cap_proposal_batch_limit,
+    finalize_interrupted_proposal_run,
     proposal_batch_deadline,
     run_eod_proposal_batch,
     run_single_proposal,
@@ -35,6 +37,11 @@ class FakeResult:
             return None
         if len(self._rows) > 1:
             raise RuntimeError("Multiple rows")
+        return self._rows[0]
+
+    def one(self):
+        if len(self._rows) != 1:
+            raise RuntimeError(f"Expected one row, received {len(self._rows)}")
         return self._rows[0]
 
 
@@ -182,6 +189,75 @@ class TestProposalBatchDeadline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(WorkerSettings.max_tries, 1)
         self.assertFalse(WorkerSettings.retry_jobs)
 
+    async def test_interrupted_attempt_is_closed_when_deadline_has_passed(self) -> None:
+        class InterruptedSession:
+            def __init__(self):
+                self.calls: list[tuple[str, dict]] = []
+                self.committed = False
+
+            async def execute(self, statement, params=None):
+                sql = str(statement)
+                self.calls.append((sql, params or {}))
+                if "UPDATE proposal_attempts" in sql:
+                    return FakeResult(rows=[{"id": uuid4()}])
+                return FakeResult(scalar=uuid4())
+
+            async def commit(self):
+                self.committed = True
+
+        session = InterruptedSession()
+        deadline = self.now - dt.timedelta(seconds=1)
+
+        finalized = await finalize_interrupted_proposal_run(
+            session,
+            automation_run_id=str(uuid4()),
+            batch_deadline=deadline,
+            now=self.now,
+        )
+
+        self.assertTrue(finalized)
+        self.assertTrue(session.committed)
+        attempt_params = session.calls[0][1]
+        run_params = session.calls[1][1]
+        self.assertEqual(attempt_params["attempt_status"], "timed_out")
+        self.assertEqual(run_params["status"], "timed_out")
+        self.assertEqual(run_params["interrupted_attempts"], 1)
+        self.assertEqual(run_params["failed_attempts"], 0)
+
+    async def test_duplicate_immutable_proposal_is_not_reported_as_created(self) -> None:
+        existing_id = uuid4()
+
+        class DuplicateSession:
+            def __init__(self):
+                self.calls = 0
+
+            async def execute(self, statement, params=None):
+                del statement, params
+                self.calls += 1
+                if self.calls == 1:
+                    return FakeResult(scalar=None)
+                return FakeResult(
+                    rows=[{"id": existing_id, "status": "expired_unapproved"}]
+                )
+
+        result = await _persist_proposal(
+            DuplicateSession(),
+            automation_run_id=str(uuid4()),
+            proposal={
+                "leg_risk_allocations": [1.0],
+                "gemini_evidence": {},
+                "geometry": {},
+            },
+            charts=SimpleNamespace(context_png=b"context", detail_png=b"detail"),
+            request_id=None,
+            usage={},
+            cost=0,
+        )
+
+        self.assertFalse(result.created)
+        self.assertEqual(result.proposal_id, str(existing_id))
+        self.assertEqual(result.status, "expired_unapproved")
+
     async def test_auto_batch_skips_when_run_already_exists(self) -> None:
         existing_run_id = uuid4()
         scan_run_id = uuid4()
@@ -215,5 +291,3 @@ class TestProposalBatchDeadline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "already_exists")
         self.assertEqual(result["scan_run_id"], str(scan_run_id))
         self.assertEqual(result["automation_run_id"], str(existing_run_id))
-
-

@@ -52,6 +52,7 @@ from app.services.proposal_generator import (
     generate_trade_proposal_from_analysis,
     proposal_prompt_hash,
 )
+from app.services.execution_engine import publish_tick_subscriptions
 from app.services.proposal_renderer import render_proposal_charts
 
 
@@ -420,7 +421,17 @@ async def _persist_proposal(
     request_id: str | None,
     usage: dict[str, Any],
     cost: float,
+    redis: Any = None,
+    rollout_stage: str = "shadow",
 ) -> ProposalPersistenceResult:
+    auto_arm = (
+        settings.execution_mode == "paper"
+        and settings.paper_auto_arm_proposals
+        and rollout_stage == "paper"
+        and proposal.get("live_eligible") is True
+    )
+    proposal_status = "approved" if auto_arm else proposal.get("status", "pending_approval")
+    initial_leg_status = "armed" if auto_arm else "planned"
     result = await session.execute(
         text(
             """
@@ -460,6 +471,7 @@ async def _persist_proposal(
         ),
         {
             **proposal,
+            "status": proposal_status,
             "automation_run_id": automation_run_id,
             "leg_risk_allocations": json.dumps(proposal["leg_risk_allocations"]),
             "gemini_evidence": json.dumps(proposal["gemini_evidence"]),
@@ -498,10 +510,28 @@ async def _persist_proposal(
             status=str(existing["status"]),
         )
 
+    if auto_arm:
+        await session.execute(
+            text(
+                """
+                INSERT INTO proposal_decisions (
+                    proposal_id, decision, expected_proposal_hash, notes
+                ) VALUES (
+                    :proposal_id, 'approved', :expected_hash, 'Auto-armed (paper trading mode)'
+                )
+                """
+            ),
+            {
+                "proposal_id": proposal_id,
+                "expected_hash": proposal["proposal_hash"],
+            },
+        )
+
     template = EntryTemplate(proposal["entry_template"])
     allocations = TEMPLATE_CONFIG[template]["leg_allocations"]
     for leg_index, allocation in enumerate(allocations, start=1):
         initial = leg_index == 1
+        leg_status = initial_leg_status if initial else "planned"
         hold_required = 0
         base_required = 0
         if not initial:
@@ -515,7 +545,7 @@ async def _persist_proposal(
                     trigger_price, chase_ceiling, relative_volume_threshold,
                     hold_required, base_required, eligible_session_start, eligible_session_end
                 ) VALUES (
-                    :proposal_id, :leg_index, :risk_allocation_pct, 'planned', :trigger_type,
+                    :proposal_id, :leg_index, :risk_allocation_pct, :status, :trigger_type,
                     :trigger_price, :chase_ceiling, :relative_volume_threshold,
                     :hold_required, :base_required, :eligible_start, :eligible_end
                 )
@@ -525,6 +555,7 @@ async def _persist_proposal(
                 "proposal_id": proposal_id,
                 "leg_index": leg_index,
                 "risk_allocation_pct": allocation,
+                "status": leg_status,
                 "trigger_type": "pivot" if initial else "base_breakout",
                 "trigger_price": proposal["pivot_price"] if initial else None,
                 "chase_ceiling": proposal["chase_ceiling"] if initial else None,
@@ -536,10 +567,21 @@ async def _persist_proposal(
             },
         )
     await session.commit()
+    if auto_arm:
+        logger.info(
+            "Proposal %s (%s) AUTO-ARMED in paper mode (Leg 1 armed)",
+            proposal_id,
+            proposal["symbol"],
+        )
+        if redis is not None:
+            try:
+                await publish_tick_subscriptions(redis, [proposal["symbol"]])
+            except Exception:
+                logger.exception("Failed to publish tick subscription for %s", proposal["symbol"])
     return ProposalPersistenceResult(
         proposal_id=str(proposal_id),
         created=True,
-        status=str(proposal["status"]),
+        status=str(proposal_status),
     )
 
 
@@ -549,6 +591,7 @@ async def process_proposal_candidate(
     candidate: Any,
     as_of_date: dt.date,
     deadline: dt.datetime,
+    redis: Any = None,
 ) -> CandidateOutcome:
     async with async_session() as session:
         candles = await _load_frozen_candles(
@@ -796,6 +839,8 @@ async def process_proposal_candidate(
                 request_id=request_id,
                 usage=usage,
                 cost=cost,
+                redis=redis,
+                rollout_stage=current_stage,
             )
             if not persistence.created:
                 message = (
@@ -845,7 +890,7 @@ async def run_eod_proposal_batch(
     limit: int = 20,
     manual: bool = False,
 ) -> dict[str, Any]:
-    del ctx
+    redis = ctx.get("redis") if isinstance(ctx, dict) else None
     if not manual and not settings.proposal_automation_enabled:
         return {"status": "disabled", "scan_run_id": scan_run_id}
 
@@ -952,6 +997,7 @@ async def run_eod_proposal_batch(
             deadline=deadline,
             manual=manual,
             include_forming_rechecks=True,
+            redis=redis,
         )
     except asyncio.CancelledError:
         async with async_session() as session:
@@ -976,7 +1022,7 @@ async def run_single_proposal(
     screening_result_id: str,
 ) -> dict[str, Any]:
     """Operator-triggered single-stock P10 generation on the serial worker."""
-    del ctx
+    redis = ctx.get("redis") if isinstance(ctx, dict) else None
     async with async_session() as session:
         if await _control_is_paused(session, "proposal_processing_paused"):
             return {"status": "paused", "screening_result_id": screening_result_id}
@@ -1048,6 +1094,7 @@ async def run_single_proposal(
             deadline=deadline,
             manual=True,
             include_forming_rechecks=False,
+            redis=redis,
         )
     except asyncio.CancelledError:
         async with async_session() as session:
@@ -1076,6 +1123,7 @@ async def _process_automation_candidates(
     deadline: dt.datetime,
     manual: bool,
     include_forming_rechecks: bool = True,
+    redis: Any = None,
 ) -> dict[str, Any]:
     counts = {key: 0 for key in ("generated", "rejected", "uncertain", "failed", "timed_out")}
     processed = 0
@@ -1099,6 +1147,7 @@ async def _process_automation_candidates(
                 candidate=candidate,
                 as_of_date=as_of_date,
                 deadline=deadline,
+                redis=redis,
             )
         except Exception:
             logger.exception("Proposal candidate %s failed", candidate.symbol)
@@ -1166,6 +1215,7 @@ async def _process_automation_candidates(
                         candidate=recheck,
                         as_of_date=as_of_date,
                         deadline=deadline,
+                        redis=redis,
                     )
                 except Exception:
                     logger.exception("Forming recheck %s failed", recheck.symbol)

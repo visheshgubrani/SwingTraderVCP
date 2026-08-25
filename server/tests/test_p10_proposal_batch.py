@@ -291,3 +291,223 @@ class TestProposalBatchDeadline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "already_exists")
         self.assertEqual(result["scan_run_id"], str(scan_run_id))
         self.assertEqual(result["automation_run_id"], str(existing_run_id))
+class FakePersistSession:
+    def __init__(self, proposal_id=None):
+        self.proposal_id = proposal_id or uuid4()
+        self.statements: list[tuple[str, dict]] = []
+
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        self.statements.append((sql, params or {}))
+        if "INSERT INTO trade_proposals" in sql:
+            return FakeResult(scalar=self.proposal_id)
+        return FakeResult()
+
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
+
+class TestProposalAutoArming(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.charts = SimpleNamespace(context_png=b"context", detail_png=b"detail")
+        self.proposal = {
+            "screening_result_id": str(uuid4()),
+            "instrument_id": str(uuid4()),
+            "symbol": "NSE:AUTOARM-EQ",
+            "as_of_date": dt.date(2026, 8, 18),
+            "status": "pending_approval",
+            "approval_deadline": dt.datetime(2026, 8, 19, 3, 30, tzinfo=dt.timezone.utc),
+            "entry_session_date": dt.date(2026, 8, 19),
+            "proposal_hash": "hash123",
+            "source_hash": "source123",
+            "renderer_version": "v1",
+            "prompt_version": "v1",
+            "schema_version": "v1",
+            "model": "gemini",
+            "confidence": 85.0,
+            "geometry_version": "v1",
+            "entry_template": "single",
+            "pivot_price": 100.00,
+            "initial_stop": 95.00,
+            "stop_distance_pct": 0.05,
+            "chase_ceiling": 102.00,
+            "t1": 110.00,
+            "t2": 115.00,
+            "t3": 120.00,
+            "risk_policy_id": str(uuid4()),
+            "risk_policy_version": 1,
+            "risk_budget_pct": 0.01,
+            "approved_risk_budget_amount": 5000.00,
+            "leg_count": 1,
+            "leg_risk_allocations": [1.0],
+            "relative_volume_threshold": 1.5,
+            "gemini_evidence": {},
+            "geometry": {},
+            "context_image_hash": "chash",
+            "detail_image_hash": "dhash",
+            "live_eligible": True,
+            "generated_at": dt.datetime(2026, 8, 18, 18, 0, tzinfo=dt.timezone.utc),
+        }
+
+    async def test_paper_mode_auto_arms_eligible_proposals(self):
+        from app.workers.proposal_worker import _persist_proposal
+
+        fake_session = FakePersistSession()
+        fake_redis = AsyncMock()
+        with (
+            patch("app.workers.proposal_worker.settings.execution_mode", "paper"),
+            patch("app.workers.proposal_worker.settings.paper_auto_arm_proposals", True),
+        ):
+            result = await _persist_proposal(
+                fake_session,
+                automation_run_id=str(uuid4()),
+                proposal=self.proposal.copy(),
+                charts=self.charts,
+                request_id="req-1",
+                usage={},
+                cost=0.01,
+                redis=fake_redis,
+                rollout_stage="paper",
+            )
+
+        # 1. Verify trade_proposals was inserted with status='approved'
+        tp_inserts = [
+            (sql, params)
+            for sql, params in fake_session.statements
+            if "INSERT INTO trade_proposals" in sql
+        ]
+        self.assertEqual(len(tp_inserts), 1)
+        self.assertEqual(tp_inserts[0][1]["status"], "approved")
+        self.assertTrue(result.created)
+        self.assertEqual(result.status, "approved")
+
+        # 2. Verify proposal_decisions was inserted with decision='approved'
+        dec_inserts = [
+            (sql, params)
+            for sql, params in fake_session.statements
+            if "INSERT INTO proposal_decisions" in sql
+        ]
+        self.assertEqual(len(dec_inserts), 1)
+        self.assertEqual(dec_inserts[0][1]["expected_hash"], "hash123")
+
+        # 3. Verify entry_legs was inserted with status='armed'
+        leg_inserts = [
+            (sql, params)
+            for sql, params in fake_session.statements
+            if "INSERT INTO entry_legs" in sql
+        ]
+        self.assertEqual(len(leg_inserts), 1)
+        self.assertEqual(leg_inserts[0][1]["status"], "armed")
+
+        # 4. Verify tick subscription was published
+        fake_redis.publish.assert_awaited_once()
+
+    async def test_live_mode_never_auto_arms(self):
+        from app.workers.proposal_worker import _persist_proposal
+
+        fake_session = FakePersistSession()
+        fake_redis = AsyncMock()
+        with (
+            patch("app.workers.proposal_worker.settings.execution_mode", "live"),
+            patch("app.workers.proposal_worker.settings.paper_auto_arm_proposals", True),
+        ):
+            result = await _persist_proposal(
+                fake_session,
+                automation_run_id=str(uuid4()),
+                proposal=self.proposal.copy(),
+                charts=self.charts,
+                request_id="req-1",
+                usage={},
+                cost=0.01,
+                redis=fake_redis,
+                rollout_stage="paper",
+            )
+
+        tp_inserts = [
+            (sql, params)
+            for sql, params in fake_session.statements
+            if "INSERT INTO trade_proposals" in sql
+        ]
+        self.assertEqual(tp_inserts[0][1]["status"], "pending_approval")
+        self.assertEqual(result.status, "pending_approval")
+
+        dec_inserts = [
+            (sql, params)
+            for sql, params in fake_session.statements
+            if "INSERT INTO proposal_decisions" in sql
+        ]
+        self.assertEqual(len(dec_inserts), 0)
+
+        leg_inserts = [
+            (sql, params)
+            for sql, params in fake_session.statements
+            if "INSERT INTO entry_legs" in sql
+        ]
+        self.assertEqual(leg_inserts[0][1]["status"], "planned")
+        fake_redis.publish.assert_not_awaited()
+
+    async def test_auto_arm_disabled_flag_keeps_proposals_pending(self):
+        from app.workers.proposal_worker import _persist_proposal
+
+        fake_session = FakePersistSession()
+        fake_redis = AsyncMock()
+        with (
+            patch("app.workers.proposal_worker.settings.execution_mode", "paper"),
+            patch("app.workers.proposal_worker.settings.paper_auto_arm_proposals", False),
+        ):
+            await _persist_proposal(
+                fake_session,
+                automation_run_id=str(uuid4()),
+                proposal=self.proposal.copy(),
+                charts=self.charts,
+                request_id="req-1",
+                usage={},
+                cost=0.01,
+                redis=fake_redis,
+                rollout_stage="paper",
+            )
+
+        tp_inserts = [
+            (sql, params)
+            for sql, params in fake_session.statements
+            if "INSERT INTO trade_proposals" in sql
+        ]
+        self.assertEqual(tp_inserts[0][1]["status"], "pending_approval")
+        decision_statements = [
+            statement
+            for statement in fake_session.statements
+            if "proposal_decisions" in statement[0]
+        ]
+        self.assertEqual(len(decision_statements), 0)
+
+    async def test_shadow_rollout_never_auto_arms(self):
+        fake_session = FakePersistSession()
+        fake_redis = AsyncMock()
+        with (
+            patch("app.workers.proposal_worker.settings.execution_mode", "paper"),
+            patch("app.workers.proposal_worker.settings.paper_auto_arm_proposals", True),
+        ):
+            result = await _persist_proposal(
+                fake_session,
+                automation_run_id=str(uuid4()),
+                proposal=self.proposal.copy(),
+                charts=self.charts,
+                request_id="req-1",
+                usage={},
+                cost=0.01,
+                redis=fake_redis,
+                rollout_stage="shadow",
+            )
+
+        proposal_insert = next(
+            params
+            for sql, params in fake_session.statements
+            if "INSERT INTO trade_proposals" in sql
+        )
+        self.assertEqual(proposal_insert["status"], "pending_approval")
+        self.assertEqual(result.status, "pending_approval")
+        self.assertFalse(any("proposal_decisions" in sql for sql, _ in fake_session.statements))
+        fake_redis.publish.assert_not_awaited()

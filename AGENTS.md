@@ -61,15 +61,22 @@ The core principle governing every design choice below:
 > first and sends Gemini a chart plus a short candidate summary. Gemini
 > returns only qualitative judgments and window pointers — never a price,
 > stop, target, or template. Deterministic Python owns every money and risk
-> decision. A human must approve or reject the resulting immutable proposal
-> before any entry can become eligible. Once approved, entry, scale-in, SL,
-> targets, trailing, and reconciliation are automated.
+> decision. In live execution mode, a human must approve or reject the
+> resulting immutable proposal before any entry can become eligible. In the
+> owner-enabled `paper` rollout stage only, deterministic live-eligible
+> proposals may instead be auto-approved for unattended end-to-end testing.
+> Once approved, entry, scale-in, SL, targets, trailing, and reconciliation
+> are automated.
 
-That boundary — automated proposal → **manual approval checkpoint** →
-deterministic execution/management — is the single most important invariant.
-The human does not hand-author or edit scanner-sourced live plans; approval
-accepts a versioned plan and maximum risk budget, not a stale quantity. Gemini
-never sizes, manages risk, confirms a proposal, or touches the execution path.
+That live-money boundary — automated proposal → **manual approval checkpoint**
+→ deterministic execution/management — is the single most important
+invariant. The paper-only auto-approval exception requires
+`EXECUTION_MODE=paper`, durable rollout stage `paper`,
+`PAPER_AUTO_ARM_PROPOSALS=true`, and a versioned, unexpired, live-eligible
+proposal. The human does not hand-author or edit scanner-sourced live plans;
+approval accepts a versioned plan and maximum risk budget, not a stale
+quantity. Gemini never sizes, manages risk, confirms a proposal, or touches
+the execution path.
 
 Mental model:
 
@@ -119,7 +126,7 @@ Do not substitute these without an explicit instruction from the user.
 - TBT 50-depth / protobuf incremental merge as the monitor feed
 - Exchange Cover Order / Bracket Order as the primary SL/TP mechanism
 - Frontend connecting to any Fyers endpoint or socket
-- Auto-entry without a versioned, unexpired human-approved proposal
+- Live auto-entry without a versioned, unexpired human-approved proposal
 - LLM-authored stop, quantity, monetary risk, exposure, daily-loss, or
   trailing calculations
 - Writing every raw tick to Postgres (sample/debug only if needed)
@@ -450,6 +457,12 @@ proof. No template may create more than three entry legs.
 - Pending-approval deadline = **09:00 Asia/Kolkata on D1**. If no decision is
   recorded by then, the proposal becomes `expired_unapproved` and can never be
   reactivated. A new scan/analysis/proposal is required.
+- Paper-only unattended testing may record a synthetic approved decision and
+  arm the initial leg at proposal persistence when all four gates hold:
+  `EXECUTION_MODE=paper`, rollout stage `paper`,
+  `PAPER_AUTO_ARM_PROPOSALS=true`, and `live_eligible=true`. It must never run
+  in `shadow`, `reduced_live`, `full_live`, or live execution mode. Disabling
+  the flag restores manual approval in paper mode.
 - Approval before that deadline arms the initial leg for **D1 only**; this is
   the separate entry-trigger window. If it does not trigger on D1, it becomes
   `entry_expired`. The D1 window is considered closed at **16:00 IST on D1**
@@ -463,10 +476,10 @@ proof. No template may create more than three entry legs.
 - Approval locks the proposal hash, source and policy versions, pivot, targets,
   stop/structure rules, template, risk budget, chase ceiling, add rules, exit
   rules, and expiries. It locks a maximum monetary risk budget, not quantity.
-- Human action is approve or reject only. A changed proposal requires a new
-  immutable version and fresh approval. The active risk policy may tighten or
-  block an approved proposal at execution, but may never enlarge it without
-  reapproval.
+- Human action is approve or reject only; the paper-only synthetic approval
+  above is the sole exception. A changed proposal requires a new immutable
+  version and fresh approval. The active risk policy may tighten or block an
+  approved proposal at execution, but may never enlarge it without reapproval.
 
 ### 5.5 Forming-pattern watch
 
@@ -572,7 +585,7 @@ funds win when lower; do not optimistically recycle capital before the broker
 reports it available.
 
 In `EXECUTION_MODE=paper`, that snapshot is the durable paper-broker cash
-ledger (seeded from `deployable_capital_override`, default ₹1,00,000), not
+ledger (seeded from `deployable_capital_override`, default ₹5,00,000), not
 Fyers `/funds`. Fyers remains market-data and auth only. In live mode the
 snapshot is Fyers Available Balance as before.
 
@@ -865,10 +878,11 @@ Frontend AI SDK streaming is fine only for read-only context.
 2. **Single Fyers order WebSocket**, owned only by the order gateway.
    Nothing else connects to Fyers order WS.
 3. **Frontend never talks to Fyers directly** — always through our backend.
-4. **The manual approval checkpoint is not to be automated away.** No
+4. **The live manual approval checkpoint is not to be automated away.** No
    scanner-sourced live entry may be armed without one explicit, unexpired
    human approval of the exact immutable proposal version, regardless of any
-   scanner score or LLM confidence.
+   scanner score or LLM confidence. Paper auto-approval is allowed only under
+   the four gates in §5.4 and never promotes the rollout stage itself.
 5. **Order placement is idempotent and only ever issued by the execution
    engine.** No other component calls Fyers order REST endpoints.
 6. **SL/target/trailing enforcement must not depend on the frontend being
@@ -1018,9 +1032,11 @@ Owner-only, never self-promotes, cannot skip. Default `shadow`.
    the explicit one-lot post-fill tolerance. P9 counterfactuals, fresh-trigger
    resets, and three-stop pause/reset recovery must pass here. Paper uses the
    same execution-engine claim/submit path and order-gateway fill processors as
-   live; only the transport is a paper broker with a mutating ₹1,00,000 cash
-   ledger. Positions, intents, daily-loss, stop-streak, and reconciliation are
-   scoped by `execution_mode`.
+   live; only the transport is a paper broker with a mutating ₹5,00,000 cash
+   ledger. Owner-enabled paper auto-approval may be used for unattended testing
+   at this stage; it does not waive any trigger, allocation, risk, kill-switch,
+   or recovery gate. Positions, intents, daily-loss, stop-streak, and
+   reconciliation are scoped by `execution_mode`.
 3. **Reduced live:** explicit operator enablement; size P10 against `0.25×`
    deployable capital while retaining the same percentage policy. Blocked while
    any paper nonterminal position/intent exists. Use small CNC positions and

@@ -107,13 +107,14 @@ class FakeRedis:
         self.accepted_jobs = 0
         self.lock = asyncio.Lock()
 
-    async def enqueue_job(self, _function, _scan_run_id, *, _job_id):
+    async def enqueue_job(self, _function, _scan_run_id=None, *, _job_id=None, **_kwargs):
         async with self.lock:
-            if _job_id in self.jobs:
+            job_key = _job_id or str(_function)
+            if job_key in self.jobs:
                 return None
-            self.jobs.add(_job_id)
+            self.jobs.add(job_key)
             self.accepted_jobs += 1
-            return SimpleNamespace(job_id=_job_id)
+            return SimpleNamespace(job_id=job_key)
 
 
 async def fake_job_status(redis: FakeRedis, scan_run_id) -> JobStatus:

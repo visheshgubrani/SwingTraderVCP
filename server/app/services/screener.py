@@ -660,6 +660,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
                     "run_fundamental_pass",
                     str(scan_run_id),
                     _job_id=f"fundamental-pass:{scan_run_id}",
+                    _job_timeout=1800,
                 )
             except Exception as enqueue_error:
                 proposal_should_enqueue_now = is_personal_scan

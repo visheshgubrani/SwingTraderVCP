@@ -23,6 +23,9 @@ async def worker_on_startup(ctx: dict[str, Any]) -> None:
 
 
 class WorkerSettings:
+    # Set default job timeout to 30 minutes to allow batch fundamental passes
+    job_timeout = 1800
+
     # Functions that the worker can execute
     functions = [
         run_technical_scan,

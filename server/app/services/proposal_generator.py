@@ -432,8 +432,7 @@ def generate_trade_proposal_from_analysis(
     completed_at = generated_at or dt.datetime.now(dt.timezone.utc)
     if completed_at.tzinfo is None:
         completed_at = completed_at.replace(tzinfo=dt.timezone.utc)
-    live_cutoff = dt.datetime.combine(entry_session, dt.time(8, 30), tzinfo=IST_TZ)
-    live_eligible = completed_at.astimezone(IST_TZ) <= live_cutoff
+    live_eligible = completed_at.astimezone(IST_TZ) < approval_deadline
     proposal_status = (
         "pending_approval"
         if completed_at.astimezone(IST_TZ) < approval_deadline

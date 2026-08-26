@@ -226,12 +226,10 @@ money-path workers into the API process.
   are persisted to `p10_forming_patterns` and rechecked after the new
   shortlist, at most 10 per batch. Every renderer, geometry, prompt,
   input, provider attempt, and policy version is audited. The worker
-  has a **45-minute hard batch budget** from shortlist freeze, a 90-second
-  per-attempt timeout, at most one retry when budget remains, and must not
-  start an attempt after the deadline. Remaining candidates become
-  `timed_out`, not silently deferred. Live-eligible output must also exist by
-  **08:30 Asia/Kolkata** on the next NSE session; later output is review-only
-  and cannot be approved for live entry.
+  evaluates candidates with a 90-second per-attempt timeout and at most one retry.
+  Batches run until the approval deadline (**09:00 Asia/Kolkata** on the next NSE
+  session, before market open). Live-eligible output must exist before the
+  09:00 approval deadline; unapproved proposals expire at 09:00.
 - **Entry supervisor worker** — consumes completed 5-minute bars for approved
   proposals. It owns trigger evaluation, proposal expiry, add-leg gates,
   priority/capacity ordering, fresh broker-state preflight, and serialized
@@ -501,8 +499,8 @@ does not write LTP `watchlists`.
   a later shortlist hit may start a fresh watch.
 
 Each proposal batch processes the new top-N shortlist first, then rechecks
-at most **10** `watching` rows (oldest `next_check_date` first) if wall-clock
-budget remains. Never start a forming attempt after the 45-minute deadline.
+at most **10** `watching` rows (oldest `next_check_date` first) before the session
+approval deadline. Never start a forming attempt after the session deadline.
 
 ---
 

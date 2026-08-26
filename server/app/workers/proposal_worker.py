@@ -16,7 +16,7 @@ import os
 import signal
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Collection, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -47,6 +47,7 @@ from app.services.proposal_generator import (
     ProposalBuildResult,
     ProposalProviderError,
     SCHEMA_VERSION,
+    calculate_next_session_and_deadline,
     call_gemini_vision_for_proposal,
     compute_frozen_source_hash,
     generate_trade_proposal_from_analysis,
@@ -74,22 +75,39 @@ class ProposalPersistenceResult:
 
 def proposal_batch_deadline(
     *,
-    scan_completed_at: dt.datetime,
-    now: dt.datetime,
-    budget_minutes: int,
-    manual: bool,
+    as_of_date: dt.date | None = None,
+    now: dt.datetime | None = None,
+    holidays: Collection[dt.date] = (),
+    manual: bool = False,
+    scan_completed_at: dt.datetime | None = None,
+    budget_minutes: int | None = None,
 ) -> dt.datetime:
-    """Return the hard stop for a serial proposal batch.
+    """Return the hard stop for a proposal batch.
 
-    Automatic EOD runs measure the budget from shortlist freeze. Manual
-    Generate clicks start a fresh clock so a late evening test still runs.
+    Proposals for an EOD session D0 target the next trading session D1.
+    The batch deadline is the approval deadline (09:00 IST on D1, before market opens).
+    For manual runs on past dates where the D1 approval deadline has already passed,
+    a 24-hour window from now is provided so operator inspection and tests can complete.
     """
-    if scan_completed_at.tzinfo is None:
-        scan_completed_at = scan_completed_at.replace(tzinfo=dt.timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=dt.timezone.utc)
-    started = now if manual else scan_completed_at
-    return started + dt.timedelta(minutes=budget_minutes)
+    current = now or dt.datetime.now(dt.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=dt.timezone.utc)
+    if as_of_date is not None:
+        _, approval_deadline = calculate_next_session_and_deadline(
+            as_of_date,
+            holidays=holidays,
+        )
+        if manual and current >= approval_deadline:
+            return current + dt.timedelta(hours=24)
+        return approval_deadline
+
+    # Fallback if as_of_date was not provided
+    if scan_completed_at is not None:
+        if scan_completed_at.tzinfo is None:
+            scan_completed_at = scan_completed_at.replace(tzinfo=dt.timezone.utc)
+        started = current if manual else scan_completed_at
+        return started + dt.timedelta(minutes=budget_minutes or 45)
+    return current + dt.timedelta(hours=24)
 
 
 def cap_proposal_batch_limit(limit: int, configured_limit: int) -> int:
@@ -973,9 +991,9 @@ async def run_eod_proposal_batch(
             raise RuntimeError("Proposal shortlist has no durable scan completion time")
         now = dt.datetime.now(dt.timezone.utc)
         deadline = proposal_batch_deadline(
-            scan_completed_at=scan_completed_at,
+            as_of_date=as_of_date,
             now=now,
-            budget_minutes=settings.proposal_batch_budget_minutes,
+            holidays=_holiday_dates(),
             manual=manual,
         )
         run_result = await session.execute(
@@ -1070,9 +1088,9 @@ async def run_single_proposal(
             raise RuntimeError("Proposal shortlist has no durable scan completion time")
         now = dt.datetime.now(dt.timezone.utc)
         deadline = proposal_batch_deadline(
-            scan_completed_at=scan_completed_at,
+            as_of_date=as_of_date,
             now=now,
-            budget_minutes=settings.proposal_batch_budget_minutes,
+            holidays=_holiday_dates(),
             manual=True,
         )
         run_result = await session.execute(
@@ -1354,7 +1372,7 @@ class WorkerSettings:
     max_jobs = 1
     max_tries = 1
     retry_jobs = False
-    job_timeout = settings.proposal_batch_budget_minutes * 60 + 60
+    job_timeout = 7200
     on_startup = worker_on_startup
     on_shutdown = worker_on_shutdown
     timezone = IST_TZ

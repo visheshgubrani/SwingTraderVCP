@@ -64,6 +64,12 @@ class PendingMigrationSelectionTests(unittest.TestCase):
         self.assertTrue(
             (DEFAULT_MIGRATIONS_DIR / "026_p10_vision_rework.sql").is_file()
         )
+        self.assertTrue(
+            (
+                DEFAULT_MIGRATIONS_DIR
+                / "028_p10_breakout_bar_rvol.sql"
+            ).is_file()
+        )
         for path in files:
             self.assertIsNotNone(numeric_prefix(path.name), path.name)
 

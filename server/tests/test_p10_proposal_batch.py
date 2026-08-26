@@ -344,6 +344,7 @@ class TestProposalAutoArming(unittest.IsolatedAsyncioTestCase):
             "leg_count": 1,
             "leg_risk_allocations": [1.0],
             "relative_volume_threshold": 1.5,
+            "entry_trigger_policy_version": "breakout_bar_signal_v2",
             "gemini_evidence": {},
             "geometry": {},
             "context_image_hash": "chash",
@@ -381,6 +382,11 @@ class TestProposalAutoArming(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(tp_inserts), 1)
         self.assertEqual(tp_inserts[0][1]["status"], "approved")
+        self.assertEqual(
+            tp_inserts[0][1]["entry_trigger_policy_version"],
+            "breakout_bar_signal_v2",
+        )
+        self.assertIn("entry_trigger_policy_version", tp_inserts[0][0])
         self.assertTrue(result.created)
         self.assertEqual(result.status, "approved")
 

@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -393,6 +393,7 @@ async def create_proposal_entry_intent(
     entry_leg_id: UUID,
     quantity: int,
     observed_price: Decimal,
+    trigger_event_timestamp: datetime,
 ) -> tuple[OrderIntentRef, UUID]:
     """Persist one approved P10 leg intent and its recoverable position state."""
     ensure_execution_mode_armed()
@@ -455,7 +456,10 @@ async def create_proposal_entry_intent(
         raise ExecutionSafetyError("Initial proposal leg is outside its D1 entry session.")
 
     execution_mode = settings.execution_mode
-    idempotency_key = f"proposal:{proposal_id}:leg:{entry_leg_id}:entry:v1"
+    trigger_key = trigger_event_timestamp.astimezone(timezone.utc).isoformat()
+    idempotency_key = (
+        f"proposal:{proposal_id}:leg:{entry_leg_id}:entry:{trigger_key}"
+    )
     existing = await db.execute(
         text(
             """
@@ -1677,6 +1681,82 @@ async def create_paper_entry_intent(
     return await create_entry_intent(db, **kwargs)
 
 
+async def _cancel_entry_before_submission(
+    db: AsyncSession,
+    *,
+    snapshot: dict[str, Any],
+    reason: str,
+) -> bool:
+    """Release a P10 reservation when final eligibility fails pre-broker."""
+    cancel_result = await db.execute(
+        text(
+            """
+            UPDATE order_intents
+            SET status = 'cancelled', reason = :reason
+            WHERE id = :intent_id AND status = 'created'
+            RETURNING id
+            """
+        ),
+        {"intent_id": snapshot["id"], "reason": reason},
+    )
+    cancelled = cancel_result.mappings().one_or_none()
+    if cancelled is None:
+        return False
+    if snapshot.get("entry_leg_id") is None:
+        return True
+    await db.execute(
+        text(
+            """
+            UPDATE positions
+            SET quantity = CASE
+                    WHEN :leg_index = 1 THEN quantity
+                    ELSE GREATEST(open_quantity, quantity - :quantity)
+                END,
+                state = CASE
+                    WHEN :leg_index = 1 AND open_quantity = 0
+                    THEN 'cancelled'
+                    ELSE state
+                END
+            WHERE id = :position_id
+            """
+        ),
+        {
+            "position_id": snapshot["position_id"],
+            "leg_index": snapshot["entry_leg_index"],
+            "quantity": snapshot["quantity"],
+        },
+    )
+    await db.execute(
+        text(
+            """
+            UPDATE entry_legs el
+            SET status = CASE
+                    WHEN tp.entry_trigger_policy_version =
+                         'breakout_bar_signal_v2'
+                    THEN 'waiting_for_reset'
+                    ELSE 'armed'
+                END,
+                signal_bar_timestamp = NULL,
+                order_intent_id = NULL,
+                position_id = CASE
+                    WHEN el.leg_index = 1 THEN NULL
+                    ELSE el.position_id
+                END
+            FROM trade_proposals tp
+            WHERE el.proposal_id = tp.id
+              AND el.id = :leg_id
+              AND el.order_intent_id = :intent_id
+              AND el.status = 'intent_created'
+            """
+        ),
+        {
+            "leg_id": snapshot["entry_leg_id"],
+            "intent_id": snapshot["id"],
+        },
+    )
+    return True
+
+
 async def submit_live_entry_intent(
     db: AsyncSession,
     redis,
@@ -1685,6 +1765,7 @@ async def submit_live_entry_intent(
     broker_client: FyersAsyncOrderClient | None = None,
     rate_limiter: RedisOrderRateLimiter | None = None,
     fill_price: Decimal | None = None,
+    pre_submit_check: Callable[[], Awaitable[Decimal | None]] | None = None,
 ) -> SubmissionResult:
     """Claim and submit a durable entry intent exactly once automatically."""
     ensure_execution_mode_armed()
@@ -1727,6 +1808,28 @@ async def submit_live_entry_intent(
     # The operator may engage the switch while a burst waits in the queue.
     await ensure_orders_allowed(db)
     await ensure_order_gateway_ready(redis)
+    if pre_submit_check is not None:
+        # Entry eligibility must be checked after auth/gateway/rate-limit
+        # waits and immediately before the durable no-double-place claim.
+        try:
+            checked_fill_price = await pre_submit_check()
+        except Exception as exc:
+            cancelled = await _cancel_entry_before_submission(
+                db,
+                snapshot=snapshot,
+                reason=f"Pre-submission eligibility blocked: {exc}",
+            )
+            if not cancelled:
+                await db.rollback()
+                return SubmissionResult(
+                    broker_call_made=False,
+                    outcome="already_in_progress",
+                    message="Another request claimed this intent for submission.",
+                )
+            await db.commit()
+            raise
+        if checked_fill_price is not None:
+            fill_price = checked_fill_price
 
     claim = await db.execute(
         text(

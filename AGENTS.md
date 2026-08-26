@@ -430,7 +430,7 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
   (`p10_template_score_v1`). Gemini does not pick a template. Static
   template configs still map to maximum approved-risk shares:
 
-| Template | Risk by leg | Required relative volume |
+| Template | Risk by leg | Required breakout-bar RVOL |
 | --- | --- | --- |
 | `single` | 100% | 2.0× |
 | `three_leg_front` | 50% / 30% / 20% | 2.0× |
@@ -467,15 +467,18 @@ proof. No template may create more than three entry legs.
   the separate entry-trigger window. If it does not trigger on D1, it becomes
   `entry_expired`. The D1 window is considered closed at **16:00 IST on D1**
   (after the final 15:45 intraday bar-reconciliation tick): the entry
-  supervisor persists `expired` on untriggered `armed`/`trigger_observed`
-  legs and cancels their higher-index `planned` siblings, and the API derives
+  supervisor persists `expired` on untriggered `armed`/`trigger_observed`/
+  `waiting_for_reset` legs and cancels their higher-index `planned` siblings,
+  and the API derives
   the same expired state for display even when the supervisor was not running
   at the close. The proposal decision itself remains `approved`; only the
   legs expire, and only a new scan/analysis/proposal can produce a fresh
   entry opportunity.
 - Approval locks the proposal hash, source and policy versions, pivot, targets,
-  stop/structure rules, template, risk budget, chase ceiling, add rules, exit
-  rules, and expiries. It locks a maximum monetary risk budget, not quantity.
+  entry-trigger policy version, stop/structure rules, template, risk budget,
+  chase ceiling, add rules, exit rules, and expiries. The trigger-policy
+  version is assigned when the proposal is generated and approval never
+  selects or changes it. It locks a maximum monetary risk budget, not quantity.
 - Human action is approve or reject only; the paper-only synthetic approval
   above is the sole exception. A changed proposal requires a new immutable
   version and fresh approval. The active risk policy may tighten or block an
@@ -527,19 +530,37 @@ position monitor: SL + T1/T2/T3 + ATR runner → reconcile → journal
   WebSocket and reconciles them against Fyers every 15 minutes. The entry
   supervisor never creates another market-data connection.
 - Ignore the first 15 minutes of the session. There is no price-only fallback.
-- Relative volume = current cumulative volume divided by
-  `(robust ADV20 × expected cumulative-volume fraction)`.
 - Robust ADV20 excludes daily-volume outliers with a MAD-based filter.
   Expected cumulative fraction is the median for that 5-minute bucket across
-  the prior 30 completed sessions. Fewer than 15 valid profile sessions,
-  stale/missing cumulative volume, or unresolved reconciliation drift blocks
-  the trigger.
+  the prior 30 completed sessions. For evaluation session `D`, both robust
+  ADV20 and every profile bucket must use sessions strictly before `D`;
+  replayed or fully completed `D` data must never enter its own profile.
+  Fewer than 15 valid profile sessions, stale/missing volume, a missing or
+  non-positive adjacent bucket fraction, or unresolved reconciliation drift
+  blocks the trigger.
+- Expected signal-bar fraction =
+  `cumulative_fraction[t] − cumulative_fraction[t−1]`. Breakout-bar RVOL =
+  `signal_bar_volume / (robust ADV20 × expected signal-bar fraction)`.
+  The existing template thresholds apply only to this signal-bar statistic.
+  Session-cumulative RVOL, confirmation-bar RVOL, and signal volume divided
+  by the median of the preceding 12 verified same-session 5-minute bars are
+  persisted as diagnostics only. The 12-bar diagnostic is `null` when fewer
+  than 12 usable bars exist.
 - A signal bar must close above its pivot/base-high trigger with the template's
-  required relative volume. The immediately following completed 5-minute bar
-  must remain above the trigger with relative volume still at or above the
-  threshold. Recheck trigger freshness and chase ceiling before submission.
-- A trigger that loses capacity is not held for a late entry. It needs a new
-  qualifying two-bar trigger while its leg remains eligible.
+  required breakout-bar RVOL. The immediately following completed 5-minute
+  bar must remain above the trigger; it has no RVOL hard gate.
+- If a price-crossing signal fails breakout-bar RVOL, or the immediate
+  confirmation closes at or below the trigger, the leg enters
+  `waiting_for_reset`. It cannot form another signal while price remains above
+  the trigger. A verified 5-minute close at or below the trigger resets it to
+  `armed`; only a later verified close above the trigger may start a new
+  attempt.
+- Trigger validity and entry eligibility are separate. A completed two-bar
+  trigger stays audited as confirmed even when fresh executable LTP exceeds
+  the frozen chase ceiling or allocation loses capacity. No order is placed,
+  the entry rejection reason is persisted, and a v2 leg requires a reset plus
+  a new qualifying two-bar trigger. Recheck fresh LTP against the immutable
+  chase ceiling immediately before submission.
 
 ### 6.2 Add-leg eligibility
 
@@ -702,8 +723,9 @@ events, and fills live in Postgres. Redis events are never authoritative.
 - Proposal decision states: `pending_approval`, `approved`, `rejected`, and
   `expired_unapproved`.
 - Normal entry-leg progression: `planned → armed → trigger_observed →
-  intent_created → submitted → partially_filled → filled`, plus explicit
-  expired/cancelled/unknown terminal or recovery states.
+  intent_created → submitted → partially_filled → filled`; a consumed v2
+  attempt may branch to `waiting_for_reset → armed`. Explicit expired/
+  cancelled/unknown terminal or recovery states remain.
 - Position: `pending_entry → open → trailing_active → exit_pending → closed`,
   with `cancelled` only from pre-open paths.
 - Use stable idempotency keys per proposal/leg/exit purpose. Persist an intent
@@ -995,9 +1017,12 @@ the phase table above is authoritative going forward.
   Frozen proposal T1–T3 are unchanged by a chase fill.
 - Forming watch: no `trade_proposals` row and no geometry prices; expiry at
   10 sessions or universe drop; batch cap of 10 rechecks.
-- Five-minute replay: first-15-minute exclusion, robust profile, two-bar
-  confirmation, stale volume, reconciliation drift, lost capacity, and fresh
-  re-trigger behavior.
+- Five-minute replay: first-15-minute exclusion, robust profile with strict
+  pre-evaluation-session inputs, bucket-delta breakout RVOL, price-only
+  confirmation, stale volume, reconciliation drift, `waiting_for_reset`,
+  distinct confirmed-trigger/chase-rejection evidence, lost capacity, and
+  fresh re-trigger behavior. Changing the evaluated session's later/full
+  volume must not change its expected bucket volume or robust ADV20.
 - Risk/allocation: fresh funds, every cap, priority bands, exact ties, minimum
   viability, conservative rounding, post-fill one-lot residual tolerance, and
   stricter active-policy versions.

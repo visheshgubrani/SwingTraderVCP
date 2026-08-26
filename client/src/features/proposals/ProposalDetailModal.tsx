@@ -198,7 +198,12 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
                       Leg {legNum} ({Number(leg.risk_allocation_pct) * 100}% Risk Budget)
                     </span>
                     <div className="flex items-center gap-3 text-muted-foreground">
-                      <span>RVOL ≥ {activeProposal.relative_volume_threshold}x</span>
+                      <span>
+                        {activeProposal.entry_trigger_policy_version === "breakout_bar_signal_v2"
+                          ? "Signal-bar RVOL"
+                          : "Cumulative RVOL"}{" "}
+                        ≥ {activeProposal.relative_volume_threshold}x
+                      </span>
                       <span className="text-foreground/80">
                         {legNum === 1 ? "D1 Pivot Trigger" : "Hold/Base Add Gate"} · {leg.status}
                       </span>

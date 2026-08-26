@@ -34,6 +34,7 @@ from app.domain.p10_geometry import (
     resolve_surviving_contractions,
 )
 from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
+from app.domain.p10_triggers import BREAKOUT_BAR_SIGNAL_POLICY_V2
 from app.domain.p10_template_policy import (
     TEMPLATE_POLICY_VERSION,
     TemplateScoreFeatures,
@@ -54,6 +55,7 @@ IST_TZ = ZoneInfo("Asia/Kolkata")
 PROMPT_VERSION = "p10_vcp_proposal_v6"
 SCHEMA_VERSION = "gemini_vcp_proposal_output_v6"
 GEOMETRY_VERSION = "p10_python_owned_levels_v5"
+ENTRY_TRIGGER_POLICY_VERSION = BREAKOUT_BAR_SIGNAL_POLICY_V2
 PROPOSAL_INVALID_PROVIDER_JSON = "proposal_invalid_provider_json"
 _PROVIDER_PAYLOAD_SNIPPET_LIMIT = 4000
 
@@ -270,7 +272,10 @@ def _serialize_calculation_basis(
             "template_reason": template_reason,
             "leg_count": tmpl_info["leg_count"],
             "leg_risk_allocations": [float(x) for x in tmpl_info["leg_allocations"]],
-            "relative_volume_threshold": float(tmpl_info["relative_volume_threshold"]),
+            "relative_volume_threshold": float(
+                tmpl_info["breakout_bar_rvol_threshold"]
+            ),
+            "entry_trigger_policy_version": ENTRY_TRIGGER_POLICY_VERSION,
             "risk_per_trade_pct": str(risk_per_trade_pct * Decimal("100")),
             "approved_risk_budget_amount": (
                 str(approved_risk_budget_amount) if approved_risk_budget_amount is not None else None
@@ -476,7 +481,8 @@ def generate_trade_proposal_from_analysis(
         "approved_risk_budget_amount": approved_risk_budget_amount,
         "leg_count": tmpl_info["leg_count"],
         "leg_risk_allocations": [float(x) for x in tmpl_info["leg_allocations"]],
-        "relative_volume_threshold": tmpl_info["relative_volume_threshold"],
+        "relative_volume_threshold": tmpl_info["breakout_bar_rvol_threshold"],
+        "entry_trigger_policy_version": ENTRY_TRIGGER_POLICY_VERSION,
         "gemini_evidence": {
             "classification": ai_output.classification,
             "forming_state": ai_output.forming_state,

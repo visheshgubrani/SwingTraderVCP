@@ -151,6 +151,10 @@ class TradeProposalDetailResponse(BaseModel):
     leg_count: int
     leg_risk_allocations: list[Decimal]
     relative_volume_threshold: Decimal
+    entry_trigger_policy_version: Literal[
+        "cumulative_two_bar_v1",
+        "breakout_bar_signal_v2",
+    ]
     gemini_evidence: dict[str, Any]
     geometry: dict[str, Any]
     context_image_hash: str | None

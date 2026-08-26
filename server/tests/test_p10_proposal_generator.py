@@ -14,6 +14,7 @@ from app.services.proposal_generator import (
     SCHEMA_VERSION,
     ProposalProviderError,
     build_proposal_vision_request,
+    compute_proposal_hash,
     generate_trade_proposal_from_analysis,
     calculate_next_session_and_deadline,
     parse_proposal_openrouter_response,
@@ -45,6 +46,15 @@ def _ai_output(candidate_count: int = 2, **overrides) -> GeminiVcpProposalOutput
 
 
 class TestProposalGenerator(unittest.TestCase):
+    def test_trigger_policy_version_is_part_of_proposal_hash(self):
+        plan = {
+            "symbol": "NSE:TEST-EQ",
+            "entry_trigger_policy_version": "cumulative_two_bar_v1",
+        }
+        old_hash = compute_proposal_hash(plan)
+        plan["entry_trigger_policy_version"] = "breakout_bar_signal_v2"
+        self.assertNotEqual(old_hash, compute_proposal_hash(plan))
+
     def setUp(self):
         self.candles = []
         start = dt.date(2026, 8, 17) - dt.timedelta(days=251)
@@ -163,6 +173,10 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(locked["schema_version"], SCHEMA_VERSION)
         self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v6")
         self.assertEqual(locked["geometry_version"], GEOMETRY_VERSION)
+        self.assertEqual(
+            locked["entry_trigger_policy_version"],
+            "breakout_bar_signal_v2",
+        )
         self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v5")
         self.assertEqual(len(locked["geometry"]["target_slots"]), 3)
 

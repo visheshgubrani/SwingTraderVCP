@@ -510,7 +510,10 @@ async def _process_p10_position_tick(
                 UPDATE entry_legs
                 SET status = 'cancelled', updated_at = now()
                 WHERE position_id = :position_id
-                  AND status IN ('planned', 'armed', 'trigger_observed')
+                  AND status IN (
+                      'planned', 'armed', 'trigger_observed',
+                      'waiting_for_reset'
+                  )
                 """
             ),
             {"position_id": position.id},

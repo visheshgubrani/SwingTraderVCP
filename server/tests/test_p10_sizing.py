@@ -14,16 +14,16 @@ from app.domain.p10_sizing import (
 class TestP10Sizing(unittest.TestCase):
     def test_template_configs(self):
         self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.SINGLE]["leg_allocations"], [Decimal("1.00")])
-        self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.SINGLE]["relative_volume_threshold"], Decimal("2.00"))
+        self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.SINGLE]["breakout_bar_rvol_threshold"], Decimal("2.00"))
 
         self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.TWO_LEG]["leg_allocations"], [Decimal("0.60"), Decimal("0.40")])
-        self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.TWO_LEG]["relative_volume_threshold"], Decimal("1.75"))
+        self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.TWO_LEG]["breakout_bar_rvol_threshold"], Decimal("1.75"))
 
         self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.THREE_LEG_FRONT]["leg_allocations"], [Decimal("0.50"), Decimal("0.30"), Decimal("0.20")])
-        self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.THREE_LEG_FRONT]["relative_volume_threshold"], Decimal("2.00"))
+        self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.THREE_LEG_FRONT]["breakout_bar_rvol_threshold"], Decimal("2.00"))
 
         self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.THREE_LEG_BALANCED]["leg_allocations"], [Decimal("0.40"), Decimal("0.30"), Decimal("0.30")])
-        self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.THREE_LEG_BALANCED]["relative_volume_threshold"], Decimal("1.50"))
+        self.assertEqual(TEMPLATE_CONFIG[EntryTemplate.THREE_LEG_BALANCED]["breakout_bar_rvol_threshold"], Decimal("1.50"))
 
     def test_calculate_leg_sizing_normal(self):
         # 10,000 risk budget, entry 500, stop 480 (R=20 per share), max notional 150,000

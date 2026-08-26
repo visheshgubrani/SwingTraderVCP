@@ -202,7 +202,9 @@ async def _load_subscription_symbols(db: AsyncSession) -> list[str]:
                 -- armed entry legs / approved trade proposals
                 SELECT tp.instrument_id FROM trade_proposals tp
                 JOIN entry_legs el ON el.proposal_id = tp.id
-                WHERE el.status = 'armed'
+                WHERE el.status IN (
+                    'armed', 'trigger_observed', 'waiting_for_reset'
+                )
             )
             AND i.fyers_symbol IS NOT NULL
         """)

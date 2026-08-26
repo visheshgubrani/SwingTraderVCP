@@ -24,27 +24,27 @@ class EntryTemplate(str, Enum):
 TEMPLATE_CONFIG = {
     EntryTemplate.SINGLE: {
         "leg_allocations": [Decimal("1.00")],
-        "relative_volume_threshold": Decimal("2.00"),
+        "breakout_bar_rvol_threshold": Decimal("2.00"),
         "leg_count": 1,
     },
     EntryTemplate.TWO_LEG: {
         "leg_allocations": [Decimal("0.60"), Decimal("0.40")],
-        "relative_volume_threshold": Decimal("1.75"),
+        "breakout_bar_rvol_threshold": Decimal("1.75"),
         "leg_count": 2,
     },
     EntryTemplate.TWO_LEG_STAGED: {
         "leg_allocations": [Decimal("0.50"), Decimal("0.50")],
-        "relative_volume_threshold": Decimal("1.50"),
+        "breakout_bar_rvol_threshold": Decimal("1.50"),
         "leg_count": 2,
     },
     EntryTemplate.THREE_LEG_FRONT: {
         "leg_allocations": [Decimal("0.50"), Decimal("0.30"), Decimal("0.20")],
-        "relative_volume_threshold": Decimal("2.00"),
+        "breakout_bar_rvol_threshold": Decimal("2.00"),
         "leg_count": 3,
     },
     EntryTemplate.THREE_LEG_BALANCED: {
         "leg_allocations": [Decimal("0.40"), Decimal("0.30"), Decimal("0.30")],
-        "relative_volume_threshold": Decimal("1.50"),
+        "breakout_bar_rvol_threshold": Decimal("1.50"),
         "leg_count": 3,
     },
 }

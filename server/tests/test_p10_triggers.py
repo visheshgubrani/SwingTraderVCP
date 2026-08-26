@@ -3,8 +3,10 @@ import unittest
 from decimal import Decimal
 
 from app.domain.p10_triggers import (
+    BREAKOUT_BAR_SIGNAL_POLICY_V2,
     FiveMinuteBar,
     DailySessionBar,
+    calculate_bar_relative_volume,
     evaluate_intraday_trigger,
     evaluate_add_leg_gates,
     calculate_relative_volume,
@@ -18,6 +20,14 @@ class TestP10Triggers(unittest.TestCase):
         # Actual cumulative volume = 400,000 -> rvol = 2.0x
         rvol = calculate_relative_volume(400_000, 1_000_000, Decimal("0.20"))
         self.assertEqual(rvol, Decimal("2.0000"))
+
+    def test_breakout_bar_relative_volume_calculation(self):
+        rvol = calculate_bar_relative_volume(
+            120_000,
+            1_000_000,
+            Decimal("0.03"),
+        )
+        self.assertEqual(rvol, Decimal("4.0000"))
 
     def test_evaluate_intraday_trigger_skips_first_15m(self):
         sig_bar = FiveMinuteBar(
@@ -86,6 +96,82 @@ class TestP10Triggers(unittest.TestCase):
         self.assertTrue(res.signal_bar_valid)
         self.assertTrue(res.confirmation_bar_valid)
         self.assertTrue(res.chase_valid)
+
+    def test_v2_uses_breakout_bar_rvol_and_price_only_confirmation(self):
+        sig_bar = FiveMinuteBar(
+            bar_time=dt.datetime(2026, 8, 17, 10, 5),
+            open=Decimal("500"),
+            high=Decimal("512"),
+            low=Decimal("499"),
+            close=Decimal("508"),
+            volume=120_000,
+            cumulative_volume=300_000,
+        )
+        conf_bar = FiveMinuteBar(
+            bar_time=dt.datetime(2026, 8, 17, 10, 10),
+            open=Decimal("508"),
+            high=Decimal("511"),
+            low=Decimal("506"),
+            close=Decimal("509"),
+            volume=10_000,
+            cumulative_volume=310_000,
+        )
+        res = evaluate_intraday_trigger(
+            signal_bar=sig_bar,
+            confirmation_bar=conf_bar,
+            trigger_price=Decimal("505"),
+            chase_ceiling=Decimal("507"),
+            adv20_robust=1_000_000,
+            signal_expected_fraction=Decimal("0.30"),
+            conf_expected_fraction=Decimal("0.33"),
+            signal_expected_bar_fraction=Decimal("0.03"),
+            conf_expected_bar_fraction=Decimal("0.03"),
+            required_rvol=Decimal("2"),
+            current_market_price=Decimal("509"),
+            policy_version=BREAKOUT_BAR_SIGNAL_POLICY_V2,
+        )
+        self.assertTrue(res.is_triggered)
+        self.assertEqual(res.signal_rvol, Decimal("4.0000"))
+        self.assertEqual(res.signal_session_rvol, Decimal("1.0000"))
+        self.assertEqual(res.confirmation_rvol, Decimal("0.3333"))
+        self.assertFalse(res.chase_valid)
+
+    def test_v2_rejects_weak_signal_even_when_session_rvol_is_high(self):
+        sig_bar = FiveMinuteBar(
+            bar_time=dt.datetime(2026, 8, 17, 10, 5),
+            open=Decimal("500"),
+            high=Decimal("512"),
+            low=Decimal("499"),
+            close=Decimal("508"),
+            volume=30_000,
+            cumulative_volume=600_000,
+        )
+        conf_bar = FiveMinuteBar(
+            bar_time=dt.datetime(2026, 8, 17, 10, 10),
+            open=Decimal("508"),
+            high=Decimal("511"),
+            low=Decimal("506"),
+            close=Decimal("509"),
+            volume=60_000,
+            cumulative_volume=660_000,
+        )
+        res = evaluate_intraday_trigger(
+            signal_bar=sig_bar,
+            confirmation_bar=conf_bar,
+            trigger_price=Decimal("505"),
+            chase_ceiling=Decimal("515"),
+            adv20_robust=1_000_000,
+            signal_expected_fraction=Decimal("0.30"),
+            conf_expected_fraction=Decimal("0.33"),
+            signal_expected_bar_fraction=Decimal("0.03"),
+            conf_expected_bar_fraction=Decimal("0.03"),
+            required_rvol=Decimal("2"),
+            current_market_price=Decimal("509"),
+            policy_version=BREAKOUT_BAR_SIGNAL_POLICY_V2,
+        )
+        self.assertFalse(res.is_triggered)
+        self.assertEqual(res.signal_session_rvol, Decimal("2.0000"))
+        self.assertEqual(res.signal_rvol, Decimal("1.0000"))
 
     def test_evaluate_add_leg_gates_hold_and_base(self):
         # three_leg_front L2 requires Hold(1), then Base(2)

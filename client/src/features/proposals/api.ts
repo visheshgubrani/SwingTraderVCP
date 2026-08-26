@@ -9,7 +9,14 @@ export interface TradeProposalItem {
   symbol: string
   as_of_date: string
   status: "pending_approval" | "approved" | "rejected" | "expired_unapproved"
-  entry_state?: "armed" | "trigger_observed" | "executing" | "filled" | "expired" | null
+  entry_state?:
+    | "armed"
+    | "trigger_observed"
+    | "waiting_for_reset"
+    | "executing"
+    | "filled"
+    | "expired"
+    | null
   approval_deadline: string
   entry_session_date: string
   proposal_hash: string
@@ -34,6 +41,7 @@ export interface TradeProposalItem {
   leg_count: number
   leg_risk_allocations: number[]
   relative_volume_threshold: number
+  entry_trigger_policy_version: "cumulative_two_bar_v1" | "breakout_bar_signal_v2"
   gemini_evidence: {
     classification?: string
     forming_state?: string | null
@@ -129,6 +137,29 @@ export interface TradeProposalItem {
     eligible_session_end: string | null
     filled_shares: number
     filled_avg_price: number | null
+  }>
+  trigger_events?: Array<{
+    id: number
+    leg_id: string
+    bar_timestamp: string
+    bar_type: "signal_bar" | "confirmation_bar" | "reset_bar"
+    bar_close: number
+    bar_volume: number
+    cumulative_volume: number | null
+    expected_cumulative_volume: number | null
+    expected_bar_volume: number | null
+    relative_volume: number | null
+    bar_relative_volume: number | null
+    session_cumulative_relative_volume: number | null
+    recent_base_median_volume: number | null
+    volume_vs_recent_base: number | null
+    price_gate_passed: boolean | null
+    volume_gate_passed: boolean | null
+    trigger_outcome: string | null
+    entry_eligibility_outcome: string | null
+    entry_rejection_reason: string | null
+    chase_valid: boolean
+    is_confirmed: boolean
   }>
 }
 
@@ -681,6 +712,7 @@ export function useEntrySupervisorStatus() {
       ready: boolean
     }
     armed_legs_count: number
+    waiting_for_reset_count: number
     trigger_observed_count: number
     pending_capacity_conflicts: number
     recent_allocation_events: Array<{

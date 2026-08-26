@@ -158,11 +158,11 @@ def _effective_leg_status(
 ) -> str:
     """Effective per-leg status for presentation.
 
-    A closed entry window downgrades armed/trigger_observed to expired and
+    A closed entry window downgrades monitored trigger states to expired and
     in-flight intent states to executing, without writing to the database —
     the entry supervisor remains the sole writer of entry_legs.status.
     """
-    if status in ("armed", "trigger_observed") and entry_window_closed(
+    if status in ("armed", "trigger_observed", "waiting_for_reset") and entry_window_closed(
         eligible_session_end, now_ist
     ):
         return "expired"
@@ -177,7 +177,8 @@ def derive_proposal_entry_state(
 ) -> str | None:
     """Best single entry-state label for a proposal's legs.
 
-    Priority: filled > executing > trigger_observed > armed > expired > None.
+    Priority: filled > executing > trigger_observed > waiting_for_reset >
+    armed > expired > None.
     """
     if now_ist is None:
         now_ist = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
@@ -193,7 +194,14 @@ def derive_proposal_entry_state(
                 states.add("filled")
         except (TypeError, ValueError):
             pass
-    for candidate in ("filled", "executing", "trigger_observed", "armed", "expired"):
+    for candidate in (
+        "filled",
+        "executing",
+        "trigger_observed",
+        "waiting_for_reset",
+        "armed",
+        "expired",
+    ):
         if candidate in states:
             return candidate
     return None
@@ -916,7 +924,15 @@ async def list_trade_proposals(
     automation_run_id: UUID | None = None,
     as_of_date: dt.date | None = None,
     entry_state: Annotated[
-        Literal["armed", "trigger_observed", "executing", "filled", "expired"] | None,
+        Literal[
+            "armed",
+            "trigger_observed",
+            "waiting_for_reset",
+            "executing",
+            "filled",
+            "expired",
+        ]
+        | None,
         Query(alias="entry_state"),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -924,7 +940,7 @@ async def list_trade_proposals(
     """Returns trade proposals filtered by status (default: pending_approval), symbol, run, or date.
 
     Each row carries a derived `entry_state` for its entry legs (armed,
-    trigger_observed, executing, filled, or expired — see
+    trigger_observed, waiting_for_reset, executing, filled, or expired — see
     derive_proposal_entry_state). The optional `entry_state` filter applies
     Python-side after fetching, and `expired` reflects a closed entry window
     even before the entry supervisor has persisted the transition.
@@ -957,7 +973,8 @@ async def list_trade_proposals(
                entry_template, pivot_price, initial_stop, stop_distance_pct,
                chase_ceiling, t1, t2, t3, risk_budget_pct,
                approved_risk_budget_amount, risk_policy_version, leg_count,
-               leg_risk_allocations, relative_volume_threshold, gemini_evidence,
+               leg_risk_allocations, relative_volume_threshold,
+               entry_trigger_policy_version, gemini_evidence,
                geometry, context_image_hash, detail_image_hash, live_eligible,
                generated_at, created_at, updated_at
         FROM trade_proposals
@@ -1011,7 +1028,8 @@ async def get_trade_proposal(
                entry_template, pivot_price, initial_stop, stop_distance_pct,
                chase_ceiling, t1, t2, t3, risk_budget_pct,
                approved_risk_budget_amount, risk_policy_version, leg_count,
-               leg_risk_allocations, relative_volume_threshold, gemini_evidence,
+               leg_risk_allocations, relative_volume_threshold,
+               entry_trigger_policy_version, gemini_evidence,
                geometry, context_image_hash, detail_image_hash, live_eligible,
                generated_at, created_at, updated_at
         FROM trade_proposals
@@ -1039,9 +1057,38 @@ async def get_trade_proposal(
         leg["derived_status"] = _effective_leg_status(
             leg["status"], leg["eligible_session_end"], now_ist
         )
+    trigger_events = [
+        dict(event._mapping)
+        for event in (
+            await db.execute(
+                text(
+                    """
+                    SELECT te.id, te.leg_id, te.bar_timestamp, te.bar_type,
+                           te.bar_close, te.bar_volume, te.cumulative_volume,
+                           te.expected_cumulative_volume,
+                           te.expected_bar_volume,
+                           te.relative_volume, te.bar_relative_volume,
+                           te.session_cumulative_relative_volume,
+                           te.recent_base_median_volume,
+                           te.volume_vs_recent_base, te.price_gate_passed,
+                           te.volume_gate_passed, te.trigger_outcome,
+                           te.entry_eligibility_outcome,
+                           te.entry_rejection_reason, te.chase_valid,
+                           te.is_confirmed
+                    FROM trigger_events te
+                    JOIN entry_legs el ON el.id = te.leg_id
+                    WHERE el.proposal_id = :proposal_id
+                    ORDER BY te.bar_timestamp, te.leg_id
+                    """
+                ),
+                {"proposal_id": proposal_id},
+            )
+        ).fetchall()
+    ]
 
     result = dict(prop._mapping)
     result["legs"] = legs
+    result["trigger_events"] = trigger_events
     result["entry_state"] = derive_proposal_entry_state(legs, now_ist)
     return result
 
@@ -1229,9 +1276,33 @@ async def resolve_capacity_conflict(
         await db.execute(
             text(
                 """
-                UPDATE entry_legs
-                SET status = 'armed', signal_bar_timestamp = NULL
-                WHERE id = ANY(:leg_ids) AND status = 'trigger_observed'
+                UPDATE entry_legs el
+                SET status = CASE
+                        WHEN tp.entry_trigger_policy_version =
+                             'breakout_bar_signal_v2'
+                        THEN 'waiting_for_reset'
+                        ELSE 'armed'
+                    END,
+                    signal_bar_timestamp = NULL
+                FROM trade_proposals tp
+                WHERE el.proposal_id = tp.id
+                  AND el.id = ANY(:leg_ids)
+                  AND el.status = 'trigger_observed'
+                """
+            ),
+            {"leg_ids": [UUID(value) for value in conflict.competing_leg_ids]},
+        )
+        await db.execute(
+            text(
+                """
+                UPDATE trigger_events
+                SET entry_eligibility_outcome = 'rejected_capacity',
+                    entry_rejection_reason =
+                        'Capacity conflict expired before selection.'
+                WHERE leg_id = ANY(:leg_ids)
+                  AND bar_type = 'confirmation_bar'
+                  AND trigger_outcome = 'confirmed'
+                  AND entry_eligibility_outcome = 'pending'
                 """
             ),
             {"leg_ids": [UUID(value) for value in conflict.competing_leg_ids]},
@@ -1636,14 +1707,18 @@ async def get_entry_supervisor_status(
                el.chase_ceiling, tp.symbol, tp.entry_template, el.eligible_session_end
         FROM entry_legs el
         JOIN trade_proposals tp ON el.proposal_id = tp.id
-        WHERE el.status = 'armed';
+        WHERE el.status IN ('armed', 'waiting_for_reset');
     """)
     res = await db.execute(armed_legs_stmt)
     now_ist = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
-    armed_legs = [
+    monitored_legs = [
         row
         for row in (dict(r._mapping) for r in res.fetchall())
         if not entry_window_closed(row["eligible_session_end"], now_ist)
+    ]
+    armed_legs = [row for row in monitored_legs if row["status"] == "armed"]
+    waiting_for_reset_legs = [
+        row for row in monitored_legs if row["status"] == "waiting_for_reset"
     ]
 
     recent_ledger_stmt = text("""
@@ -1697,9 +1772,11 @@ async def get_entry_supervisor_status(
         "heartbeat": worker_status,
         "market_data": market_data,
         "armed_legs_count": len(armed_legs),
+        "waiting_for_reset_count": len(waiting_for_reset_legs),
         "trigger_observed_count": trigger_observed_count,
         "pending_capacity_conflicts": pending_conflicts,
         "armed_legs": armed_legs,
+        "waiting_for_reset_legs": waiting_for_reset_legs,
         "recent_allocation_events": recent_ledger,
     }
 

@@ -169,6 +169,7 @@ class LiveExecutionTests(unittest.IsolatedAsyncioTestCase):
                 payload={"s": "ok", "id_fyers": "async-1"},
             ),
         )
+        pre_submit_check = AsyncMock(return_value=Decimal("101.25"))
         with (
             patch(
                 "app.services.execution_engine.get_valid_access_token",
@@ -185,6 +186,7 @@ class LiveExecutionTests(unittest.IsolatedAsyncioTestCase):
                 order_intent_id=snapshot["id"],
                 broker_client=broker,
                 rate_limiter=NoWaitLimiter(),
+                pre_submit_check=pre_submit_check,
             )
 
         self.assertEqual(
@@ -196,6 +198,7 @@ class LiveExecutionTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(broker.calls, 1)
+        pre_submit_check.assert_awaited_once()
         self.assertEqual(db.commit.await_count, 2)
         claim_sql = str(db.execute.await_args_list[3].args[0])
         self.assertIn("status = 'submission_pending'", claim_sql)
@@ -216,6 +219,102 @@ class LiveExecutionTests(unittest.IsolatedAsyncioTestCase):
         # Capacity one enforces a conservative maximum of one operation per
         # 100ms even when multiple processes burst at once.
         self.assertEqual(redis.eval.await_args_list[0].args[-1], 1)
+
+    async def test_failed_final_entry_check_cancels_unsubmitted_reservation(self) -> None:
+        snapshot = live_snapshot()
+        snapshot.update(
+            {
+                "entry_leg_id": uuid4(),
+                "entry_leg_index": 1,
+                "proposal_id": uuid4(),
+            }
+        )
+        db = AsyncMock()
+        db.execute.side_effect = [
+            FakeResult(snapshot),
+            FakeResult({"enabled": False, "reason": None}),
+            FakeResult({"enabled": False, "reason": None}),
+            FakeResult({"id": snapshot["id"]}),
+            FakeResult(),
+            FakeResult(),
+        ]
+        broker = AssertingBroker(db)
+        final_check = AsyncMock(
+            side_effect=ExecutionBlockedError("Fresh price exceeds chase ceiling.")
+        )
+        with (
+            patch(
+                "app.services.execution_engine.get_valid_access_token",
+                new=AsyncMock(return_value="token"),
+            ),
+            patch(
+                "app.services.execution_engine.ensure_order_gateway_ready",
+                new=AsyncMock(),
+            ),
+        ):
+            with self.assertRaisesRegex(ExecutionBlockedError, "chase ceiling"):
+                await submit_live_entry_intent(
+                    db,
+                    object(),
+                    order_intent_id=snapshot["id"],
+                    broker_client=broker,
+                    rate_limiter=NoWaitLimiter(),
+                    pre_submit_check=final_check,
+                )
+
+        self.assertEqual(broker.calls, 0)
+        self.assertIn(
+            "status = 'cancelled'",
+            str(db.execute.await_args_list[3].args[0]),
+        )
+        self.assertIn(
+            "waiting_for_reset",
+            str(db.execute.await_args_list[5].args[0]),
+        )
+        db.commit.assert_awaited_once()
+
+    async def test_failed_final_check_does_not_release_concurrently_claimed_intent(
+        self,
+    ) -> None:
+        snapshot = live_snapshot()
+        snapshot.update(
+            {
+                "entry_leg_id": uuid4(),
+                "entry_leg_index": 1,
+                "proposal_id": uuid4(),
+            }
+        )
+        db = AsyncMock()
+        db.execute.side_effect = [
+            FakeResult(snapshot),
+            FakeResult({"enabled": False, "reason": None}),
+            FakeResult({"enabled": False, "reason": None}),
+            FakeResult(),
+        ]
+        with (
+            patch(
+                "app.services.execution_engine.get_valid_access_token",
+                new=AsyncMock(return_value="token"),
+            ),
+            patch(
+                "app.services.execution_engine.ensure_order_gateway_ready",
+                new=AsyncMock(),
+            ),
+        ):
+            result = await submit_live_entry_intent(
+                db,
+                object(),
+                order_intent_id=snapshot["id"],
+                rate_limiter=NoWaitLimiter(),
+                pre_submit_check=AsyncMock(
+                    side_effect=ExecutionBlockedError("chase")
+                ),
+            )
+
+        self.assertEqual(result.outcome, "already_in_progress")
+        self.assertEqual(db.execute.await_count, 4)
+        db.rollback.assert_awaited_once()
+        db.commit.assert_not_awaited()
 
     async def test_live_submission_requires_fresh_gateway_heartbeat(self) -> None:
         missing = AsyncMock()

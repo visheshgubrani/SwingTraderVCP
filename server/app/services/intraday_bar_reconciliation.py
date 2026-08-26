@@ -44,15 +44,15 @@ def _robust_adv20(daily_volumes: list[int]) -> int:
 def build_volume_profile(
     candles: list[list[Any]],
     *,
-    today_ist: dt.date,
+    evaluation_session_date: dt.date,
 ) -> tuple[dt.date, int, list[dict[str, str]], int] | None:
-    """Build a prior-session median cumulative-volume fraction profile."""
+    """Build a profile using sessions strictly before the evaluated session."""
     sessions: dict[dt.date, list[tuple[dt.datetime, int]]] = defaultdict(list)
     for candle in candles:
         if len(candle) < 6:
             continue
         timestamp = dt.datetime.fromtimestamp(int(candle[0]), tz=dt.timezone.utc).astimezone(IST_TZ)
-        if timestamp.date() >= today_ist:
+        if timestamp.date() >= evaluation_session_date:
             continue
         sessions[timestamp.date()].append((timestamp, int(candle[5])))
     valid = {
@@ -102,18 +102,16 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
             await session.execute(
                 text(
                     """
-                    SELECT DISTINCT i.id AS instrument_id, i.fyers_symbol AS symbol,
-                           EXISTS (
-                               SELECT 1 FROM volume_profiles vp
-                               WHERE vp.symbol = i.fyers_symbol AND vp.sessions_used >= 15
-                           ) AS has_profile
+                    SELECT DISTINCT i.id AS instrument_id, i.fyers_symbol AS symbol
                     FROM instruments i
                     WHERE i.id IN (
                         SELECT tp.instrument_id
                         FROM trade_proposals tp
                         JOIN entry_legs el ON el.proposal_id = tp.id
                         WHERE tp.status = 'approved'
-                          AND el.status IN ('armed', 'trigger_observed')
+                          AND el.status IN (
+                              'armed', 'trigger_observed', 'waiting_for_reset'
+                          )
                         UNION
                         SELECT instrument_id FROM positions
                         WHERE state IN ('open', 'trailing_active', 'exit_pending')
@@ -135,7 +133,9 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
     verified = 0
     failures = 0
     for item in symbols:
-        start = now_ist.date() - dt.timedelta(days=2 if item["has_profile"] else 50)
+        # Profiles need the rolling prior-session sample on every refresh.
+        # A short current-session reconciliation range cannot rebuild them.
+        start = now_ist.date() - dt.timedelta(days=50)
         payload = {
             "symbol": item["symbol"],
             "resolution": "5",
@@ -239,7 +239,10 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
                         ),
                         rows,
                     )
-                profile = build_volume_profile(candles, today_ist=now_ist.date())
+                profile = build_volume_profile(
+                    candles,
+                    evaluation_session_date=now_ist.date(),
+                )
                 if profile is not None:
                     as_of_date, adv20, points, sessions_used = profile
                     await session.execute(

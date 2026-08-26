@@ -1266,6 +1266,12 @@ CREATE TABLE trade_proposals (
     leg_count integer NOT NULL CHECK (leg_count IN (1, 2, 3)),
     leg_risk_allocations jsonb NOT NULL,
     relative_volume_threshold numeric(6, 2) NOT NULL CHECK (relative_volume_threshold > 0),
+    entry_trigger_policy_version text NOT NULL DEFAULT 'cumulative_two_bar_v1' CHECK (
+        entry_trigger_policy_version IN (
+            'cumulative_two_bar_v1',
+            'breakout_bar_signal_v2'
+        )
+    ),
     gemini_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
     geometry jsonb NOT NULL DEFAULT '{}'::jsonb,
     context_image_hash text,
@@ -1305,6 +1311,7 @@ CREATE TABLE entry_legs (
             'planned',
             'armed',
             'trigger_observed',
+            'waiting_for_reset',
             'intent_created',
             'submitted',
             'partially_filled',
@@ -1355,7 +1362,36 @@ CREATE TABLE trigger_events (
     cumulative_volume bigint NOT NULL,
     expected_cumulative_volume bigint NOT NULL,
     relative_volume numeric(8, 4) NOT NULL,
-    bar_type text NOT NULL CHECK (bar_type IN ('signal_bar', 'confirmation_bar')),
+    expected_bar_volume bigint,
+    bar_relative_volume numeric(8, 4),
+    session_cumulative_relative_volume numeric(8, 4),
+    recent_base_median_volume numeric(18, 4),
+    volume_vs_recent_base numeric(8, 4),
+    price_gate_passed boolean,
+    volume_gate_passed boolean,
+    trigger_outcome text CHECK (
+        trigger_outcome IS NULL OR trigger_outcome IN (
+            'signal_rejected',
+            'waiting_confirmation',
+            'confirmation_rejected',
+            'confirmed',
+            'reset'
+        )
+    ),
+    entry_eligibility_outcome text CHECK (
+        entry_eligibility_outcome IS NULL OR entry_eligibility_outcome IN (
+            'pending',
+            'eligible',
+            'rejected_chase',
+            'rejected_capacity',
+            'rejected_preflight',
+            'rejected_other'
+        )
+    ),
+    entry_rejection_reason text,
+    bar_type text NOT NULL CHECK (
+        bar_type IN ('signal_bar', 'confirmation_bar', 'reset_bar')
+    ),
     is_confirmed boolean NOT NULL DEFAULT false,
     chase_valid boolean NOT NULL DEFAULT true,
     created_at timestamptz NOT NULL DEFAULT now()
@@ -1621,7 +1657,8 @@ ON p10_forming_patterns (status, next_check_date);
 CREATE UNIQUE INDEX trade_proposals_input_version_uidx
 ON trade_proposals (
     screening_result_id, source_hash, model, prompt_version,
-    schema_version, renderer_version, geometry_version, risk_policy_version
+    schema_version, renderer_version, geometry_version, risk_policy_version,
+    entry_trigger_policy_version
 );
 CREATE UNIQUE INDEX proposal_decisions_one_per_proposal_uidx
 ON proposal_decisions (proposal_id);

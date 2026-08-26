@@ -371,7 +371,7 @@ Deterministic construction:
   and tick-valid. Python never repairs an AI target.
 - Template maps to maximum approved-risk shares, not raw notional:
 
-| Template | Risk by leg | Required relative volume |
+| Template | Risk by leg | Required breakout-bar RVOL |
 | --- | --- | --- |
 | `single` | 100% | 2.0× |
 | `three_leg_front` | 50% / 30% / 20% | 2.0× |
@@ -402,7 +402,7 @@ sequenceDiagram
     Note over API,EE: HTTP returns. No broker call.
 
     ES->>R: Completed 5-minute bar
-    ES->>DB: Two-bar price and relative-volume confirmation
+    ES->>DB: Signal-bar RVOL and next-bar price confirmation
     ES->>DB: Fresh broker preflight (paper ledger or Fyers)
     ES->>DB: Acquire allocation lock and recompute all caps
     ES->>DB: Persist sizing and allocation event
@@ -441,15 +441,25 @@ replay-report hash on an enforced market-context policy and empty paper books.
 The entry supervisor never creates a market-data connection. It ignores the
 first 15 minutes of the session. There is no price-only fallback.
 
-Relative volume = current cumulative volume divided by
-`(robust ADV20 × expected cumulative-volume fraction)`. Fewer than 15 valid
-profile sessions, stale/missing cumulative volume, or unresolved
-reconciliation drift blocks the trigger.
+Robust ADV20 and cumulative volume-profile buckets use only sessions strictly
+before the session being evaluated. Expected breakout-bar fraction is the
+current bucket's median cumulative fraction minus the previous bucket's.
+Breakout-bar RVOL is signal-bar volume divided by robust ADV20 times that
+fraction. Fewer than 15 valid profile sessions, stale/missing volume, an
+invalid bucket delta, or unresolved reconciliation drift blocks the trigger.
 
 A signal bar must close above its pivot/base-high trigger with the template's
-required relative volume. The next completed 5-minute bar must remain above
-the trigger with relative volume still at or above the threshold. A trigger
-that loses capacity is not held for a late entry.
+required breakout-bar RVOL. The next completed 5-minute bar must remain above
+the trigger but has no RVOL hard gate. A failed signal or confirmation enters
+`waiting_for_reset`; a verified close at or below the trigger is required
+before a later close above it can start another attempt. Session-cumulative
+RVOL, confirmation-bar RVOL, and volume versus the preceding 12 verified
+same-session bars are diagnostics only.
+
+A confirmed trigger is distinct from entry eligibility. Fresh executable LTP
+must remain at or below the frozen chase ceiling immediately before
+submission. Chase or capacity rejection is audited without reclassifying the
+trigger, and the leg requires a reset plus a fresh two-bar trigger.
 
 Add eligibility begins only after the first fill and expires after 10 NSE
 sessions. `single` has no adds. Hold and Base are sequential gates; every add

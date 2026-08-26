@@ -43,6 +43,7 @@ const LEG_STATUS_LABELS: Record<string, string> = {
   planned: "PLANNED",
   armed: "ARMED",
   trigger_observed: "TRIGGER OBSERVED",
+  waiting_for_reset: "WAITING FOR RESET",
   intent_created: "INTENT CREATED",
   submitted: "SUBMITTED",
   partially_filled: "PARTIALLY FILLED",
@@ -57,7 +58,9 @@ function LegStatusBadge({ leg }: { leg: { status: string; derived_status?: strin
   const variant =
     displayStatus === "filled"
       ? "default"
-      : displayStatus === "armed" || displayStatus === "trigger_observed"
+      : displayStatus === "armed" ||
+          displayStatus === "trigger_observed" ||
+          displayStatus === "waiting_for_reset"
         ? "secondary"
         : "outline"
   const className =
@@ -713,6 +716,13 @@ export function ProposalDetailPage() {
           <div className="mt-3 grid gap-3 md:grid-cols-3">
             {(proposal.legs ?? []).map((leg, idx) => {
               const legNum = idx + 1
+              const legEvents = (proposal.trigger_events ?? []).filter(
+                (event) => event.leg_id === leg.id,
+              )
+              const latestEvent = legEvents[legEvents.length - 1]
+              const latestSignalEvent = [...legEvents]
+                .reverse()
+                .find((event) => event.bar_type === "signal_bar")
               return (
                 <div
                   key={legNum}
@@ -727,7 +737,15 @@ export function ProposalDetailPage() {
                     </div>
                     <div className="mt-2 space-y-1 text-[11px] text-muted-foreground">
                       <div>Trigger: <strong className="text-foreground">{leg.trigger_type.toUpperCase()}</strong> @ ₹{Number(proposal.pivot_price).toFixed(2)}</div>
-                      <div>Volume Gate: <strong className="text-foreground">RVOL ≥ {proposal.relative_volume_threshold}×</strong></div>
+                      <div>
+                        Volume Gate:{" "}
+                        <strong className="text-foreground">
+                          {proposal.entry_trigger_policy_version === "breakout_bar_signal_v2"
+                            ? "Signal-bar RVOL"
+                            : "Cumulative RVOL"}{" "}
+                          ≥ {proposal.relative_volume_threshold}×
+                        </strong>
+                      </div>
                       <div>Hold / Base Gates: {leg.hold_required} bars hold · {leg.base_required} bars base</div>
                     </div>
                   </div>
@@ -735,6 +753,47 @@ export function ProposalDetailPage() {
                     <span className="text-muted-foreground">Status:</span>
                     <LegStatusBadge leg={leg} />
                   </div>
+                  {latestEvent ? (
+                    <div className="mt-2 space-y-1 border-t border-border/30 pt-2 text-[10px] text-muted-foreground">
+                      <div className="flex justify-between gap-2">
+                        <span>Latest trigger</span>
+                        <strong className="text-foreground">
+                          {latestEvent.trigger_outcome?.replaceAll("_", " ") ?? "legacy event"}
+                        </strong>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <span>Signal / session RVOL</span>
+                        <strong className="text-foreground">
+                          {latestSignalEvent?.bar_relative_volume == null
+                            ? "—"
+                            : `${Number(latestSignalEvent.bar_relative_volume).toFixed(2)}×`}
+                          {" / "}
+                          {latestSignalEvent?.session_cumulative_relative_volume == null
+                            ? "—"
+                            : `${Number(latestSignalEvent.session_cumulative_relative_volume).toFixed(2)}×`}
+                        </strong>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <span>Volume vs recent base</span>
+                        <strong className="text-foreground">
+                          {latestSignalEvent?.volume_vs_recent_base == null
+                            ? "—"
+                            : `${Number(latestSignalEvent.volume_vs_recent_base).toFixed(2)}×`}
+                        </strong>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <span>Entry eligibility</span>
+                        <strong className="text-foreground">
+                          {latestEvent.entry_eligibility_outcome?.replaceAll("_", " ") ?? "—"}
+                        </strong>
+                      </div>
+                      {latestEvent.entry_rejection_reason ? (
+                        <p className="text-amber-300">
+                          {latestEvent.entry_rejection_reason}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               )
             })}

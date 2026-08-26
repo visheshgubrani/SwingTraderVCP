@@ -19,6 +19,7 @@ from uuid import uuid4
 from app.domain.p10_geometry import calculate_chase_ceiling, compute_atr14
 from app.domain.p10_sizing import apportion_staged_exits, solve_stop_tightening
 from app.domain.p10_triggers import (
+    BREAKOUT_BAR_SIGNAL_POLICY_V2,
     DailySessionBar,
     FiveMinuteBar,
     evaluate_add_leg_gates,
@@ -91,8 +92,8 @@ class TestAutoTradingE2ESmoke(unittest.IsolatedAsyncioTestCase):
             high=Decimal("504.00"),
             low=Decimal("497.00"),
             close=Decimal("502.00"),
-            volume=100_000,
-            cumulative_volume=200_000,
+            volume=120_000,
+            cumulative_volume=300_000,
         )
         conf_bar = FiveMinuteBar(
             bar_time=dt.datetime(2026, 8, 25, 9, 40),
@@ -100,8 +101,8 @@ class TestAutoTradingE2ESmoke(unittest.IsolatedAsyncioTestCase):
             high=Decimal("506.00"),
             low=Decimal("500.00"),
             close=Decimal("503.00"),
-            volume=90_000,
-            cumulative_volume=290_000,
+            volume=10_000,
+            cumulative_volume=310_000,
         )
         chase, _ = calculate_chase_ceiling(Decimal("500.00"), Decimal("480.00"))
         trigger_res = evaluate_intraday_trigger(
@@ -110,10 +111,13 @@ class TestAutoTradingE2ESmoke(unittest.IsolatedAsyncioTestCase):
             trigger_price=Decimal("500.00"),
             chase_ceiling=chase,
             adv20_robust=1_000_000,
-            signal_expected_fraction=Decimal("0.08"),
-            conf_expected_fraction=Decimal("0.10"),
+            signal_expected_fraction=Decimal("0.30"),
+            conf_expected_fraction=Decimal("0.33"),
+            signal_expected_bar_fraction=Decimal("0.03"),
+            conf_expected_bar_fraction=Decimal("0.03"),
             required_rvol=Decimal("2.00"),
             current_market_price=Decimal("502.50"),
+            policy_version=BREAKOUT_BAR_SIGNAL_POLICY_V2,
         )
         self.assertTrue(trigger_res.is_triggered)
 

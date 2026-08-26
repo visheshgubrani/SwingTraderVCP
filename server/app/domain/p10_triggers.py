@@ -1,7 +1,7 @@
 """P10 Intraday Triggers & Multi-Leg Add State Machine.
 
-Deterministic Python evaluation of 5-minute two-bar price + relative-volume confirmation,
-and Hold(N) + Base(M) multi-leg add progression according to AGENTS.md §6.1 & §6.2.
+Deterministic Python evaluation of versioned 5-minute breakout confirmation
+and Hold(N) + Base(M) multi-leg add progression according to AGENTS.md §6.
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ IST_TZ = ZoneInfo("Asia/Kolkata")
 # re-publishes the final 15:25-15:30 five-minute bars, so a legitimate last-bar
 # two-bar confirmation and its allocation can never be cut off by expiry.
 ENTRY_WINDOW_CLOSE_TIME = dt.time(16, 0)
+CUMULATIVE_TWO_BAR_POLICY_V1 = "cumulative_two_bar_v1"
+BREAKOUT_BAR_SIGNAL_POLICY_V2 = "breakout_bar_signal_v2"
 
 
 def entry_window_closed(
@@ -82,6 +84,8 @@ class TriggerEvaluationResult:
     chase_valid: bool
     signal_rvol: Decimal
     confirmation_rvol: Decimal
+    signal_session_rvol: Decimal = Decimal("0")
+    confirmation_session_rvol: Decimal = Decimal("0")
     rejection_reason: str | None = None
 
 
@@ -118,6 +122,22 @@ def calculate_relative_volume(
     return rvol.quantize(Decimal("0.0001"))
 
 
+def calculate_bar_relative_volume(
+    bar_volume: int,
+    adv20_robust: int,
+    expected_bar_fraction: Decimal,
+) -> Decimal:
+    """Return one 5-minute bar's volume relative to its time-of-day profile."""
+    if bar_volume < 0 or adv20_robust <= 0 or expected_bar_fraction <= 0:
+        return Decimal("0")
+    expected_bar_volume = Decimal(str(adv20_robust)) * expected_bar_fraction
+    if expected_bar_volume <= 0:
+        return Decimal("0")
+    return (
+        Decimal(str(bar_volume)) / expected_bar_volume
+    ).quantize(Decimal("0.0001"))
+
+
 def evaluate_intraday_trigger(
     signal_bar: FiveMinuteBar,
     confirmation_bar: FiveMinuteBar,
@@ -128,12 +148,20 @@ def evaluate_intraday_trigger(
     conf_expected_fraction: Decimal,
     required_rvol: Decimal,
     current_market_price: Decimal,
+    policy_version: str = CUMULATIVE_TWO_BAR_POLICY_V1,
+    signal_expected_bar_fraction: Decimal | None = None,
+    conf_expected_bar_fraction: Decimal | None = None,
 ) -> TriggerEvaluationResult:
-    """Evaluates two-bar price + relative volume trigger confirmation:
+    """Evaluate a versioned two-bar breakout.
+
+    ``cumulative_two_bar_v1`` preserves the historical two-cumulative-RVOL
+    gates and confirmation-time chase check. ``breakout_bar_signal_v2`` gates
+    only the signal bar's individual-bucket RVOL; confirmation is price-only
+    and chase remains a separate execution-eligibility diagnostic.
+
     1. First 15 minutes of the session (09:15-09:30) are excluded.
-    2. Signal bar must close above trigger with relative volume >= required_rvol.
-    3. Confirmation bar (immediately following) must remain above trigger with rvol >= required_rvol.
-    4. Current price must be at or below chase ceiling.
+    2. Signal bar must close above trigger with the policy's required RVOL.
+    3. Confirmation must be the immediately following bar and hold the trigger.
     """
     def market_time(value: dt.datetime) -> dt.datetime:
         # Stored bars are timezone-aware.  Treat naive values as IST only for
@@ -181,9 +209,28 @@ def evaluate_intraday_trigger(
             ),
         )
 
-    # 2. Relative volume calculations
-    sig_rvol = calculate_relative_volume(signal_bar.cumulative_volume, adv20_robust, signal_expected_fraction)
-    conf_rvol = calculate_relative_volume(confirmation_bar.cumulative_volume, adv20_robust, conf_expected_fraction)
+    # 2. Relative-volume calculations. Session-cumulative values remain
+    # diagnostics in v2 and the authoritative values in v1.
+    sig_session_rvol = calculate_relative_volume(
+        signal_bar.cumulative_volume, adv20_robust, signal_expected_fraction
+    )
+    conf_session_rvol = calculate_relative_volume(
+        confirmation_bar.cumulative_volume, adv20_robust, conf_expected_fraction
+    )
+    if policy_version == BREAKOUT_BAR_SIGNAL_POLICY_V2:
+        if signal_expected_bar_fraction is None or conf_expected_bar_fraction is None:
+            raise ValueError("v2 trigger evaluation requires both expected bar fractions")
+        sig_rvol = calculate_bar_relative_volume(
+            signal_bar.volume, adv20_robust, signal_expected_bar_fraction
+        )
+        conf_rvol = calculate_bar_relative_volume(
+            confirmation_bar.volume, adv20_robust, conf_expected_bar_fraction
+        )
+    elif policy_version == CUMULATIVE_TWO_BAR_POLICY_V1:
+        sig_rvol = sig_session_rvol
+        conf_rvol = conf_session_rvol
+    else:
+        raise ValueError(f"Unknown entry trigger policy: {policy_version}")
 
     # 3. Signal bar check
     sig_valid = (signal_bar.close > trigger_price) and (sig_rvol >= required_rvol)
@@ -200,16 +247,23 @@ def evaluate_intraday_trigger(
             chase_valid=False,
             signal_rvol=sig_rvol,
             confirmation_rvol=conf_rvol,
+            signal_session_rvol=sig_session_rvol,
+            confirmation_session_rvol=conf_session_rvol,
             rejection_reason="; ".join(reason),
         )
 
-    # 4. Confirmation bar check (must be subsequent bar and hold above trigger + rvol)
-    conf_valid = (confirmation_bar.close > trigger_price) and (conf_rvol >= required_rvol)
+    # 4. Confirmation is price-only in v2; v1 retains its cumulative-RVOL gate.
+    conf_volume_valid = (
+        conf_rvol >= required_rvol
+        if policy_version == CUMULATIVE_TWO_BAR_POLICY_V1
+        else True
+    )
+    conf_valid = confirmation_bar.close > trigger_price and conf_volume_valid
     if not conf_valid:
         reason = []
         if confirmation_bar.close <= trigger_price:
             reason.append(f"Confirmation bar close ({confirmation_bar.close}) <= trigger ({trigger_price})")
-        if conf_rvol < required_rvol:
+        if not conf_volume_valid:
             reason.append(f"Confirmation bar rvol ({conf_rvol:.2f}) < required ({required_rvol:.2f})")
         return TriggerEvaluationResult(
             is_triggered=False,
@@ -218,12 +272,15 @@ def evaluate_intraday_trigger(
             chase_valid=False,
             signal_rvol=sig_rvol,
             confirmation_rvol=conf_rvol,
+            signal_session_rvol=sig_session_rvol,
+            confirmation_session_rvol=conf_session_rvol,
             rejection_reason="; ".join(reason),
         )
 
-    # 5. Chase ceiling check
+    # 5. Chase is part of v1 trigger validity, but only an execution
+    # eligibility diagnostic in v2.
     chase_ok = current_market_price <= chase_ceiling
-    if not chase_ok:
+    if not chase_ok and policy_version == CUMULATIVE_TWO_BAR_POLICY_V1:
         return TriggerEvaluationResult(
             is_triggered=False,
             signal_bar_valid=True,
@@ -231,6 +288,8 @@ def evaluate_intraday_trigger(
             chase_valid=False,
             signal_rvol=sig_rvol,
             confirmation_rvol=conf_rvol,
+            signal_session_rvol=sig_session_rvol,
+            confirmation_session_rvol=conf_session_rvol,
             rejection_reason=f"Current market price ({current_market_price}) exceeds chase ceiling ({chase_ceiling})",
         )
 
@@ -238,9 +297,11 @@ def evaluate_intraday_trigger(
         is_triggered=True,
         signal_bar_valid=True,
         confirmation_bar_valid=True,
-        chase_valid=True,
+        chase_valid=chase_ok,
         signal_rvol=sig_rvol,
         confirmation_rvol=conf_rvol,
+        signal_session_rvol=sig_session_rvol,
+        confirmation_session_rvol=conf_session_rvol,
         rejection_reason=None,
     )
 

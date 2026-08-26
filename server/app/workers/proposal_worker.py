@@ -444,6 +444,7 @@ async def _persist_proposal(
                 t1, t2, t3, risk_policy_id, risk_policy_version, risk_budget_pct,
                 approved_risk_budget_amount,
                 leg_count, leg_risk_allocations, relative_volume_threshold,
+                entry_trigger_policy_version,
                 gemini_evidence, geometry, context_image_hash, detail_image_hash,
                 context_image, detail_image, live_eligible, generated_at,
                 provider_request_id, provider_usage, provider_cost
@@ -456,6 +457,7 @@ async def _persist_proposal(
                 :t1, :t2, :t3, :risk_policy_id, :risk_policy_version, :risk_budget_pct,
                 :approved_risk_budget_amount,
                 :leg_count, CAST(:leg_risk_allocations AS jsonb), :relative_volume_threshold,
+                :entry_trigger_policy_version,
                 CAST(:gemini_evidence AS jsonb), CAST(:geometry AS jsonb),
                 :context_image_hash, :detail_image_hash, :context_image, :detail_image,
                 :live_eligible, :generated_at, :provider_request_id,
@@ -464,7 +466,7 @@ async def _persist_proposal(
             ON CONFLICT (
                 screening_result_id, source_hash, model, prompt_version,
                 schema_version, renderer_version, geometry_version,
-                risk_policy_version
+                risk_policy_version, entry_trigger_policy_version
             ) DO NOTHING
             RETURNING id
             """
@@ -499,6 +501,8 @@ async def _persist_proposal(
                       AND renderer_version = :renderer_version
                       AND geometry_version = :geometry_version
                       AND risk_policy_version = :risk_policy_version
+                      AND entry_trigger_policy_version =
+                          :entry_trigger_policy_version
                     """
                 ),
                 proposal,

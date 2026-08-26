@@ -37,9 +37,9 @@ from app.domain.p10_sizing import (
     solve_stop_tightening,
 )
 from app.domain.p10_triggers import (
+    BREAKOUT_BAR_SIGNAL_POLICY_V2,
     DailySessionBar,
     FiveMinuteBar,
-    calculate_relative_volume,
     evaluate_add_leg_gates,
     evaluate_intraday_trigger,
 )
@@ -139,24 +139,26 @@ class SmokeTestRunner:
         sig_ok = FiveMinuteBar(
             bar_time=dt.datetime(2026, 8, 25, 9, 35),
             open=Decimal("502"), high=Decimal("512"), low=Decimal("500"), close=Decimal("510"),
-            volume=100000, cumulative_volume=200000,
+            volume=120000, cumulative_volume=300000,
         )
         conf_ok = FiveMinuteBar(
             bar_time=dt.datetime(2026, 8, 25, 9, 40),
             open=Decimal("510"), high=Decimal("515"), low=Decimal("508"), close=Decimal("512"),
-            volume=90000, cumulative_volume=290000,
+            volume=10000, cumulative_volume=310000,
         )
         chase, _ = calculate_chase_ceiling(Decimal("505.00"), Decimal("485.00"))
         res_ok = evaluate_intraday_trigger(
             signal_bar=sig_ok, confirmation_bar=conf_ok,
             trigger_price=Decimal("505.00"), chase_ceiling=chase,
-            adv20_robust=1000000, signal_expected_fraction=Decimal("0.08"), conf_expected_fraction=Decimal("0.10"),
+            adv20_robust=1000000, signal_expected_fraction=Decimal("0.30"), conf_expected_fraction=Decimal("0.33"),
+            signal_expected_bar_fraction=Decimal("0.03"), conf_expected_bar_fraction=Decimal("0.03"),
             required_rvol=Decimal("2.00"), current_market_price=Decimal("512.00"),
+            policy_version=BREAKOUT_BAR_SIGNAL_POLICY_V2,
         )
         self.log(
             "Valid 2-Bar Breakout Trigger",
             res_ok.is_triggered and res_ok.signal_bar_valid and res_ok.confirmation_bar_valid,
-            f"Breakout confirmed at 512.00 with RVOL {res_ok.signal_rvol:.2f}x / {res_ok.confirmation_rvol:.2f}x",
+            f"Breakout confirmed with signal-bar RVOL {res_ok.signal_rvol:.2f}x and quiet confirmation {res_ok.confirmation_rvol:.2f}x",
         )
 
     def test_staged_exits_and_trailing(self) -> None:

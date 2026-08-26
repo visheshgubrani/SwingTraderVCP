@@ -75,7 +75,8 @@ class TickSubscriptionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
         sql = str(db.execute.await_args.args[0])
         self.assertIn("JOIN entry_legs", sql)
-        self.assertIn("el.status = 'armed'", sql)
+        self.assertIn("el.status IN", sql)
+        self.assertIn("'waiting_for_reset'", sql)
 
 
 class TickWorkerResilienceTests(unittest.IsolatedAsyncioTestCase):

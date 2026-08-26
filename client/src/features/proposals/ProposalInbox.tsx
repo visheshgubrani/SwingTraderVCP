@@ -177,6 +177,7 @@ export function ProposalInbox() {
   const entryStateBadges: Record<string, { label: string; className: string }> = {
     armed: { label: "ARMED", className: "bg-amber-500/10 text-amber-400 border-amber-500/30" },
     trigger_observed: { label: "TRIGGERED", className: "bg-amber-500/10 text-amber-400 border-amber-500/30" },
+    waiting_for_reset: { label: "WAITING RESET", className: "bg-orange-500/10 text-orange-400 border-orange-500/30" },
     executing: { label: "EXECUTING", className: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
     filled: { label: "FILLED", className: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" },
     expired: { label: "ENTRY EXPIRED", className: "bg-rose-500/10 text-rose-300 border-rose-500/30" },
@@ -242,6 +243,13 @@ export function ProposalInbox() {
             <span className="text-muted-foreground/50">|</span>
             <div className="text-muted-foreground">
               Armed: <strong className="text-foreground">{supervisorStatus?.armed_legs_count ?? 0}</strong>
+            </div>
+            <span className="text-muted-foreground/50">|</span>
+            <div className="text-muted-foreground">
+              Awaiting reset:{" "}
+              <strong className="text-amber-300">
+                {supervisorStatus?.waiting_for_reset_count ?? 0}
+              </strong>
             </div>
           </div>
         </div>

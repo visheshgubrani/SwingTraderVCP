@@ -104,6 +104,17 @@ class EffectiveLegStatusTests(unittest.TestCase):
             "expired",
         )
 
+    def test_waiting_for_reset_closed_window_derives_expired(self) -> None:
+        now = dt.datetime(2026, 8, 22, 9, 0, tzinfo=IST_TZ)
+        self.assertEqual(
+            _effective_leg_status(
+                "waiting_for_reset",
+                dt.date(2026, 8, 21),
+                now,
+            ),
+            "expired",
+        )
+
     def test_intent_statuses_map_to_executing(self) -> None:
         now = dt.datetime(2026, 8, 21, 12, 0, tzinfo=IST_TZ)
         for status in ("intent_created", "submitted", "submission_unknown"):
@@ -161,6 +172,13 @@ class DeriveProposalEntryStateTests(unittest.TestCase):
             [self.leg("trigger_observed", end=self.SESSION)], self.ist(21, 12)
         )
         self.assertEqual(state, "trigger_observed")
+
+    def test_waiting_for_reset_open_window(self) -> None:
+        state = derive_proposal_entry_state(
+            [self.leg("waiting_for_reset", end=self.SESSION)],
+            self.ist(21, 12),
+        )
+        self.assertEqual(state, "waiting_for_reset")
 
     def test_intent_created_is_executing(self) -> None:
         state = derive_proposal_entry_state(

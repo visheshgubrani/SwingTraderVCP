@@ -64,7 +64,7 @@ The system follows four core rules:
 |                                                                                    |
 |  [Entry Supervisor Worker]                                                         |
 |   - Evaluates completed 5-minute bars from Tick Ingestion                          |
-|   - Verifies breakout trigger, relative volume, and chase ceiling                  |
+|   - Verifies breakout-bar RVOL, next-bar acceptance, and entry chase eligibility  |
 |   - Sizing and allocation based on template (single, two-leg, three-leg)           |
 |           |                                                                        |
 |           v                                                                        |
@@ -122,7 +122,7 @@ The system follows four core rules:
 |  [Entry Supervisor]                                                   |
 |   - Listens for completed 5-minute bar events                         |
 |   - Evaluates breakout triggers against approved proposals           |
-|   - Checks chase ceilings, volume surge, and multi-leg gates          |
+|   - Checks breakout-bar volume, reset state, chase eligibility, and add gates |
 |   - Triggers order creation via Execution Engine                      |
 |                                                                       |
 |  [Execution Engine]                                                   |
@@ -153,7 +153,7 @@ The system follows four core rules:
 | **Core ARQ Worker** | Runs cron jobs: EOD candle sync, P9 market context, screener runs, P7 fundamentals, token refresh, and broker reconciliation. |
 | **Proposal Worker** | Dedicated queue worker. Renders headless chart images, queries Gemini for pattern reads, and uses Python to construct immutable trade plans. |
 | **Tick Ingestion** | The single connection to Fyers Market WebSocket. Updates Redis LTP cache and aggregates 5-minute bars. |
-| **Entry Supervisor** | Monitors completed 5-minute bars for approved proposals. Evaluates triggers, chase ceilings, volume requirements, and sizing before ordering entries. |
+| **Entry Supervisor** | Monitors verified 5-minute bars for approved proposals. Evaluates signal-bar RVOL, next-bar price acceptance, reset state, chase eligibility, and sizing before ordering entries. |
 | **Execution Engine** | Routes orders to Paper Broker or Fyers REST. Enforces rate limits (10 OPS), idempotency checks, and the global kill switch. |
 | **Order Gateway** | The single connection to Fyers Order WebSocket in live mode. Drains paper events in paper mode. Reconciles fills and order events in Postgres. |
 | **Position Monitor** | Evaluates software stop-losses, partial targets (T1/T2/T3), and step-percentage trailing stops against live ticks. Dispatches exit orders. |
@@ -168,7 +168,7 @@ PostgreSQL is the durable system of record. Redis handles message queuing, pub/s
 - **P9 Market Regime Context**: Computes market breadth, index moving averages, and sector rankings to dynamically adjust risk rules.
 - **VCP Vision Pattern Validator**: Generates 1280x720 context and detail charts for candidate stocks and runs structured AI pattern verification (Gemini 3.7 Flash via OpenRouter).
 - **Proposal Inbox & Templates**: Turns valid chart setups into immutable trade proposals with defined pivot prices, stop levels, targets, and multi-leg risk templates (Single, Two-Leg, Three-Leg Front, Three-Leg Balanced).
-- **5-Minute Entry Supervisor**: Waits for live 5-minute bar breakouts above pivot levels, checks relative volume thresholds, and prevents entries beyond chase ceilings.
+- **5-Minute Entry Supervisor**: Requires time-of-day-adjusted breakout-bar RVOL and immediate next-bar price acceptance, then prevents execution beyond the immutable chase ceiling.
 - **Sub-Second Position Monitor**: Evaluates software stop-losses, multi-tier profit targets, and step trailing rules against live tick streams without depending on open browser tabs.
 - **Paper & Live Execution**: Built-in Paper Broker for zero-risk simulation and double-armed Live CNC trading with token-bucket rate limiting (10 OPS) and Fyers async order APIs.
 - **P7 Company Fundamentals**: Optional survivor-only fundamental enrichment via Upstox API and official NSE corporate filings (promoter pledge and leverage checks).

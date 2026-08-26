@@ -76,3 +76,40 @@ class TickSubscriptionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         sql = str(db.execute.await_args.args[0])
         self.assertIn("JOIN entry_legs", sql)
         self.assertIn("el.status = 'armed'", sql)
+
+
+class TickWorkerResilienceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_auth_error_triggers_invalidation_and_reconnect(self) -> None:
+        from app.workers.tick_worker import (
+            TickWorkerState,
+            _on_error_factory,
+            _safe_close_fyers_socket,
+        )
+        import threading
+        import asyncio
+
+        state = TickWorkerState("test-worker")
+        state.status = "ready"
+        session_reconnect_event = threading.Event()
+        loop = asyncio.get_running_loop()
+        redis = AsyncMock()
+
+        on_error = _on_error_factory(state, session_reconnect_event, loop, redis)
+        on_error({"type": "cn", "code": -99, "message": "Token is expired", "s": "error"})
+
+        self.assertEqual(state.status, "auth_required")
+        self.assertTrue(session_reconnect_event.is_set())
+
+        # Let the loop run any scheduled task
+        await asyncio.sleep(0.01)
+        redis.delete.assert_awaited()
+
+    def test_safe_close_handles_close_connection_and_exceptions(self) -> None:
+        from app.workers.tick_worker import _safe_close_fyers_socket
+
+        mock_ws = MagicMock()
+        mock_ws.close_connection.side_effect = Exception("SDK noise")
+        # Should not raise
+        _safe_close_fyers_socket(mock_ws)
+        mock_ws.close_connection.assert_called_once()
+

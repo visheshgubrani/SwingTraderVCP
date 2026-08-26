@@ -37,7 +37,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.config import settings
 from app.database import async_session
 from app.domain.market_regime import BENCHMARK_SYMBOL
-from app.services.auth_service import get_valid_access_token, AuthUnavailableError
+from app.services.auth_service import (
+    get_valid_access_token,
+    invalidate_fyers_token,
+    AuthUnavailableError,
+)
 from app.redis_pool import create_async_redis
 from app.redis_pubsub import consume_pubsub
 from app.services.distributed_lease import (
@@ -45,6 +49,7 @@ from app.services.distributed_lease import (
     release_distributed_lease,
     renew_distributed_lease,
 )
+from app.services.bar_aggregator import FiveMinuteBarAggregator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,14 +70,14 @@ REDIS_LTP_TTL = 60  # seconds — refreshed on every tick
 REDIS_WORKER_STATUS_KEY = _STATUS_KEY
 REDIS_WORKER_SYMBOLS_KEY = "tick_worker:symbols"
 
-# Shutdown flag
-_shutdown = threading.Event()
+# Global shutdown event for graceful exit on OS signals
+_shutdown = asyncio.Event()
 
 
 class TickWorkerState:
     def __init__(self, worker_id: str):
         self.worker_id = worker_id
-        self.status = "connecting"  # connecting, ready, degraded, stopped
+        self.status = "connecting"  # connecting, ready, auth_required, degraded, stopped
         self.is_connected = False
         self.symbols: set[str] = set()
 
@@ -139,22 +144,35 @@ def _on_connect_factory(state: TickWorkerState, connected_event: threading.Event
     return on_connect
 
 
-def _on_error_factory(state: TickWorkerState):
+def _on_error_factory(
+    state: TickWorkerState,
+    session_reconnect_event: threading.Event,
+    loop: asyncio.AbstractEventLoop,
+    redis: aioredis.Redis,
+):
     def on_error(error):
         logger.error("Fyers WS error: %s", error)
         state.status = "degraded"
         msg = str(error).lower()
-        if any(marker in msg for marker in ("auth", "token", "unauthorized", "forbidden")):
-            _shutdown.set()
+        if any(marker in msg for marker in ("auth", "token", "unauthorized", "forbidden", "-99", "-8", "-15")):
+            logger.warning("Fyers WS authentication failed or expired: %s", error)
+            state.status = "auth_required"
+
+            def do_invalidate():
+                asyncio.create_task(invalidate_fyers_token(redis))
+
+            loop.call_soon_threadsafe(do_invalidate)
+            session_reconnect_event.set()
 
     return on_error
 
 
-def _on_close_factory(state: TickWorkerState):
+def _on_close_factory(state: TickWorkerState, session_reconnect_event: threading.Event):
     def on_close(message=None):
         logger.warning("Fyers WS closed: %s", message)
         state.is_connected = False
-        state.status = "degraded"
+        if state.status == "ready":
+            state.status = "degraded"
 
     return on_close
 
@@ -164,9 +182,6 @@ def _load_fyers_data_socket_class():
     from fyers_apiv3.FyersWebsocket.data_ws import FyersDataSocket
 
     return FyersDataSocket
-
-
-from app.services.bar_aggregator import FiveMinuteBarAggregator
 
 
 async def _load_subscription_symbols(db: AsyncSession) -> list[str]:
@@ -242,11 +257,12 @@ async def _set_worker_status(
 async def _publish_loop(
     publish_queue: asyncio.Queue,
     redis: aioredis.Redis,
+    stop_event: asyncio.Event,
 ):
     """Consume ticks from the sync queue, update LTP cache, aggregate 5m bars, and publish to Redis."""
     bar_aggregator = FiveMinuteBarAggregator(redis)
 
-    while not _shutdown.is_set():
+    while not stop_event.is_set():
         try:
             tick = await asyncio.wait_for(publish_queue.get(), timeout=1.0)
         except asyncio.TimeoutError:
@@ -266,7 +282,7 @@ async def _publish_loop(
         except Exception as e:
             logger.error("Redis LTP cache/publish error: %s", e)
 
-        # 3. Process tick through 5-minute bar aggregator
+        # Process tick through 5-minute bar aggregator
         try:
             await bar_aggregator.process_tick(tick)
         except Exception as e:
@@ -317,6 +333,7 @@ async def _subscription_listener(
     subscribe_cb,
     unsubscribe_cb,
     current_symbols: set[str],
+    stop_event: asyncio.Event,
 ):
     """Listen for subscription change commands on Redis channel `tick_subs`."""
 
@@ -363,13 +380,14 @@ async def _subscription_listener(
         [REDIS_CHANNEL_SUBS],
         component="tick_worker",
         handler=handle_message,
-        should_stop=_shutdown.is_set,
+        should_stop=stop_event.is_set,
     )
 
 
-async def _heartbeat_loop(redis: aioredis.Redis, state: TickWorkerState):
+async def _heartbeat_loop(redis: aioredis.Redis, state: TickWorkerState, stop_event: asyncio.Event | None = None):
     """Periodically renew lease and update worker status in Redis."""
-    while not _shutdown.is_set():
+    target_stop = stop_event if stop_event is not None else _shutdown
+    while not target_stop.is_set():
         refreshed = await renew_distributed_lease(
             redis,
             _LOCK_KEY,
@@ -378,7 +396,7 @@ async def _heartbeat_loop(redis: aioredis.Redis, state: TickWorkerState):
         )
         if not refreshed:
             logger.critical("Tick worker lost its singleton lock; stopping.")
-            _shutdown.set()
+            target_stop.set()
             return
         await _set_worker_status(
             redis,
@@ -390,6 +408,18 @@ async def _heartbeat_loop(redis: aioredis.Redis, state: TickWorkerState):
             await asyncio.sleep(_LOCK_REFRESH_SECONDS)
         except asyncio.CancelledError:
             break
+
+
+def _safe_close_fyers_socket(ws: Any) -> None:
+    if ws is None:
+        return
+    try:
+        if hasattr(ws, "close_connection"):
+            ws.close_connection()
+        elif hasattr(ws, "close"):
+            ws.close()
+    except Exception as e:
+        logger.debug("Fyers socket close noise: %s", e)
 
 
 async def run_tick_worker():
@@ -415,100 +445,142 @@ async def run_tick_worker():
 
     logger.info("Starting tick ingestion worker (worker_id=%s)", worker_id)
 
-    # Start heartbeat immediately after acquiring lease to protect against auth/connect timeouts
-    heartbeat_task = asyncio.create_task(_heartbeat_loop(redis, state))
+    # Start heartbeat immediately after acquiring lease to keep lease alive
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(redis, state, _shutdown))
     loop = asyncio.get_running_loop()
-    publish_task = None
-    sub_task = None
-    ws = None
     failure: Exception | None = None
 
     try:
-        # --- Get access token ---
-        try:
-            access_token = await get_valid_access_token(redis)
-        except AuthUnavailableError as e:
-            logger.error("Cannot start: %s", e)
-            await _emit_system_event(redis, "critical", "tick_worker_start_failed", {"reason": str(e)})
-            return
-
-        # --- Load initial subscription set ---
-        async with async_session() as db:
-            symbols = await _load_subscription_symbols(db)
-
-        if not symbols:
-            logger.warning("No symbols to subscribe (no open positions or watchlist items)")
-            symbols = []
-        state.symbols = set(symbols)
-
-        logger.info("Initial subscription set: %d symbols", len(symbols))
-
-        # --- Queue for sync→async bridge ---
-        publish_queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
-        connected_event = threading.Event()
-
-        # --- Create FyersDataSocket (SDK, runs in its own thread) ---
-        FyersDataSocket = _load_fyers_data_socket_class()
-
-        FyersDataSocket._instance = None
-
-        ws = FyersDataSocket(
-            access_token=access_token,
-            write_to_file=False,
-            litemode=False,
-            reconnect=True,
-            on_message=_on_message_factory(publish_queue, loop, state),
-            on_connect=_on_connect_factory(state, connected_event),
-            on_error=_on_error_factory(state),
-            on_close=_on_close_factory(state),
-            reconnect_retry=50,
-        )
-
-        # --- Start SDK connection (blocks in thread) ---
-        ws.connect()
-
-        # Wait for connection
-        if not connected_event.wait(timeout=15):
-            logger.error("Fyers WS did not connect within 15s")
-            await _emit_system_event(redis, "error", "tick_worker_connect_timeout", {})
-            return
-
-        # Subscribe to initial symbols
-        current_symbols: set[str] = set()
-        if symbols:
-            ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
-            current_symbols.update(symbols)
-            logger.info("Subscribed to %d symbols", len(symbols))
-
-        state.symbols = current_symbols
-        state.status = "ready"
-
-        await _set_worker_status(redis, "ready", worker_id=worker_id, symbols=list(current_symbols))
-        await _emit_system_event(redis, "info", "tick_worker_started", {
-            "symbol_count": len(symbols),
-            "worker_id": worker_id,
-        })
-
-        # --- Run async tasks ---
-        publish_task = asyncio.create_task(_publish_loop(publish_queue, redis))
-        sub_task = asyncio.create_task(
-            _subscription_listener(
-                redis,
-                subscribe_cb=lambda syms: ws.subscribe(symbols=syms, data_type="SymbolUpdate"),
-                unsubscribe_cb=lambda syms: ws.unsubscribe(symbols=syms, data_type="SymbolUpdate"),
-                current_symbols=current_symbols,
-            )
-        )
-
-        # Wait for shutdown signal
         while not _shutdown.is_set():
-            await asyncio.sleep(1)
+            # 1. Obtain valid access token (or wait if auth expired/not yet logged in)
+            try:
+                access_token = await get_valid_access_token(redis)
+            except AuthUnavailableError as e:
+                if state.status != "auth_required":
+                    logger.warning("Fyers authentication unavailable: %s. Waiting for broker login...", e)
+                    state.status = "auth_required"
+                    state.symbols = set()
+                    await _emit_system_event(redis, "warning", "tick_worker_waiting_auth", {"reason": str(e)})
+                await asyncio.sleep(5)
+                continue
+
+            state.status = "connecting"
+
+            # 2. Load mandatory subscription symbols from database
+            try:
+                async with async_session() as db:
+                    symbols = await _load_subscription_symbols(db)
+            except Exception as e:
+                logger.error("Failed to load subscription symbols from database: %s", e)
+                await asyncio.sleep(5)
+                continue
+
+            if not symbols:
+                symbols = [BENCHMARK_SYMBOL]
+
+            logger.info("Connecting Fyers WS with %d initial symbols...", len(symbols))
+
+            publish_queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
+            connected_event = threading.Event()
+            session_reconnect_event = threading.Event()
+            session_stop_event = asyncio.Event()
+
+            FyersDataSocket = _load_fyers_data_socket_class()
+            FyersDataSocket._instance = None
+
+            ws = FyersDataSocket(
+                access_token=access_token,
+                write_to_file=False,
+                litemode=False,
+                reconnect=True,
+                on_message=_on_message_factory(publish_queue, loop, state),
+                on_connect=_on_connect_factory(state, connected_event),
+                on_error=_on_error_factory(state, session_reconnect_event, loop, redis),
+                on_close=_on_close_factory(state, session_reconnect_event),
+                reconnect_retry=50,
+            )
+
+            # Start SDK connection in background thread
+            ws.connect()
+
+            # Wait for socket connection or error
+            start_wait = time.monotonic()
+            while not connected_event.is_set() and not session_reconnect_event.is_set() and not _shutdown.is_set():
+                if time.monotonic() - start_wait > 15:
+                    break
+                await asyncio.sleep(0.2)
+
+            if not connected_event.is_set() or session_reconnect_event.is_set() or _shutdown.is_set():
+                logger.warning("Fyers WS did not connect within 15s or auth error occurred during connect")
+                await asyncio.to_thread(_safe_close_fyers_socket, ws)
+                if session_reconnect_event.is_set():
+                    await invalidate_fyers_token(redis)
+                    state.status = "auth_required"
+                    state.symbols = set()
+                await asyncio.sleep(5)
+                continue
+
+            # Subscribe to initial symbols
+            current_symbols: set[str] = set()
+            try:
+                ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
+                current_symbols.update(symbols)
+                logger.info("Subscribed to %d symbols: %s", len(symbols), symbols)
+            except Exception as e:
+                logger.error("Failed to subscribe symbols: %s", e)
+                await asyncio.to_thread(_safe_close_fyers_socket, ws)
+                await asyncio.sleep(5)
+                continue
+
+            state.symbols = current_symbols
+            state.status = "ready"
+
+            await _set_worker_status(redis, "ready", worker_id=worker_id, symbols=list(current_symbols))
+            await _emit_system_event(redis, "info", "tick_worker_started", {
+                "symbol_count": len(symbols),
+                "worker_id": worker_id,
+            })
+
+            publish_task = asyncio.create_task(_publish_loop(publish_queue, redis, session_stop_event))
+            sub_task = asyncio.create_task(
+                _subscription_listener(
+                    redis,
+                    subscribe_cb=lambda syms: ws.subscribe(symbols=syms, data_type="SymbolUpdate"),
+                    unsubscribe_cb=lambda syms: ws.unsubscribe(symbols=syms, data_type="SymbolUpdate"),
+                    current_symbols=current_symbols,
+                    stop_event=session_stop_event,
+                )
+            )
+
+            # Session loop: keep running until shutdown or reconnect event
+            while not _shutdown.is_set() and not session_reconnect_event.is_set():
+                await asyncio.sleep(1)
+
+            # Session teardown
+            session_stop_event.set()
+            for task in [publish_task, sub_task]:
+                if task:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+            await asyncio.to_thread(_safe_close_fyers_socket, ws)
+
+            if session_reconnect_event.is_set() and not _shutdown.is_set():
+                logger.info("Session restart requested (auth expired or reconnect triggered). Re-authenticating...")
+                await invalidate_fyers_token(redis)
+                state.status = "auth_required"
+                state.symbols = set()
+                await asyncio.sleep(2)
+
     except asyncio.CancelledError:
         pass
     except Exception as exc:
         failure = exc
         state.status = "failed"
-        logger.exception("Tick worker crashed")
+        logger.exception("Tick worker fatal error")
         try:
             await _set_worker_status(
                 redis,
@@ -531,25 +603,13 @@ async def run_tick_worker():
     finally:
         logger.info("Shutting down tick worker")
         _shutdown.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
 
-        # Cancel tasks
-        for task in [publish_task, sub_task, heartbeat_task]:
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        # Close Fyers WS
-        if ws:
-            try:
-                ws.close()
-            except Exception:
-                pass
-
-        # Emit shutdown event
-        state.status = "failed" if failure is not None else "stopped"
+        state.status = "stopped"
         await _set_worker_status(
             redis,
             state.status,
@@ -577,7 +637,10 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    asyncio.run(run_tick_worker())
+    try:
+        asyncio.run(run_tick_worker())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

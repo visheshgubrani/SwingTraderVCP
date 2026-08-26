@@ -79,6 +79,27 @@ async def is_auth_healthy(redis) -> bool:
     return val == b"1" or val == "1"
 
 
+async def invalidate_fyers_token(redis) -> None:
+    """Invalidate cached Fyers access token in Redis and Postgres, and mark auth unhealthy."""
+    try:
+        await redis.delete(_REDIS_TOKEN_KEY, _REDIS_EXPIRY_KEY)
+        await _set_auth_health(redis, False)
+        async with async_session() as db:
+            await db.execute(
+                text("""
+                    UPDATE broker_auth_tokens
+                    SET expires_at = now() - interval '1 second', updated_at = now()
+                    WHERE broker = 'fyers'
+                """)
+            )
+            await _emit_system_event(
+                db, "warning", "auth_invalidated", {"reason": "token_rejected_by_fyers"}
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error("Failed to invalidate Fyers token: %s", e)
+
+
 async def _try_refresh_token(
     refresh_token: str,
 ) -> dict | None:

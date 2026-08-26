@@ -642,7 +642,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
             logger.info("Saved screening results to database.")
 
         # P7 and P10 proposal batches are for personal scans only.
-        is_personal_scan = config.visibility == "personal"
+        is_personal_scan = claimed_run.visibility == "personal"
         proposal_should_enqueue_now = is_personal_scan and not (
             settings.p7_fundamental_pass_enabled and config.fundamental_limit > 0
         )

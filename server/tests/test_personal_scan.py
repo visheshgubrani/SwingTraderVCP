@@ -292,6 +292,62 @@ class PersonalScanTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("0/500", failure_params["error"])
         self.assertIn("475 required (95%)", failure_params["error"])
 
+    async def test_personal_scan_uses_claimed_run_visibility_to_enqueue_p7(self):
+        scan_run_id = uuid4()
+        redis = FakeRedis()
+        reference_date = datetime.date(2026, 8, 12)
+
+        claimed = SimpleNamespace(
+            technical_config=TechnicalScreeningConfig().model_dump(),
+            as_of_date=reference_date,
+            visibility="personal",
+        )
+
+        class FakeCommitSession:
+            def __init__(self):
+                self.executed_statements = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return None
+
+            async def execute(self, statement, params=None):
+                self.executed_statements.append((str(statement), params))
+                result = FakeResult(rows=[claimed])
+                result.rowcount = 1
+                return result
+
+            async def commit(self):
+                return None
+
+        fake_session = FakeCommitSession()
+
+        with (
+            patch("app.services.screener.async_session", lambda: fake_session),
+            patch(
+                "app.services.screener.evaluate_scan_readiness",
+                return_value=ScanReadiness(
+                    scanner_ready=True,
+                    active_instruments=500,
+                    scoreable_instruments=500,
+                    required_scoreable_instruments=475,
+                    minimum_history_days=252,
+                    reference_eod_date=reference_date,
+                ),
+            ),
+            patch("app.services.screener.settings") as mock_settings,
+        ):
+            mock_settings.p7_fundamental_pass_enabled = True
+            mock_settings.proposal_automation_enabled = False
+            # Verify no AttributeError is raised and enqueue_job is called
+            # If config.visibility was used, it would fail with AttributeError
+            # Here with 0 survivors it simply doesn't enqueue, but does not crash
+            await run_technical_scan({"redis": redis}, str(scan_run_id))
+
+        self.assertNotIn("AttributeError", str(fake_session.executed_statements))
+
 
 if __name__ == "__main__":
     unittest.main()

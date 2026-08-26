@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     fundamentals_max_concurrency: int = Field(default=1, ge=1, le=1)
     fundamentals_http_timeout_seconds: float = Field(default=20.0, gt=0, le=60)
     fundamentals_http_max_attempts: int = Field(default=3, ge=1, le=5)
-    openrouter_max_tokens: int = Field(default=3200, ge=256, le=4096)
+    openrouter_max_tokens: int = Field(default=8192, ge=256, le=32768)
     fundamental_run_token_budget: int = Field(default=1_500_000, ge=1_000, le=10_000_000)
     fundamental_prompt_max_chars: int = Field(default=12_000, ge=1_000, le=12_000)
     openrouter_http_timeout_seconds: float = Field(default=60.0, gt=0, le=120)

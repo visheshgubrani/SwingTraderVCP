@@ -89,8 +89,11 @@ function formatRun(run: ScanRun) {
 }
 
 function fitBadge(result: Pick<ScanResult, "fundamental_assessment" | "fundamental_status">) {
-  if (result.fundamental_status === "queued" || result.fundamental_status === "running") {
+  if (result.fundamental_status === "running") {
     return <Badge variant="secondary">Processing</Badge>
+  }
+  if (result.fundamental_status === "queued") {
+    return <Badge variant="outline">Queued</Badge>
   }
   if (result.fundamental_status === "failed") {
     return <Badge variant="destructive">Data unavailable</Badge>
@@ -615,7 +618,18 @@ export function FundamentalsView() {
   const setControlMutation = useSetFundamentalControl()
   const [pendingControl, setPendingControl] = useState<"processing" | "ai" | null>(null)
 
-  const isProcessing = useMemo(
+  const progressData = progressQuery.data
+  const totalTokensUsed = progressData
+    ? progressData.input_tokens + progressData.reasoning_tokens + progressData.output_tokens
+    : 0
+  const tokenBudget = progressData?.token_budget ?? 1500000
+
+  const isPassRunning = Boolean(
+    progressData &&
+      (progressData.status === "queued" || progressData.status === "running"),
+  ) || triggerPassMutation.isPending
+
+  const hasPendingItems = useMemo(
     () =>
       resultsQuery.data?.some(
         (r) => r.fundamental_status === "queued" || r.fundamental_status === "running",
@@ -649,10 +663,6 @@ export function FundamentalsView() {
       return rightScore - leftScore
     })
   }, [filter, resultsQuery.data, search, sortMode])
-
-  const progressData = progressQuery.data
-  const totalTokensUsed = progressData ? progressData.input_tokens + progressData.reasoning_tokens + progressData.output_tokens : 0
-  const tokenBudget = progressData?.token_budget ?? 1500000
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -745,8 +755,7 @@ export function FundamentalsView() {
               !selectedRunId ||
               activeRun?.status === "queued" ||
               activeRun?.status === "running" ||
-              triggerPassMutation.isPending ||
-              isProcessing ||
+              isPassRunning ||
               controlsQuery.data?.processing.paused
             }
             onClick={() => {
@@ -755,16 +764,18 @@ export function FundamentalsView() {
             size="sm"
             variant="default"
           >
-            {triggerPassMutation.isPending || isProcessing ? (
+            {isPassRunning ? (
               <Spinner className="mr-1.5 size-4" />
             ) : (
               <RotateCwIcon aria-hidden="true" className="mr-1.5 size-4" />
             )}
             {triggerPassMutation.isPending
               ? "Enqueuing..."
-              : isProcessing
+              : isPassRunning
                 ? "Processing..."
-                : "Run Analysis"}
+                : hasPendingItems
+                  ? "Resume Analysis"
+                  : "Run Analysis"}
           </Button>
 
           <div className="flex items-center gap-2">
@@ -791,8 +802,7 @@ export function FundamentalsView() {
             <Button
               disabled={
                 !selectedRunId ||
-                triggerPassMutation.isPending ||
-                isProcessing ||
+                isPassRunning ||
                 controlsQuery.data?.processing.paused
               }
               onClick={() => setRefreshConfirmOpen(true)}

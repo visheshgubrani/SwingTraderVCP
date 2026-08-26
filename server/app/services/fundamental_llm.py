@@ -188,7 +188,7 @@ class OpenRouterFundamentalClient:
         http_referer: str = "",
         timeout_seconds: float = 60.0,
         max_attempts: int = 2,
-        max_tokens: int = 3200,
+        max_tokens: int = 8192,
         prompt_max_chars: int = 12000,
         temperature: float | None = 0,
         transport: httpx.AsyncBaseTransport | None = None,

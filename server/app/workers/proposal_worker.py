@@ -709,6 +709,10 @@ async def process_proposal_candidate(
                 await _finish_attempt(session, attempt_id=attempt_id, status="timed_out", error=exc)
             if dt.datetime.now(dt.timezone.utc) >= deadline:
                 return "timed_out"
+            if attempt_number < settings.proposal_max_attempts:
+                delay = min(3.0 * attempt_number, max(0.0, (deadline - dt.datetime.now(dt.timezone.utc)).total_seconds() - 2.0))
+                if delay > 0:
+                    await asyncio.sleep(delay)
             continue
         except ProposalProviderError as exc:
             logger.warning(
@@ -729,6 +733,9 @@ async def process_proposal_candidate(
                 )
             if attempt_number == settings.proposal_max_attempts:
                 return "failed"
+            delay = min(3.0 * attempt_number, max(0.0, (deadline - dt.datetime.now(dt.timezone.utc)).total_seconds() - 2.0))
+            if delay > 0:
+                await asyncio.sleep(delay)
             continue
         except Exception as exc:
             logger.warning(
@@ -741,6 +748,9 @@ async def process_proposal_candidate(
                 await _finish_attempt(session, attempt_id=attempt_id, status="failed", error=exc)
             if attempt_number == settings.proposal_max_attempts:
                 return "failed"
+            delay = min(3.0 * attempt_number, max(0.0, (deadline - dt.datetime.now(dt.timezone.utc)).total_seconds() - 2.0))
+            if delay > 0:
+                await asyncio.sleep(delay)
             continue
 
         output_json = ai_output.model_dump(mode="json")

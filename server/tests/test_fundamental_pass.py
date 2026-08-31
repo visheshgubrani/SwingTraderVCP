@@ -699,6 +699,10 @@ class OpenRouterFundamentalClientTests(unittest.IsolatedAsyncioTestCase):
             {"verdict", "summary", "verdict_reference_ids", "strengths", "risks", "review_focus"},
         )
         self.assertEqual(
+            seen_payload["plugins"],
+            [{"id": "response-healing"}],
+        )
+        self.assertEqual(
             seen_payload["provider"],
             {"require_parameters": True, "data_collection": "deny"},
         )

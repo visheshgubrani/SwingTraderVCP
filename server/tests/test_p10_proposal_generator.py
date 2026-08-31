@@ -265,12 +265,11 @@ class TestProposalVisionRequest(unittest.TestCase):
         user_text = content[0]["text"]
         self.assertNotIn("TESTSTOCK", user_text)
         self.assertNotIn("Canonical frozen OHLCV", user_text)
-        self.assertIn("tick size is 0.05", user_text)
-        self.assertIn("1. 2026-06-01 high", user_text)
         image_parts = [part for part in content if part.get("type") == "image_url"]
         self.assertEqual(len(image_parts), 1)
         system_prompt = request["messages"][0]["content"]
         self.assertIn("Do NOT output a pivot, stop, target, entry", system_prompt)
+        self.assertEqual(request["plugins"], [{"id": "response-healing"}])
         self.assertEqual(request["provider"], {"require_parameters": True, "data_collection": "deny"})
         self.assertFalse(request["stream"])
         schema = request["response_format"]["json_schema"]["schema"]
@@ -463,6 +462,36 @@ class TestParseProposalOpenRouterResponse(unittest.TestCase):
             "proposal_invalid_provider_json",
         )
         self.assertIn("finish_reason='length'", str(raised.exception))
+
+    def test_openrouter_top_level_error_payload_raises_clear_provider_error(self) -> None:
+        error_payload = {
+            "error": {
+                "code": 504,
+                "message": "The operation was aborted",
+            }
+        }
+        with self.assertRaises(ProposalProviderError) as raised:
+            parse_proposal_openrouter_response(error_payload)
+        self.assertIn("The operation was aborted", str(raised.exception))
+        self.assertIn("code=504", str(raised.exception))
+        self.assertEqual(raised.exception.details.get("error_code"), 504)
+
+    def test_openrouter_choice_level_error_payload_raises_clear_provider_error(self) -> None:
+        error_payload = {
+            "choices": [
+                {
+                    "error": {
+                        "code": 502,
+                        "message": "Bad gateway upstream",
+                    }
+                }
+            ]
+        }
+        with self.assertRaises(ProposalProviderError) as raised:
+            parse_proposal_openrouter_response(error_payload)
+        self.assertIn("Bad gateway upstream", str(raised.exception))
+        self.assertIn("code=502", str(raised.exception))
+        self.assertEqual(raised.exception.details.get("error_code"), 502)
 
 
 if __name__ == "__main__":

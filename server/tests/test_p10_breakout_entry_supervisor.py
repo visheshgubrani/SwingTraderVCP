@@ -5,8 +5,15 @@ from unittest.mock import patch
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from app.domain.p10_triggers import BREAKOUT_BAR_SIGNAL_POLICY_V2
-from app.services.execution_engine import ExecutionBlockedError
+from app.domain.p10_triggers import (
+    BALANCED_BREAKOUT_POLICY_V3,
+    BREAKOUT_BAR_SIGNAL_POLICY_V2,
+)
+from app.services.execution_engine import (
+    ChaseCeilingExceededError,
+    ExecutionBlockedError,
+    PriceAcceptanceLostError,
+)
 from app.workers.entry_supervisor import (
     ConfirmedLeg,
     _attempt_confirmed_allocation,
@@ -86,7 +93,8 @@ class FakeSupervisorSession:
 
 
 class FakeEligibilitySession:
-    def __init__(self):
+    def __init__(self, *, policy_version: str = BREAKOUT_BAR_SIGNAL_POLICY_V2):
+        self.policy_version = policy_version
         self.calls: list[tuple[str, dict]] = []
 
     def __call__(self):
@@ -102,7 +110,7 @@ class FakeEligibilitySession:
         sql = str(statement)
         self.calls.append((sql, params or {}))
         if "SELECT tp.entry_trigger_policy_version" in sql:
-            return FakeResult(scalar=BREAKOUT_BAR_SIGNAL_POLICY_V2)
+            return FakeResult(scalar=self.policy_version)
         return FakeResult()
 
     async def commit(self):
@@ -127,7 +135,12 @@ class FakeProfileSession:
         )
 
 
-def leg_row(*, status: str):
+def leg_row(
+    *,
+    status: str,
+    policy_version: str = BREAKOUT_BAR_SIGNAL_POLICY_V2,
+    rvol_threshold: Decimal = Decimal("2"),
+):
     return {
         "leg_id": uuid4(),
         "proposal_id": uuid4(),
@@ -136,11 +149,11 @@ def leg_row(*, status: str):
         "status": status,
         "trigger_price": Decimal("505"),
         "chase_ceiling": Decimal("515"),
-        "relative_volume_threshold": Decimal("2"),
+        "relative_volume_threshold": rvol_threshold,
         "effective_stop": Decimal("480"),
         "confidence": Decimal("80"),
         "t1": Decimal("545"),
-        "entry_trigger_policy_version": BREAKOUT_BAR_SIGNAL_POLICY_V2,
+        "entry_trigger_policy_version": policy_version,
         "last_trigger_event_timestamp": None,
         "last_trigger_outcome": None,
         "last_entry_eligibility_outcome": None,
@@ -539,6 +552,157 @@ class BreakoutEntrySupervisorTests(unittest.IsolatedAsyncioTestCase):
             if "UPDATE trigger_events" in sql
         )
         self.assertEqual(audit["outcome"], "rejected_chase")
+        transition = next(
+            params
+            for sql, params in session.calls
+            if "UPDATE entry_legs" in sql
+        )
+        self.assertEqual(transition["status"], "waiting_for_reset")
+
+    async def test_v3_single_bar_confirms_trigger_and_persists_complete_diagnostics(self):
+        leg = leg_row(
+            status="armed",
+            policy_version=BALANCED_BREAKOUT_POLICY_V3,
+            rvol_threshold=Decimal("1.50"),
+        )
+        session = FakeSupervisorSession(leg=leg)
+        with patch("app.workers.entry_supervisor.async_session", session):
+            confirmed = await handle_five_minute_bar_event(
+                bar_payload(
+                    at=dt.time(10, 0),
+                    close=508,
+                    volume=60_000,
+                    cumulative=300_000,
+                )
+            )
+
+        self.assertEqual(len(confirmed), 1)
+        self.assertEqual(confirmed[0].trigger_price, Decimal("505"))
+        event = next(
+            params
+            for sql, params in session.calls
+            if "INSERT INTO trigger_events" in sql
+        )
+        self.assertEqual(event["bar_type"], "signal_bar")
+        self.assertTrue(event["price_gate_passed"])
+        self.assertTrue(event["volume_gate_passed"])
+        self.assertTrue(event["chase_valid"])
+        self.assertEqual(event["bar_rvol"], Decimal("2.0000"))
+        self.assertEqual(event["session_rvol"], Decimal("1.0000"))
+        self.assertEqual(event["recent_base_median"], Decimal("10000"))
+        self.assertEqual(event["base_ratio"], Decimal("6.0000"))
+        self.assertEqual(event["trigger_outcome"], "confirmed")
+        self.assertTrue(event["is_confirmed"])
+        self.assertEqual(event["entry_eligibility_outcome"], "pending")
+
+        transition = next(
+            params
+            for sql, params in session.calls
+            if "status = 'trigger_observed'" in sql
+        )
+        self.assertEqual(transition["leg_id"], session.leg["leg_id"])
+
+    async def test_v3_weak_volume_signal_is_audited_but_leg_remains_armed(self):
+        leg = leg_row(
+            status="armed",
+            policy_version=BALANCED_BREAKOUT_POLICY_V3,
+            rvol_threshold=Decimal("1.50"),
+        )
+        session = FakeSupervisorSession(leg=leg)
+        with patch("app.workers.entry_supervisor.async_session", session):
+            confirmed = await handle_five_minute_bar_event(
+                bar_payload(
+                    at=dt.time(10, 0),
+                    close=508,
+                    volume=30_000,
+                    cumulative=300_000,
+                )
+            )
+
+        self.assertEqual(confirmed, [])
+        event = next(
+            params
+            for sql, params in session.calls
+            if "INSERT INTO trigger_events" in sql
+        )
+        self.assertEqual(event["bar_type"], "signal_bar")
+        self.assertTrue(event["price_gate_passed"])
+        self.assertFalse(event["volume_gate_passed"])
+        self.assertTrue(event["chase_valid"])
+        self.assertEqual(event["bar_rvol"], Decimal("1.0000"))
+        self.assertEqual(event["session_rvol"], Decimal("1.0000"))
+        self.assertEqual(event["recent_base_median"], Decimal("10000"))
+        self.assertEqual(event["base_ratio"], Decimal("3.0000"))
+        self.assertEqual(event["trigger_outcome"], "signal_rejected")
+        self.assertFalse(event["is_confirmed"])
+
+        # In v3, weak volume does NOT move the leg to waiting_for_reset!
+        self.assertFalse(
+            any("status = 'waiting_for_reset'" in sql for sql, _ in session.calls)
+        )
+        self.assertFalse(
+            any("UPDATE entry_legs" in sql for sql, _ in session.calls)
+        )
+
+    async def test_v3_entry_rejection_outcomes_and_exceptions(self):
+        self.assertEqual(
+            _entry_rejection_outcome(
+                PriceAcceptanceLostError(
+                    "Fresh pre-submission price (504) is not above trigger (505)."
+                )
+            ),
+            "rejected_price_reversal",
+        )
+        self.assertEqual(
+            _entry_rejection_outcome(
+                ChaseCeilingExceededError(
+                    "Fresh pre-submission price (516) exceeds the immutable chase ceiling (515)."
+                )
+            ),
+            "rejected_chase",
+        )
+        self.assertEqual(
+            _entry_rejection_outcome(
+                ExecutionBlockedError("price is not above trigger")
+            ),
+            "rejected_price_reversal",
+        )
+        self.assertEqual(
+            _entry_rejection_outcome(
+                ExecutionBlockedError("price exceeds the chase ceiling")
+            ),
+            "rejected_chase",
+        )
+
+    async def test_v3_eligibility_rejection_moves_leg_to_waiting_for_reset(self):
+        session = FakeEligibilitySession(policy_version=BALANCED_BREAKOUT_POLICY_V3)
+        confirmed = ConfirmedLeg(
+            leg_id=uuid4(),
+            proposal_id=uuid4(),
+            symbol="NSE:TEST-EQ",
+            leg_index=1,
+            risk_allocation_pct=Decimal("1"),
+            trigger_price=Decimal("505"),
+            chase_ceiling=Decimal("515"),
+            initial_stop=Decimal("480"),
+            scanner_score=Decimal("90"),
+            confidence=Decimal("80"),
+            conservative_rr=Decimal("2"),
+            bar_time=dt.datetime(2026, 8, 25, 10, 5, tzinfo=IST),
+        )
+        with patch("app.workers.entry_supervisor.async_session", session):
+            await _record_entry_eligibility(
+                confirmed,
+                outcome="rejected_price_reversal",
+                reason="Fresh pre-submission price (504) is not above trigger (505).",
+            )
+
+        audit = next(
+            params
+            for sql, params in session.calls
+            if "UPDATE trigger_events" in sql
+        )
+        self.assertEqual(audit["outcome"], "rejected_price_reversal")
         transition = next(
             params
             for sql, params in session.calls

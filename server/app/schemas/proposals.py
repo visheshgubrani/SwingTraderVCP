@@ -154,6 +154,7 @@ class TradeProposalDetailResponse(BaseModel):
     entry_trigger_policy_version: Literal[
         "cumulative_two_bar_v1",
         "breakout_bar_signal_v2",
+        "balanced_breakout_v3",
     ]
     gemini_evidence: dict[str, Any]
     geometry: dict[str, Any]

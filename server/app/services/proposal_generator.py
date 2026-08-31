@@ -34,7 +34,10 @@ from app.domain.p10_geometry import (
     resolve_surviving_contractions,
 )
 from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
-from app.domain.p10_triggers import BREAKOUT_BAR_SIGNAL_POLICY_V2
+from app.domain.p10_triggers import (
+    BALANCED_BREAKOUT_POLICY_V3,
+    BREAKOUT_BAR_SIGNAL_POLICY_V2,
+)
 from app.domain.p10_template_policy import (
     TEMPLATE_POLICY_VERSION,
     TemplateScoreFeatures,
@@ -55,7 +58,7 @@ IST_TZ = ZoneInfo("Asia/Kolkata")
 PROMPT_VERSION = "p10_vcp_proposal_v6"
 SCHEMA_VERSION = "gemini_vcp_proposal_output_v6"
 GEOMETRY_VERSION = "p10_python_owned_levels_v5"
-ENTRY_TRIGGER_POLICY_VERSION = BREAKOUT_BAR_SIGNAL_POLICY_V2
+ENTRY_TRIGGER_POLICY_VERSION = BALANCED_BREAKOUT_POLICY_V3
 PROPOSAL_INVALID_PROVIDER_JSON = "proposal_invalid_provider_json"
 _PROVIDER_PAYLOAD_SNIPPET_LIMIT = 4000
 

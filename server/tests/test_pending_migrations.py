@@ -70,6 +70,12 @@ class PendingMigrationSelectionTests(unittest.TestCase):
                 / "028_p10_breakout_bar_rvol.sql"
             ).is_file()
         )
+        migration_029 = DEFAULT_MIGRATIONS_DIR / "029_p10_balanced_breakout_v3.sql"
+        self.assertTrue(migration_029.is_file())
+        content_029 = migration_029.read_text(encoding="utf-8")
+        self.assertIn("'balanced_breakout_v3'", content_029)
+        self.assertIn("'rejected_price_reversal'", content_029)
+        self.assertNotIn("SET DEFAULT 'balanced_breakout_v3'", content_029)
         for path in files:
             self.assertIsNotNone(numeric_prefix(path.name), path.name)
 

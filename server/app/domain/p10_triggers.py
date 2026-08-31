@@ -29,6 +29,7 @@ IST_TZ = ZoneInfo("Asia/Kolkata")
 ENTRY_WINDOW_CLOSE_TIME = dt.time(16, 0)
 CUMULATIVE_TWO_BAR_POLICY_V1 = "cumulative_two_bar_v1"
 BREAKOUT_BAR_SIGNAL_POLICY_V2 = "breakout_bar_signal_v2"
+BALANCED_BREAKOUT_POLICY_V3 = "balanced_breakout_v3"
 
 
 def entry_window_closed(
@@ -86,6 +87,15 @@ class TriggerEvaluationResult:
     confirmation_rvol: Decimal
     signal_session_rvol: Decimal = Decimal("0")
     confirmation_session_rvol: Decimal = Decimal("0")
+    rejection_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class BalancedBreakoutEvaluation:
+    is_triggered: bool
+    signal_bar_valid: bool
+    signal_rvol: Decimal
+    signal_session_rvol: Decimal = Decimal("0")
     rejection_reason: str | None = None
 
 
@@ -302,6 +312,77 @@ def evaluate_intraday_trigger(
         confirmation_rvol=conf_rvol,
         signal_session_rvol=sig_session_rvol,
         confirmation_session_rvol=conf_session_rvol,
+        rejection_reason=None,
+    )
+
+
+def evaluate_balanced_breakout_signal(
+    *,
+    signal_bar: FiveMinuteBar,
+    trigger_price: Decimal,
+    adv20_robust: int,
+    expected_bar_fraction: Decimal,
+    expected_cumulative_fraction: Decimal,
+    required_rvol: Decimal,
+) -> BalancedBreakoutEvaluation:
+    """Evaluate a single 5-minute breakout signal bar under balanced_breakout_v3.
+
+    1. First 15 minutes of the session (09:15-09:30) are excluded (09:30 is inclusive; 15:30 is exclusive).
+    2. Signal bar must close strictly above trigger price.
+    3. Signal bar's time-of-day bucket RVOL must meet or exceed the template's required threshold.
+    4. Session cumulative RVOL is computed and returned as a diagnostic.
+    """
+    def market_time(value: dt.datetime) -> dt.datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=IST_TZ)
+        return value.astimezone(IST_TZ)
+
+    signal_at = market_time(signal_bar.bar_time)
+
+    # 1. Market session & first 15-minute exclusion window (09:30 inclusive, 15:30 exclusive)
+    if signal_at.time() < SESSION_SKIP_UNTIL or signal_at.time() >= SESSION_END_TIME:
+        return BalancedBreakoutEvaluation(
+            is_triggered=False,
+            signal_bar_valid=False,
+            signal_rvol=Decimal("0"),
+            signal_session_rvol=Decimal("0"),
+            rejection_reason=(
+                f"Signal bar at {signal_at.time()} falls outside the eligible NSE window "
+                "(including the first 15-minute exclusion window)"
+            ),
+        )
+
+    # 2. RVOL calculations
+    sig_bar_rvol = calculate_bar_relative_volume(
+        signal_bar.volume, adv20_robust, expected_bar_fraction
+    )
+    sig_session_rvol = calculate_relative_volume(
+        signal_bar.cumulative_volume, adv20_robust, expected_cumulative_fraction
+    )
+
+    # 3. Price & volume gates
+    price_passed = signal_bar.close > trigger_price
+    volume_passed = sig_bar_rvol >= required_rvol
+
+    if not price_passed or not volume_passed:
+        reasons = []
+        if not price_passed:
+            reasons.append(f"Signal bar close ({signal_bar.close}) <= trigger ({trigger_price})")
+        if not volume_passed:
+            reasons.append(f"Signal bar rvol ({sig_bar_rvol:.2f}) < required ({required_rvol:.2f})")
+        return BalancedBreakoutEvaluation(
+            is_triggered=False,
+            signal_bar_valid=False,
+            signal_rvol=sig_bar_rvol,
+            signal_session_rvol=sig_session_rvol,
+            rejection_reason="; ".join(reasons),
+        )
+
+    return BalancedBreakoutEvaluation(
+        is_triggered=True,
+        signal_bar_valid=True,
+        signal_rvol=sig_bar_rvol,
+        signal_session_rvol=sig_session_rvol,
         rejection_reason=None,
     )
 

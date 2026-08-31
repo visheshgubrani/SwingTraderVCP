@@ -175,7 +175,7 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(locked["geometry_version"], GEOMETRY_VERSION)
         self.assertEqual(
             locked["entry_trigger_policy_version"],
-            "breakout_bar_signal_v2",
+            "balanced_breakout_v3",
         )
         self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v5")
         self.assertEqual(len(locked["geometry"]["target_slots"]), 3)

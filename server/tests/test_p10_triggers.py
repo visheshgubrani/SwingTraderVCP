@@ -3,10 +3,12 @@ import unittest
 from decimal import Decimal
 
 from app.domain.p10_triggers import (
+    BALANCED_BREAKOUT_POLICY_V3,
     BREAKOUT_BAR_SIGNAL_POLICY_V2,
     FiveMinuteBar,
     DailySessionBar,
     calculate_bar_relative_volume,
+    evaluate_balanced_breakout_signal,
     evaluate_intraday_trigger,
     evaluate_add_leg_gates,
     calculate_relative_volume,
@@ -233,6 +235,74 @@ class TestP10Triggers(unittest.TestCase):
         self.assertEqual(state.base_high, Decimal("517.00"))
         # Recommended stop = 508 - (0.25 * 10) = 508 - 2.50 = 505.50
         self.assertEqual(state.recommended_new_stop, Decimal("505.50"))
+
+    def test_v3_balanced_breakout_valid(self):
+        sig_bar = FiveMinuteBar(
+            bar_time=dt.datetime(2026, 8, 17, 10, 5),
+            open=Decimal("500"),
+            high=Decimal("512"),
+            low=Decimal("499"),
+            close=Decimal("508"),
+            volume=60_000,
+            cumulative_volume=300_000,
+        )
+        res = evaluate_balanced_breakout_signal(
+            signal_bar=sig_bar,
+            trigger_price=Decimal("505.00"),
+            adv20_robust=1_000_000,
+            expected_bar_fraction=Decimal("0.03"),
+            expected_cumulative_fraction=Decimal("0.30"),
+            required_rvol=Decimal("1.50"),
+        )
+        self.assertTrue(res.is_triggered)
+        self.assertTrue(res.signal_bar_valid)
+        self.assertEqual(res.signal_rvol, Decimal("2.0000"))
+        self.assertEqual(res.signal_session_rvol, Decimal("1.0000"))
+        self.assertIsNone(res.rejection_reason)
+
+    def test_v3_balanced_breakout_skips_first_15m(self):
+        sig_bar = FiveMinuteBar(
+            bar_time=dt.datetime(2026, 8, 17, 9, 20),
+            open=Decimal("500"),
+            high=Decimal("512"),
+            low=Decimal("499"),
+            close=Decimal("508"),
+            volume=60_000,
+            cumulative_volume=100_000,
+        )
+        res = evaluate_balanced_breakout_signal(
+            signal_bar=sig_bar,
+            trigger_price=Decimal("505.00"),
+            adv20_robust=1_000_000,
+            expected_bar_fraction=Decimal("0.03"),
+            expected_cumulative_fraction=Decimal("0.10"),
+            required_rvol=Decimal("1.50"),
+        )
+        self.assertFalse(res.is_triggered)
+        self.assertIn("15-minute exclusion window", res.rejection_reason)
+
+    def test_v3_balanced_breakout_volume_rejected_but_session_rvol_computed(self):
+        sig_bar = FiveMinuteBar(
+            bar_time=dt.datetime(2026, 8, 17, 10, 5),
+            open=Decimal("500"),
+            high=Decimal("512"),
+            low=Decimal("499"),
+            close=Decimal("508"),
+            volume=30_000,
+            cumulative_volume=600_000,
+        )
+        res = evaluate_balanced_breakout_signal(
+            signal_bar=sig_bar,
+            trigger_price=Decimal("505.00"),
+            adv20_robust=1_000_000,
+            expected_bar_fraction=Decimal("0.03"),
+            expected_cumulative_fraction=Decimal("0.30"),
+            required_rvol=Decimal("1.50"),
+        )
+        self.assertFalse(res.is_triggered)
+        self.assertEqual(res.signal_rvol, Decimal("1.0000"))
+        self.assertEqual(res.signal_session_rvol, Decimal("2.0000"))
+        self.assertIn("Signal bar rvol", res.rejection_reason)
 
 
 if __name__ == "__main__":

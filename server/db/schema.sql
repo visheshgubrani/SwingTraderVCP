@@ -1269,7 +1269,8 @@ CREATE TABLE trade_proposals (
     entry_trigger_policy_version text NOT NULL DEFAULT 'cumulative_two_bar_v1' CHECK (
         entry_trigger_policy_version IN (
             'cumulative_two_bar_v1',
-            'breakout_bar_signal_v2'
+            'breakout_bar_signal_v2',
+            'balanced_breakout_v3'
         )
     ),
     gemini_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -1383,6 +1384,7 @@ CREATE TABLE trigger_events (
             'pending',
             'eligible',
             'rejected_chase',
+            'rejected_price_reversal',
             'rejected_capacity',
             'rejected_preflight',
             'rejected_other'

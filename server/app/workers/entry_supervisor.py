@@ -45,6 +45,7 @@ from app.domain.p10_geometry import (
     entry_vwap_invalidates_t1_rr,
 )
 from app.domain.p10_triggers import (
+    BALANCED_BREAKOUT_POLICY_V3,
     BREAKOUT_BAR_SIGNAL_POLICY_V2,
     CUMULATIVE_TWO_BAR_POLICY_V1,
     DailySessionBar,
@@ -53,6 +54,7 @@ from app.domain.p10_triggers import (
     calculate_relative_volume,
     entry_window_closed,
     evaluate_add_leg_gates,
+    evaluate_balanced_breakout_signal,
     evaluate_intraday_trigger,
 )
 from app.domain.journal_charges import FillLeg, estimate_cnc_charges
@@ -67,7 +69,9 @@ from app.services.distributed_lease import (
 )
 from app.services.execution_engine import (
     BrokerSubmissionUnknownError,
+    ChaseCeilingExceededError,
     ExecutionBlockedError,
+    PriceAcceptanceLostError,
     _order_tag,
     create_exit_intent,
     create_proposal_entry_intent,
@@ -686,9 +690,15 @@ async def verify_broker_state_under_lock(
 
 
 def _entry_rejection_outcome(exc: BaseException) -> str:
+    if isinstance(exc, PriceAcceptanceLostError):
+        return "rejected_price_reversal"
+    if isinstance(exc, ChaseCeilingExceededError):
+        return "rejected_chase"
     message = str(exc).lower()
     if "chase ceiling" in message:
         return "rejected_chase"
+    if "not above trigger" in message or "below trigger" in message or "price acceptance" in message:
+        return "rejected_price_reversal"
     if any(
         marker in message
         for marker in (
@@ -737,6 +747,10 @@ async def _record_entry_eligibility(
                 {"leg_id": confirmed.leg_id},
             )
         ).scalar_one_or_none() or CUMULATIVE_TWO_BAR_POLICY_V1
+        requires_reset = policy_version in {
+            BREAKOUT_BAR_SIGNAL_POLICY_V2,
+            BALANCED_BREAKOUT_POLICY_V3,
+        }
         await db.execute(
             text(
                 """
@@ -745,7 +759,7 @@ async def _record_entry_eligibility(
                     entry_rejection_reason = :reason
                 WHERE leg_id = :leg_id
                   AND bar_timestamp = :bar_time
-                  AND bar_type = 'confirmation_bar'
+                  AND is_confirmed = true
                   AND trigger_outcome = 'confirmed'
                 """
             ),
@@ -768,7 +782,7 @@ async def _record_entry_eligibility(
                 {
                     "status": (
                         "waiting_for_reset"
-                        if policy_version == BREAKOUT_BAR_SIGNAL_POLICY_V2
+                        if requires_reset
                         else "armed"
                     ),
                     "leg_id": confirmed.leg_id,
@@ -785,9 +799,13 @@ async def execute_confirmed_leg_allocation(
 
     async def ensure_pre_submit_chase() -> Decimal:
         price = await _fresh_ltp(redis, confirmed.symbol)
+        if price <= confirmed.trigger_price:
+            raise PriceAcceptanceLostError(
+                f"Fresh pre-submission price ({price}) is not above trigger ({confirmed.trigger_price})."
+            )
         if price > confirmed.chase_ceiling:
-            raise ExecutionBlockedError(
-                "Fresh pre-submission price exceeds the immutable chase ceiling."
+            raise ChaseCeilingExceededError(
+                f"Fresh pre-submission price ({price}) exceeds the immutable chase ceiling ({confirmed.chase_ceiling})."
             )
         return price
 
@@ -851,8 +869,10 @@ async def execute_confirmed_leg_allocation(
                     "leg_id": confirmed.leg_id,
                     "status": (
                         "waiting_for_reset"
-                        if leg["entry_trigger_policy_version"]
-                        == BREAKOUT_BAR_SIGNAL_POLICY_V2
+                        if leg["entry_trigger_policy_version"] in (
+                            BREAKOUT_BAR_SIGNAL_POLICY_V2,
+                            BALANCED_BREAKOUT_POLICY_V3,
+                        )
                         else "armed"
                     ),
                 },
@@ -941,8 +961,10 @@ async def execute_confirmed_leg_allocation(
                     "leg_id": confirmed.leg_id,
                     "status": (
                         "waiting_for_reset"
-                        if leg["entry_trigger_policy_version"]
-                        == BREAKOUT_BAR_SIGNAL_POLICY_V2
+                        if leg["entry_trigger_policy_version"] in (
+                            BREAKOUT_BAR_SIGNAL_POLICY_V2,
+                            BALANCED_BREAKOUT_POLICY_V3,
+                        )
                         else "armed"
                     ),
                 },
@@ -1299,6 +1321,19 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                 leg["entry_trigger_policy_version"]
                 or CUMULATIVE_TWO_BAR_POLICY_V1
             )
+            uses_bar_rvol = policy_version in {
+                BREAKOUT_BAR_SIGNAL_POLICY_V2,
+                BALANCED_BREAKOUT_POLICY_V3,
+            }
+            requires_confirmation_bar = policy_version in {
+                CUMULATIVE_TWO_BAR_POLICY_V1,
+                BREAKOUT_BAR_SIGNAL_POLICY_V2,
+            }
+            requires_reset_after_consumed_trigger = policy_version in {
+                BREAKOUT_BAR_SIGNAL_POLICY_V2,
+                BALANCED_BREAKOUT_POLICY_V3,
+            }
+            is_v3 = policy_version == BALANCED_BREAKOUT_POLICY_V3
             is_v2 = policy_version == BREAKOUT_BAR_SIGNAL_POLICY_V2
             last_event_at = leg["last_trigger_event_timestamp"]
             if last_event_at is not None and bar_time <= last_event_at:
@@ -1317,7 +1352,7 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                 db,
                 symbol=symbol,
                 bar_time=bar_time,
-                require_bar_fraction=is_v2,
+                require_bar_fraction=uses_bar_rvol,
             )
             session_rvol = calculate_relative_volume(
                 bar.cumulative_volume,
@@ -1330,7 +1365,7 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                     profile.adv20_robust,
                     profile.expected_bar_fraction or Decimal("0"),
                 )
-                if is_v2
+                if uses_bar_rvol
                 else None
             )
             local_time = (
@@ -1366,12 +1401,8 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                 continue
 
             if leg["status"] == "armed":
-                if bar.close > trigger and local_time >= dt.time(9, 30):
-                    observed_rvol = bar_rvol if is_v2 else session_rvol
-                    volume_passed = bool(observed_rvol >= required_rvol)
-                    recent_median: Decimal | None = None
-                    base_ratio: Decimal | None = None
-                    if is_v2:
+                if is_v3:
+                    if bar.close > trigger and local_time >= dt.time(9, 30):
                         recent_median, base_ratio = (
                             await _recent_base_volume_diagnostic(
                                 db,
@@ -1380,7 +1411,93 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                                 signal_volume=bar.volume,
                             )
                         )
-                    if is_v2 or volume_passed:
+                        evaluation = evaluate_balanced_breakout_signal(
+                            signal_bar=bar,
+                            trigger_price=trigger,
+                            adv20_robust=profile.adv20_robust,
+                            expected_bar_fraction=profile.expected_bar_fraction or Decimal("0"),
+                            expected_cumulative_fraction=profile.expected_cumulative_fraction,
+                            required_rvol=required_rvol,
+                        )
+                        if evaluation.is_triggered:
+                            await _persist_trigger_event(
+                                db,
+                                leg_id=leg["leg_id"],
+                                bar=bar,
+                                profile=profile,
+                                bar_type="signal_bar",
+                                bar_rvol=evaluation.signal_rvol,
+                                session_rvol=evaluation.signal_session_rvol,
+                                price_gate_passed=True,
+                                volume_gate_passed=True,
+                                trigger_outcome="confirmed",
+                                is_confirmed=True,
+                                chase_valid=bar.close <= chase,
+                                recent_base_median_volume=recent_median,
+                                volume_vs_recent_base=base_ratio,
+                                entry_eligibility_outcome="pending",
+                            )
+                            await db.execute(
+                                text(
+                                    """
+                                    UPDATE entry_legs
+                                    SET status = 'trigger_observed', signal_bar_timestamp = :bar_time
+                                    WHERE id = :leg_id AND status = 'armed'
+                                    """
+                                ),
+                                {"leg_id": leg["leg_id"], "bar_time": bar_time},
+                            )
+                            worst_r = chase - Decimal(leg["effective_stop"])
+                            conservative_rr = (
+                                (Decimal(leg["t1"]) - chase) / worst_r if worst_r > 0 else Decimal("0")
+                            )
+                            confirmed.append(
+                                ConfirmedLeg(
+                                    leg_id=leg["leg_id"],
+                                    proposal_id=leg["proposal_id"],
+                                    symbol=symbol,
+                                    leg_index=int(leg["leg_index"]),
+                                    risk_allocation_pct=Decimal(leg["risk_allocation_pct"]),
+                                    trigger_price=trigger,
+                                    chase_ceiling=chase,
+                                    initial_stop=Decimal(leg["effective_stop"]),
+                                    scanner_score=Decimal(leg["technical_score"] or 0),
+                                    confidence=Decimal(leg["confidence"]),
+                                    conservative_rr=conservative_rr,
+                                    bar_time=bar_time,
+                                )
+                            )
+                        else:
+                            await _persist_trigger_event(
+                                db,
+                                leg_id=leg["leg_id"],
+                                bar=bar,
+                                profile=profile,
+                                bar_type="signal_bar",
+                                bar_rvol=evaluation.signal_rvol,
+                                session_rvol=evaluation.signal_session_rvol,
+                                price_gate_passed=True,
+                                volume_gate_passed=False,
+                                trigger_outcome="signal_rejected",
+                                is_confirmed=False,
+                                chase_valid=bar.close <= chase,
+                                recent_base_median_volume=recent_median,
+                                volume_vs_recent_base=base_ratio,
+                            )
+                    continue
+
+                if is_v2:
+                    if bar.close > trigger and local_time >= dt.time(9, 30):
+                        observed_rvol = bar_rvol
+                        volume_passed = bool(observed_rvol >= required_rvol)
+                        recent_median, base_ratio = (
+                            await _recent_base_volume_diagnostic(
+                                db,
+                                symbol=symbol,
+                                bar_time=bar_time,
+                                signal_volume=bar.volume,
+                            )
+                        )
                         await _persist_trigger_event(
                             db,
                             leg_id=leg["leg_id"],
@@ -1400,8 +1517,7 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                             recent_base_median_volume=recent_median,
                             volume_vs_recent_base=base_ratio,
                         )
-                    if not volume_passed:
-                        if is_v2:
+                        if not volume_passed:
                             await db.execute(
                                 text(
                                     """
@@ -1413,17 +1529,46 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                                 ),
                                 {"leg_id": leg["leg_id"]},
                             )
-                        continue
-                    await db.execute(
-                        text(
-                            """
-                            UPDATE entry_legs
-                            SET status = 'trigger_observed', signal_bar_timestamp = :bar_time
-                            WHERE id = :leg_id AND status = 'armed'
-                            """
-                        ),
-                        {"leg_id": leg["leg_id"], "bar_time": bar_time},
-                    )
+                            continue
+                        await db.execute(
+                            text(
+                                """
+                                UPDATE entry_legs
+                                SET status = 'trigger_observed', signal_bar_timestamp = :bar_time
+                                WHERE id = :leg_id AND status = 'armed'
+                                """
+                            ),
+                            {"leg_id": leg["leg_id"], "bar_time": bar_time},
+                        )
+                    continue
+
+                if bar.close > trigger and local_time >= dt.time(9, 30):
+                    observed_rvol = session_rvol
+                    volume_passed = bool(observed_rvol >= required_rvol)
+                    if volume_passed:
+                        await _persist_trigger_event(
+                            db,
+                            leg_id=leg["leg_id"],
+                            bar=bar,
+                            profile=profile,
+                            bar_type="signal_bar",
+                            bar_rvol=bar_rvol,
+                            session_rvol=session_rvol,
+                            price_gate_passed=True,
+                            volume_gate_passed=volume_passed,
+                            trigger_outcome="waiting_confirmation",
+                            chase_valid=bar.close <= chase,
+                        )
+                        await db.execute(
+                            text(
+                                """
+                                UPDATE entry_legs
+                                SET status = 'trigger_observed', signal_bar_timestamp = :bar_time
+                                WHERE id = :leg_id AND status = 'armed'
+                                """
+                            ),
+                            {"leg_id": leg["leg_id"], "bar_time": bar_time},
+                        )
                 continue
 
             signal_row = (
@@ -1701,7 +1846,8 @@ async def refresh_add_leg_eligibility() -> int:
                                SELECT te.bar_high
                                FROM trigger_events te
                                WHERE te.leg_id = previous.id
-                                 AND te.bar_type = 'confirmation_bar'
+                                 AND te.is_confirmed = true
+                                 AND te.trigger_outcome = 'confirmed'
                                ORDER BY te.bar_timestamp DESC LIMIT 1
                            ), previous.trigger_price) AS preceding_high
                     FROM entry_legs el
@@ -2334,8 +2480,8 @@ async def _confirmed_leg_from_id(db: AsyncSession, leg_id: UUID) -> ConfirmedLeg
                 LEFT JOIN positions p ON p.id = el.position_id
                 JOIN LATERAL (
                     SELECT bar_timestamp FROM trigger_events
-                    WHERE leg_id = el.id AND bar_type = 'confirmation_bar'
-                      AND is_confirmed = true
+                    WHERE leg_id = el.id AND is_confirmed = true
+                      AND trigger_outcome = 'confirmed'
                     ORDER BY bar_timestamp DESC LIMIT 1
                 ) te ON true
                 WHERE el.id = :leg_id
@@ -2395,8 +2541,10 @@ async def process_resolved_capacity_conflicts(redis: aioredis.Redis) -> int:
                         """
                         UPDATE entry_legs el
                         SET status = CASE
-                                WHEN tp.entry_trigger_policy_version =
-                                     'breakout_bar_signal_v2'
+                                WHEN tp.entry_trigger_policy_version IN (
+                                    'breakout_bar_signal_v2',
+                                    'balanced_breakout_v3'
+                                )
                                 THEN 'waiting_for_reset'
                                 ELSE 'armed'
                             END,
@@ -2416,7 +2564,7 @@ async def process_resolved_capacity_conflicts(redis: aioredis.Redis) -> int:
                         SET entry_eligibility_outcome = 'rejected_capacity',
                             entry_rejection_reason = :reason
                         WHERE leg_id = ANY(:leg_ids)
-                          AND bar_type = 'confirmation_bar'
+                          AND is_confirmed = true
                           AND trigger_outcome = 'confirmed'
                           AND entry_eligibility_outcome = 'pending'
                         """
@@ -2449,8 +2597,10 @@ async def process_resolved_capacity_conflicts(redis: aioredis.Redis) -> int:
                     """
                     UPDATE entry_legs el
                     SET status = CASE
-                            WHEN tp.entry_trigger_policy_version =
-                                 'breakout_bar_signal_v2'
+                            WHEN tp.entry_trigger_policy_version IN (
+                                'breakout_bar_signal_v2',
+                                'balanced_breakout_v3'
+                            )
                             THEN 'waiting_for_reset'
                             ELSE 'armed'
                         END,
@@ -2473,7 +2623,7 @@ async def process_resolved_capacity_conflicts(redis: aioredis.Redis) -> int:
                             'Another exact-tie candidate was selected.'
                     WHERE leg_id = ANY(:leg_ids)
                       AND leg_id <> :chosen
-                      AND bar_type = 'confirmation_bar'
+                      AND is_confirmed = true
                       AND trigger_outcome = 'confirmed'
                       AND entry_eligibility_outcome = 'pending'
                     """
@@ -2524,7 +2674,7 @@ async def replay_verified_current_session(redis: aioredis.Redis) -> None:
                     FROM entry_legs el
                     JOIN trigger_events te ON te.leg_id = el.id
                     WHERE el.status = 'trigger_observed'
-                      AND te.bar_type = 'confirmation_bar'
+                      AND te.is_confirmed = true
                       AND te.trigger_outcome = 'confirmed'
                       AND te.entry_eligibility_outcome = 'pending'
                       AND NOT EXISTS (

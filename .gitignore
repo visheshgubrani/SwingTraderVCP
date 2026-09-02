@@ -36,3 +36,7 @@ Thumbs.db
 
 # Python
 .python-version
+
+# Expo / Mobile
+.expo/
+*.tsbuildinfo

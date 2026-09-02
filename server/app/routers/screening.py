@@ -501,7 +501,6 @@ async def trigger_fundamental_pass(
             str(run_id),
             mode,
             _job_id=queue_job_id,
-            _job_timeout=1800,
         )
         if queued_job is None:
             raise RuntimeError("Redis rejected the duplicate fundamentals queue job ID.")

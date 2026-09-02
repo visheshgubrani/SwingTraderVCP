@@ -121,6 +121,7 @@ class OpenRouterJournalCoachClient:
                     ),
                 },
             ],
+            "plugins": [{"id": "response-healing"}],
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -129,6 +130,7 @@ class OpenRouterJournalCoachClient:
                     "schema": schema,
                 },
             },
+            "provider": {"require_parameters": True, "data_collection": "deny"},
             "temperature": self._temperature,
             "max_tokens": self._max_tokens,
             "reasoning": {"effort": "low", "exclude": True},

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -20,19 +21,68 @@ def _usage_summary(usage: Mapping[str, Any] | None) -> str:
     return ", ".join(parts) if parts else "usage=n/a"
 
 
+def _strip_markdown_fences(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\s*\n?", "", cleaned)
+        cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+        return cleaned.strip()
+    return cleaned
+
+
+def _extract_json_block(text: str) -> str | None:
+    start_brace = text.find("{")
+    start_bracket = text.find("[")
+    if start_brace != -1 and start_bracket != -1:
+        start_idx = min(start_brace, start_bracket)
+    elif start_brace != -1:
+        start_idx = start_brace
+    elif start_bracket != -1:
+        start_idx = start_bracket
+    else:
+        return None
+
+    end_brace = text.rfind("}")
+    end_bracket = text.rfind("]")
+    end_idx = max(end_brace, end_bracket)
+    if end_idx == -1 or end_idx < start_idx:
+        return None
+
+    return text[start_idx : end_idx + 1]
+
+
 def decode_openrouter_json_value(value: Any) -> Any:
-    """JSON-decode strings once, or twice when the payload is double-encoded."""
+    """JSON-decode strings once, or twice when the payload is double-encoded.
+
+    Also handles markdown-wrapped JSON and extracts embedded JSON blocks when
+    providers include preamble or postamble commentary.
+    """
     if isinstance(value, (bytes, bytearray)):
         value = value.decode("utf-8")
     if not isinstance(value, str):
         return value
-    parsed = json.loads(value)
+
+    stripped = value.strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        fence_stripped = _strip_markdown_fences(stripped)
+        try:
+            parsed = json.loads(fence_stripped)
+        except json.JSONDecodeError:
+            extracted = _extract_json_block(fence_stripped)
+            if extracted is not None and extracted != fence_stripped:
+                parsed = json.loads(extracted)
+            else:
+                raise
+
     if isinstance(parsed, str):
         try:
-            return json.loads(parsed)
+            return decode_openrouter_json_value(parsed)
         except json.JSONDecodeError:
             return parsed
     return parsed
+
 
 
 def _text_from_content_parts(parts: list[Any]) -> str:

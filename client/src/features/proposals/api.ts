@@ -41,7 +41,7 @@ export interface TradeProposalItem {
   leg_count: number
   leg_risk_allocations: number[]
   relative_volume_threshold: number
-  entry_trigger_policy_version: "cumulative_two_bar_v1" | "breakout_bar_signal_v2"
+  entry_trigger_policy_version: "cumulative_two_bar_v1" | "breakout_bar_signal_v2" | "balanced_breakout_v3"
   gemini_evidence: {
     classification?: string
     forming_state?: string | null

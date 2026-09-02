@@ -814,6 +814,7 @@ class OpenRouterVisionClient:
                     ],
                 },
             ],
+            "plugins": [{"id": "response-healing"}],
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {

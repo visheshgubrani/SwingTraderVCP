@@ -448,18 +448,20 @@ Breakout-bar RVOL is signal-bar volume divided by robust ADV20 times that
 fraction. Fewer than 15 valid profile sessions, stale/missing volume, an
 invalid bucket delta, or unresolved reconciliation drift blocks the trigger.
 
-A signal bar must close above its pivot/base-high trigger with the template's
-required breakout-bar RVOL. The next completed 5-minute bar must remain above
-the trigger but has no RVOL hard gate. A failed signal or confirmation enters
-`waiting_for_reset`; a verified close at or below the trigger is required
-before a later close above it can start another attempt. Session-cumulative
-RVOL, confirmation-bar RVOL, and volume versus the preceding 12 verified
-same-session bars are diagnostics only.
+A signal bar under `balanced_breakout_v3` must close above its pivot/base-high
+trigger with the template's required breakout-bar RVOL (thresholds versioned under
+`p10_template_score_v2`). A single verified 5-minute bar qualifies the trigger immediately
+(no second confirmation candle). An above-trigger bar that fails RVOL records `signal_rejected`
+audit evidence but leaves the leg `armed` so subsequent session bars can qualify.
+Historical `breakout_bar_signal_v2` (two-bar confirmation) and `cumulative_two_bar_v1`
+(two-bar cumulative RVOL) remain frozen for historical audit and replay. Session-cumulative
+RVOL and volume versus the preceding 12 verified same-session bars are diagnostics.
 
 A confirmed trigger is distinct from entry eligibility. Fresh executable LTP
-must remain at or below the frozen chase ceiling immediately before
-submission. Chase or capacity rejection is audited without reclassifying the
-trigger, and the leg requires a reset plus a fresh two-bar trigger.
+must strictly satisfy `trigger < fresh LTP <= chase_ceiling` immediately before
+submission. Fresh LTP $\le$ trigger records `rejected_price_reversal`; fresh LTP $>$ chase ceiling
+records `rejected_chase`. Chase, price reversal, or capacity rejection transitions the leg
+to `waiting_for_reset`, requiring a completed 5-minute close at or below trigger to rearm.
 
 Add eligibility begins only after the first fill and expires after 10 NSE
 sessions. `single` has no adds. Hold and Base are sequential gates; every add

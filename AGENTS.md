@@ -539,26 +539,29 @@ position monitor: SL + T1/T2/T3 + ATR runner → reconcile → journal
 - Expected signal-bar fraction =
   `cumulative_fraction[t] − cumulative_fraction[t−1]`. Breakout-bar RVOL =
   `signal_bar_volume / (robust ADV20 × expected signal-bar fraction)`.
-  The existing template thresholds apply only to this signal-bar statistic.
-  Session-cumulative RVOL, confirmation-bar RVOL, and signal volume divided
-  by the median of the preceding 12 verified same-session 5-minute bars are
-  persisted as diagnostics only. The 12-bar diagnostic is `null` when fewer
-  than 12 usable bars exist.
-- A signal bar must close above its pivot/base-high trigger with the template's
-  required breakout-bar RVOL. The immediately following completed 5-minute
-  bar must remain above the trigger; it has no RVOL hard gate.
-- If a price-crossing signal fails breakout-bar RVOL, or the immediate
-  confirmation closes at or below the trigger, the leg enters
-  `waiting_for_reset`. It cannot form another signal while price remains above
-  the trigger. A verified 5-minute close at or below the trigger resets it to
-  `armed`; only a later verified close above the trigger may start a new
-  attempt.
-- Trigger validity and entry eligibility are separate. A completed two-bar
-  trigger stays audited as confirmed even when fresh executable LTP exceeds
-  the frozen chase ceiling or allocation loses capacity. No order is placed,
-  the entry rejection reason is persisted, and a v2 leg requires a reset plus
-  a new qualifying two-bar trigger. Recheck fresh LTP against the immutable
-  chase ceiling immediately before submission.
+  The template thresholds apply to this signal-bar statistic.
+  Session-cumulative RVOL and signal volume divided by the median of the preceding
+  12 verified same-session 5-minute bars are persisted as diagnostics.
+- Policy versions:
+  - `balanced_breakout_v3` (active production default): A single verified 5-minute close
+    above pivot/base-high with template breakout-bar RVOL qualifies the trigger
+    immediately. Template thresholds under `p10_template_score_v2`:
+    `single: 1.75×`, `two_leg: 1.50×`, `two_leg_staged: 1.50×`, `three_leg_front: 1.50×`,
+    `three_leg_balanced: 1.50×`. An above-trigger bar that fails RVOL records
+    `signal_rejected` audit evidence while leaving the leg in `armed` state so
+    subsequent session bars can qualify. Trigger validity and entry eligibility
+    are separated: completed 5m candle confirms the trigger, while fresh executable
+    LTP must strictly satisfy `trigger < fresh LTP <= chase_ceiling`. Fresh LTP $\le$
+    trigger records `rejected_price_reversal`; fresh LTP $>$ chase ceiling records
+    `rejected_chase`. Both rejected eligibility and capacity blocks transition the
+    leg to `waiting_for_reset`, requiring a verified 5-minute close $\le$ trigger to rearm.
+  - `breakout_bar_signal_v2` (frozen historical): Required a signal bar above trigger
+    with breakout-bar RVOL, a second immediately following confirmation bar holding
+    above trigger, and transitioned volume-failed signals to `waiting_for_reset`.
+  - `cumulative_two_bar_v1` (frozen historical): Required two-bar cumulative session RVOL
+    and confirmation-time chase validation.
+- Chase geometry (`entry + min(2%, 0.5R)`), D1-only initial entry window, ADV20 profile
+  freshness ($\ge 15$ sessions), structural stops, and exit rules remain identical across versions.
 
 ### 6.2 Add-leg eligibility
 

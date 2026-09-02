@@ -33,6 +33,14 @@ class ExecutionBlockedError(RuntimeError):
     """Raised when an operational control blocks a new order intent."""
 
 
+class PriceAcceptanceLostError(ExecutionBlockedError):
+    """Fresh LTP is not strictly above the trigger price."""
+
+
+class ChaseCeilingExceededError(ExecutionBlockedError):
+    """Fresh LTP exceeds the immutable chase ceiling."""
+
+
 class ExecutionSafetyError(RuntimeError):
     """Raised when a money-path invariant is not satisfied."""
 
@@ -1731,8 +1739,10 @@ async def _cancel_entry_before_submission(
             """
             UPDATE entry_legs el
             SET status = CASE
-                    WHEN tp.entry_trigger_policy_version =
-                         'breakout_bar_signal_v2'
+                    WHEN tp.entry_trigger_policy_version IN (
+                        'breakout_bar_signal_v2',
+                        'balanced_breakout_v3'
+                    )
                     THEN 'waiting_for_reset'
                     ELSE 'armed'
                 END,

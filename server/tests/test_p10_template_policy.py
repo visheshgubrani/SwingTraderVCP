@@ -26,11 +26,12 @@ def _features(**overrides) -> TemplateScoreFeatures:
 
 class TestP10TemplatePolicy(unittest.TestCase):
     def test_disagreement_forces_single_and_banner(self) -> None:
+        self.assertEqual(TEMPLATE_POLICY_VERSION, "p10_template_score_v2")
         result = select_entry_template(_features(llm_count=4, python_count=2))
         self.assertEqual(result.template, EntryTemplate.SINGLE)
         self.assertTrue(result.mismatch_banner)
         self.assertEqual(result.reason, "count_disagreement_gt_1")
-        self.assertEqual(result.policy_version, TEMPLATE_POLICY_VERSION)
+        self.assertEqual(result.policy_version, "p10_template_score_v2")
 
     def test_tight_high_quality_selects_three_leg_front(self) -> None:
         result = select_entry_template(_features(llm_count=3, python_count=3, confidence=80))

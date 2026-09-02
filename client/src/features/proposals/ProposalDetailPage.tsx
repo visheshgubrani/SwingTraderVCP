@@ -740,7 +740,7 @@ export function ProposalDetailPage() {
                       <div>
                         Volume Gate:{" "}
                         <strong className="text-foreground">
-                          {proposal.entry_trigger_policy_version === "breakout_bar_signal_v2"
+                          {proposal.entry_trigger_policy_version !== "cumulative_two_bar_v1"
                             ? "Signal-bar RVOL"
                             : "Cumulative RVOL"}{" "}
                           ≥ {proposal.relative_volume_threshold}×

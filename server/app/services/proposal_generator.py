@@ -34,7 +34,10 @@ from app.domain.p10_geometry import (
     resolve_surviving_contractions,
 )
 from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
-from app.domain.p10_triggers import BREAKOUT_BAR_SIGNAL_POLICY_V2
+from app.domain.p10_triggers import (
+    BALANCED_BREAKOUT_POLICY_V3,
+    BREAKOUT_BAR_SIGNAL_POLICY_V2,
+)
 from app.domain.p10_template_policy import (
     TEMPLATE_POLICY_VERSION,
     TemplateScoreFeatures,
@@ -55,13 +58,13 @@ IST_TZ = ZoneInfo("Asia/Kolkata")
 PROMPT_VERSION = "p10_vcp_proposal_v6"
 SCHEMA_VERSION = "gemini_vcp_proposal_output_v6"
 GEOMETRY_VERSION = "p10_python_owned_levels_v5"
-ENTRY_TRIGGER_POLICY_VERSION = BREAKOUT_BAR_SIGNAL_POLICY_V2
+ENTRY_TRIGGER_POLICY_VERSION = BALANCED_BREAKOUT_POLICY_V3
 PROPOSAL_INVALID_PROVIDER_JSON = "proposal_invalid_provider_json"
 _PROVIDER_PAYLOAD_SNIPPET_LIMIT = 4000
 
 
 class ProposalProviderError(RuntimeError):
-    """OpenRouter returned a payload that is not usable proposal JSON."""
+    """OpenRouter returned a payload that is not usable proposal JSON or a provider error."""
 
     error_type = PROPOSAL_INVALID_PROVIDER_JSON
 
@@ -69,9 +72,12 @@ class ProposalProviderError(RuntimeError):
         self,
         message: str,
         *,
+        error_type: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
+        if error_type is not None:
+            self.error_type = error_type
         self.details = details or {}
 
 
@@ -635,6 +641,7 @@ def build_proposal_vision_request(
                 ],
             },
         ],
+        "plugins": [{"id": "response-healing"}],
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -684,17 +691,38 @@ async def call_gemini_vision_for_proposal(
     if settings.openrouter_http_referer:
         headers["HTTP-Referer"] = settings.openrouter_http_referer
 
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        resp = await client.post(
-            settings.openrouter_api_url,
-            headers=headers,
-            json=request_body,
-        )
-        resp.raise_for_status()
+    timeout_secs = min(settings.proposal_attempt_timeout_seconds, 90.0)
+    async with httpx.AsyncClient(timeout=timeout_secs) as client:
+        try:
+            resp = await client.post(
+                settings.openrouter_api_url,
+                headers=headers,
+                json=request_body,
+            )
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(
+                f"OpenRouter request timed out after {timeout_secs}s"
+            ) from exc
+
         try:
             data = resp.json()
         except ValueError:
             data = {"unparsed_body": resp.text[:2000]}
+
+        if resp.status_code >= 400:
+            if isinstance(data, Mapping) and "error" in data and isinstance(data["error"], Mapping):
+                err_msg = data["error"].get("message") or resp.text[:500]
+                err_code = data["error"].get("code", resp.status_code)
+                raise ProposalProviderError(
+                    f"OpenRouter HTTP {resp.status_code} provider error: {err_msg} (code={err_code})",
+                    details={
+                        "http_status": resp.status_code,
+                        "error_code": err_code,
+                        "provider_error": dict(data["error"]),
+                        "payload": _provider_payload_snippet(data),
+                    },
+                )
+            resp.raise_for_status()
 
     return parse_proposal_openrouter_response(data)
 
@@ -726,6 +754,14 @@ def _extract_proposal_json(
     *,
     usage: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if "error" in data and isinstance(data["error"], Mapping):
+        err_msg = data["error"].get("message") or "Unknown provider error"
+        err_code = data["error"].get("code")
+        raise ProposalProviderError(
+            f"OpenRouter upstream provider error: {err_msg} (code={err_code})",
+            details={"error_code": err_code, "provider_error": dict(data["error"])},
+        )
+
     if "classification" in data and "choices" not in data:
         return dict(data)
 
@@ -740,6 +776,13 @@ def _extract_proposal_json(
     choice: Any = choices[0]
     if isinstance(choice, str):
         choice = _unwrap_json_payload(choice)
+    if isinstance(choice, Mapping) and "error" in choice and isinstance(choice["error"], Mapping):
+        err_msg = choice["error"].get("message") or "Unknown provider error"
+        err_code = choice["error"].get("code")
+        raise ProposalProviderError(
+            f"OpenRouter upstream provider error: {err_msg} (code={err_code})",
+            details={"error_code": err_code, "provider_error": dict(choice["error"])},
+        )
     if isinstance(choice, Mapping) and "classification" in choice and "message" not in choice:
         return dict(choice)
     if not isinstance(choice, Mapping):
@@ -762,6 +805,18 @@ def parse_proposal_openrouter_response(
         if not isinstance(data, Mapping):
             raise ValueError(
                 f"OpenRouter proposal payload is {type(data).__name__}, not an object"
+            )
+        if "error" in data and isinstance(data["error"], Mapping):
+            err_msg = data["error"].get("message") or "Unknown provider error"
+            err_code = data["error"].get("code")
+            raise ProposalProviderError(
+                f"OpenRouter upstream provider error: {err_msg} (code={err_code})",
+                details={
+                    "error_code": err_code,
+                    "provider_error": dict(data["error"]),
+                    "payload_type": type(original).__name__,
+                    "payload": _provider_payload_snippet(original),
+                },
             )
         raw_usage = data.get("usage", {})
         usage = dict(raw_usage) if isinstance(raw_usage, Mapping) else {}

@@ -12,7 +12,7 @@ from decimal import Decimal
 from app.domain.p10_sizing import EntryTemplate
 
 
-TEMPLATE_POLICY_VERSION = "p10_template_score_v1"
+TEMPLATE_POLICY_VERSION = "p10_template_score_v2"
 DISAGREEMENT_BANNER_THRESHOLD = 1
 
 

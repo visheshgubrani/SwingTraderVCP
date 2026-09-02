@@ -767,7 +767,7 @@ async def list_rejected_attempts(
         LEFT JOIN automation_runs ar ON ar.id = pa.automation_run_id
         LEFT JOIN scan_runs sr ON sr.id = ar.scan_run_id
         {where_sql}
-        ORDER BY pa.screening_result_id, pa.attempt_number DESC, pa.started_at DESC
+        ORDER BY pa.started_at ASC, pa.attempt_number ASC
         LIMIT :limit;
     """)
     rows = (await db.execute(stmt, params)).mappings().all()
@@ -1278,8 +1278,10 @@ async def resolve_capacity_conflict(
                 """
                 UPDATE entry_legs el
                 SET status = CASE
-                        WHEN tp.entry_trigger_policy_version =
-                             'breakout_bar_signal_v2'
+                        WHEN tp.entry_trigger_policy_version IN (
+                            'breakout_bar_signal_v2',
+                            'balanced_breakout_v3'
+                        )
                         THEN 'waiting_for_reset'
                         ELSE 'armed'
                     END,
@@ -1300,7 +1302,7 @@ async def resolve_capacity_conflict(
                     entry_rejection_reason =
                         'Capacity conflict expired before selection.'
                 WHERE leg_id = ANY(:leg_ids)
-                  AND bar_type = 'confirmation_bar'
+                  AND is_confirmed = true
                   AND trigger_outcome = 'confirmed'
                   AND entry_eligibility_outcome = 'pending'
                 """

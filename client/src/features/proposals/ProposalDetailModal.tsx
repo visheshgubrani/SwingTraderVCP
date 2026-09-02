@@ -199,7 +199,7 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
                     </span>
                     <div className="flex items-center gap-3 text-muted-foreground">
                       <span>
-                        {activeProposal.entry_trigger_policy_version === "breakout_bar_signal_v2"
+                        {activeProposal.entry_trigger_policy_version !== "cumulative_two_bar_v1"
                           ? "Signal-bar RVOL"
                           : "Cumulative RVOL"}{" "}
                         ≥ {activeProposal.relative_volume_threshold}x

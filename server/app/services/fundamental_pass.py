@@ -1206,6 +1206,7 @@ async def run_fundamental_pass(
     ctx: dict[str, Any],
     scan_run_id: str,
     mode: str = "retry_incomplete",
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Run P7 in strict rank order; no concurrent provider or model calls."""
     job_id = str(ctx.get("job_id") or f"fundamental-pass:{scan_run_id}")

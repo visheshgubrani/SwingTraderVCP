@@ -62,13 +62,20 @@ class FakeProposalBatchSession:
         return None
 
     async def execute(self, statement, params=None):
-        del params
         sql = str(statement)
-        self.sql.append(sql)
+        self.sql.append((sql, params or {}))
         if "SELECT enabled" in sql:
             return FakeResult(scalar=False)
+        if "FROM scan_runs" in sql:
+            if self.candidate is not None:
+                as_of = getattr(self.candidate, "as_of_date", dt.date(2026, 8, 18))
+                completed = getattr(self.candidate, "scan_completed_at", dt.datetime.now(dt.timezone.utc))
+                return FakeResult(rows=[{"as_of_date": as_of, "completed_at": completed}])
+            return FakeResult(rows=[])
         if "FROM screening_results" in sql:
-            return FakeResult(rows=[self.candidate])
+            return FakeResult(rows=[self.candidate] if self.candidate is not None else [])
+        if "FROM p10_forming_patterns" in sql:
+            return FakeResult(rows=[])
         if "INSERT INTO automation_runs" in sql:
             return FakeResult(scalar=self.automation_run_id)
         return FakeResult()
@@ -146,7 +153,7 @@ class TestProposalBatchDeadline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["counts"]["rejected"], 1)
         process_candidate.assert_awaited_once()
         self.assertFalse(
-            any("INSERT INTO trade_proposals" in sql for sql in fake_session.sql)
+            any("INSERT INTO trade_proposals" in sql for sql, _ in fake_session.sql)
         )
 
     async def test_single_proposal_processes_only_the_requested_candidate(self) -> None:
@@ -514,3 +521,189 @@ class TestProposalAutoArming(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "pending_approval")
         self.assertFalse(any("proposal_decisions" in sql for sql, _ in fake_session.statements))
         fake_redis.publish.assert_not_awaited()
+
+    async def test_forming_recheck_deduplicated_by_instrument_id_and_accurately_counted(self):
+        inst_abb = uuid4()
+        inst_jsw = uuid4()
+        sr_today_abb = uuid4()
+        sr_yesterday_abb = uuid4()
+        sr_yesterday_jsw = uuid4()
+        scan_run_id = uuid4()
+        now = dt.datetime(2026, 8, 18, 17, 51, tzinfo=dt.timezone.utc)
+
+        shortlist_candidate = SimpleNamespace(
+            screening_result_id=sr_today_abb,
+            instrument_id=inst_abb,
+            symbol="NSE:ABB-EQ",
+            tick_size=0.05,
+            lot_size=1,
+            result_rank=1,
+            technical_score=85,
+            as_of_date=dt.date(2026, 8, 18),
+            scan_completed_at=now,
+        )
+        forming_abb_duplicate = SimpleNamespace(
+            screening_result_id=sr_yesterday_abb,
+            instrument_id=inst_abb,
+            symbol="NSE:ABB-EQ",
+            tick_size=0.05,
+            lot_size=1,
+            result_rank=None,
+            technical_score=None,
+        )
+        forming_jsw_unique = SimpleNamespace(
+            screening_result_id=sr_yesterday_jsw,
+            instrument_id=inst_jsw,
+            symbol="NSE:JSWINFRA-EQ",
+            tick_size=0.05,
+            lot_size=1,
+            result_rank=None,
+            technical_score=None,
+        )
+
+        class BatchSession:
+            def __init__(self):
+                self.statements = []
+                self.run_id = uuid4()
+
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            async def execute(self, statement, params=None):
+                sql = str(statement)
+                self.statements.append((sql, params or {}))
+                if "SELECT enabled" in sql:
+                    return FakeResult(scalar=False)
+                if "FROM scan_runs" in sql:
+                    return FakeResult(rows=[{"as_of_date": dt.date(2026, 8, 18), "completed_at": now}])
+                if "FROM screening_results" in sql:
+                    return FakeResult(rows=[shortlist_candidate])
+                if "FROM p10_forming_patterns" in sql and "WHERE f.status = 'watching'" in sql:
+                    return FakeResult(rows=[forming_abb_duplicate, forming_jsw_unique])
+                if "INSERT INTO automation_runs" in sql:
+                    return FakeResult(scalar=self.run_id)
+                return FakeResult()
+
+            async def commit(self):
+                pass
+
+        session = BatchSession()
+        with (
+            patch("app.workers.proposal_worker.async_session", session),
+            patch(
+                "app.workers.proposal_worker.process_proposal_candidate",
+                new=AsyncMock(return_value="rejected"),
+            ) as mock_process,
+        ):
+            result = await run_eod_proposal_batch(
+                {}, str(scan_run_id), limit=10, manual=True
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["counts"]["rejected"], 2)
+
+        # 1. Verify candidates_total was initialized to 2 (1 shortlist + 1 deduped forming recheck, NOT 3)
+        auto_run_insert = next(
+            params for sql, params in session.statements if "INSERT INTO automation_runs" in sql
+        )
+        self.assertEqual(auto_run_insert["total"], 2)
+
+        # 2. Verify process_proposal_candidate was called exactly twice (ABB and JSWINFRA)
+        self.assertEqual(mock_process.await_count, 2)
+        called_symbols = [call.kwargs["candidate"].symbol for call in mock_process.await_args_list]
+        self.assertEqual(called_symbols, ["NSE:ABB-EQ", "NSE:JSWINFRA-EQ"])
+
+    async def test_proposal_numeric_rejection_closes_forming_watch_as_broken_down(self):
+        from app.workers.proposal_worker import process_proposal_candidate
+        from app.services.proposal_generator import ProposalBuildResult
+
+        inst_id = uuid4()
+        candidate = SimpleNamespace(
+            screening_result_id=uuid4(),
+            instrument_id=inst_id,
+            symbol="NSE:ABB-EQ",
+            tick_size=0.05,
+            lot_size=1,
+            result_rank=1,
+            technical_score=85,
+            as_of_date=dt.date(2026, 8, 18),
+            scan_completed_at=dt.datetime.now(dt.timezone.utc),
+        )
+
+        class MockSession:
+            def __init__(self):
+                self.statements = []
+
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            async def execute(self, statement, params=None):
+                sql = str(statement)
+                self.statements.append((sql, params or {}))
+                if "SELECT open_price" in sql:
+                    return FakeResult(rows=[{
+                        "open_price": 100, "high_price": 105, "low_price": 95,
+                        "close_price": 102, "volume": 100000,
+                        "candle_date": dt.date(2026, 8, 18) - dt.timedelta(days=i),
+                    } for i in range(252)])
+                if "SELECT id, version, risk_per_trade_pct" in sql:
+                    return FakeResult(rows=[{
+                        "id": uuid4(), "version": 1, "risk_per_trade_pct": "0.01",
+                        "deployable_capital_override": "1000000",
+                    }])
+                if "SELECT stage FROM p10_rollout_state" in sql:
+                    return FakeResult(rows=[{"stage": "paper"}])
+                if "INSERT INTO proposal_attempts" in sql:
+                    return FakeResult(scalar=uuid4())
+                return FakeResult()
+
+            async def commit(self):
+                pass
+
+        session = MockSession()
+        ai_valid_output = SimpleNamespace(
+            classification="valid",
+            forming_state=None,
+            confidence=80,
+            volume_dry_up=True,
+            progressive_tightening=True,
+            model_dump=lambda mode="json": {"classification": "valid"},
+        )
+        rejected_build = ProposalBuildResult(
+            proposal=None,
+            rejection_code="proposal_numeric_gate_failed",
+            rejection_message="Pivot chase limit exceeded",
+            rejection_details={"subreason": "chase_limit_exceeded"},
+        )
+
+        with (
+            patch("app.workers.proposal_worker.async_session", session),
+            patch("app.workers.proposal_worker.call_gemini_vision_for_proposal", new=AsyncMock(return_value=(ai_valid_output, {}, 0.01, "req-123"))),
+            patch("app.workers.proposal_worker.generate_trade_proposal_from_analysis", return_value=rejected_build),
+            patch("app.workers.proposal_worker.close_forming_watch", new=AsyncMock()) as mock_close_watch,
+        ):
+            outcome = await process_proposal_candidate(
+                automation_run_id=str(uuid4()),
+                candidate=candidate,
+                as_of_date=dt.date(2026, 8, 18),
+                deadline=dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24),
+            )
+
+        self.assertEqual(outcome, "rejected")
+        mock_close_watch.assert_awaited_once()
+        self.assertEqual(mock_close_watch.await_args.kwargs["instrument_id"], str(inst_id))
+        self.assertEqual(mock_close_watch.await_args.kwargs["status"], "broken_down")
+
+

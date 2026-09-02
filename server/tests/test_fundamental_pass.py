@@ -34,6 +34,7 @@ from app.services.fundamental_pass import (
     _start_ai_attempt,
     _store_annotation,
     ensure_fundamental_survivors_selected,
+    run_fundamental_pass,
 )
 from app.services.fundamental_rules import (
     score_balanced_sepa,
@@ -1192,6 +1193,17 @@ class FundamentalPassOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     def test_worker_registers_p7_job(self) -> None:
         names = [function.__name__ for function in WorkerSettings.functions]
         self.assertIn("run_fundamental_pass", names)
+
+    async def test_run_fundamental_pass_tolerates_extra_kwargs(self) -> None:
+        with patch("app.services.fundamental_pass.settings.p7_fundamental_pass_enabled", False):
+            result = await run_fundamental_pass(
+                {"job_id": "test-job"},
+                "scan-run-123",
+                mode="all",
+                _job_timeout=1800,
+                extra_param="value",
+            )
+            self.assertEqual(result, {"status": "disabled", "scan_run_id": "scan-run-123"})
 
 
 if __name__ == "__main__":

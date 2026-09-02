@@ -767,7 +767,7 @@ async def list_rejected_attempts(
         LEFT JOIN automation_runs ar ON ar.id = pa.automation_run_id
         LEFT JOIN scan_runs sr ON sr.id = ar.scan_run_id
         {where_sql}
-        ORDER BY pa.screening_result_id, pa.attempt_number DESC, pa.started_at DESC
+        ORDER BY pa.started_at ASC, pa.attempt_number ASC
         LIMIT :limit;
     """)
     rows = (await db.execute(stmt, params)).mappings().all()

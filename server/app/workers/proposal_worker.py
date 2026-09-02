@@ -848,6 +848,11 @@ async def process_proposal_candidate(
                 build_result.rejection_message,
             )
             async with async_session() as session:
+                await close_forming_watch(
+                    session,
+                    instrument_id=str(candidate.instrument_id),
+                    status="broken_down",
+                )
                 await _finish_attempt(
                     session,
                     attempt_id=attempt_id,
@@ -860,6 +865,7 @@ async def process_proposal_candidate(
                     error_message=build_result.rejection_message,
                     error_details=build_result.rejection_details,
                 )
+                await session.commit()
             return "rejected"
 
         async with async_session() as session:
@@ -880,6 +886,12 @@ async def process_proposal_candidate(
                     f"{persistence.status!r}; no new proposal row was created. "
                     "Open the matching status tab or All Trades to review it."
                 )
+                await close_forming_watch(
+                    session,
+                    instrument_id=str(candidate.instrument_id),
+                    status="promoted",
+                    proposal_id=persistence.proposal_id,
+                )
                 await _finish_attempt(
                     session,
                     attempt_id=attempt_id,
@@ -895,6 +907,7 @@ async def process_proposal_candidate(
                         "existing_proposal_status": persistence.status,
                     },
                 )
+                await session.commit()
                 return "rejected"
             await close_forming_watch(
                 session,
@@ -939,8 +952,6 @@ async def run_eod_proposal_batch(
                         SELECT id, status
                         FROM automation_runs
                         WHERE scan_run_id = :scan_run_id
-                          AND status IN ('running', 'completed')
-                        ORDER BY created_at DESC
                         LIMIT 1
                         """
                     ),
@@ -959,6 +970,28 @@ async def run_eod_proposal_batch(
                     "scan_run_id": scan_run_id,
                     "automation_run_id": str(existing["id"]),
                 }
+
+        scan_run_row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT as_of_date, completed_at
+                    FROM scan_runs
+                    WHERE id = :scan_run_id
+                      AND visibility = 'personal'
+                      AND triggered_by <> 'manual_shadow'
+                    """
+                ),
+                {"scan_run_id": scan_run_id},
+            )
+        ).mappings().one_or_none()
+        if scan_run_row is None:
+            return {"status": "no_scan_run", "scan_run_id": scan_run_id}
+        if scan_run_row["completed_at"] is None:
+            raise RuntimeError("Proposal shortlist has no durable scan completion time")
+
+        as_of_date = scan_run_row["as_of_date"]
+        scan_completed_at = scan_run_row["completed_at"]
 
         result = await session.execute(
             text(
@@ -992,13 +1025,35 @@ async def run_eod_proposal_batch(
                 "p7_enabled": settings.p7_fundamental_pass_enabled,
             },
         )
-        candidates = result.all()
-        if not candidates:
+        candidates = list(result.all())
+
+        expired = await expire_stale_forming_watches(
+            session, as_of_date=as_of_date, holidays=_holiday_dates()
+        )
+        if expired:
+            logger.info("Expired %s stale forming watches as_of=%s", expired, as_of_date)
+
+        raw_rechecks = await load_forming_rechecks(
+            session, as_of_date=as_of_date, cap=FORMING_RECHECK_CAP
+        )
+        shortlist_instrument_ids = {
+            str(c.instrument_id)
+            for c in candidates
+            if getattr(c, "instrument_id", None) is not None
+        }
+        forming_rechecks = []
+        seen_recheck_ids = set()
+        for recheck in raw_rechecks:
+            inst_id = str(recheck.instrument_id) if getattr(recheck, "instrument_id", None) else None
+            if not inst_id or inst_id in shortlist_instrument_ids or inst_id in seen_recheck_ids:
+                continue
+            seen_recheck_ids.add(inst_id)
+            forming_rechecks.append(recheck)
+
+        total_candidates = len(candidates) + len(forming_rechecks)
+        if total_candidates == 0:
             return {"status": "no_candidates", "scan_run_id": scan_run_id}
-        as_of_date = candidates[0].as_of_date
-        scan_completed_at = candidates[0].scan_completed_at
-        if scan_completed_at is None:
-            raise RuntimeError("Proposal shortlist has no durable scan completion time")
+
         now = dt.datetime.now(dt.timezone.utc)
         deadline = proposal_batch_deadline(
             as_of_date=as_of_date,
@@ -1015,7 +1070,7 @@ async def run_eod_proposal_batch(
                 RETURNING id
                 """
             ),
-            {"scan_run_id": scan_run_id, "total": len(candidates), "deadline": deadline},
+            {"scan_run_id": scan_run_id, "total": total_candidates, "deadline": deadline},
         )
         automation_run_id = str(run_result.scalar_one())
         await session.commit()
@@ -1025,10 +1080,11 @@ async def run_eod_proposal_batch(
             automation_run_id=automation_run_id,
             scan_run_id=scan_run_id,
             candidates=candidates,
+            forming_rechecks=forming_rechecks,
+            total_candidates=total_candidates,
             as_of_date=as_of_date,
             deadline=deadline,
             manual=manual,
-            include_forming_rechecks=True,
             redis=redis,
         )
     except asyncio.CancelledError:
@@ -1122,10 +1178,11 @@ async def run_single_proposal(
             automation_run_id=automation_run_id,
             scan_run_id=scan_run_id,
             candidates=[candidate],
+            forming_rechecks=[],
+            total_candidates=1,
             as_of_date=as_of_date,
             deadline=deadline,
             manual=True,
-            include_forming_rechecks=False,
             redis=redis,
         )
     except asyncio.CancelledError:
@@ -1151,17 +1208,21 @@ async def _process_automation_candidates(
     automation_run_id: str,
     scan_run_id: str,
     candidates: list[Any],
+    forming_rechecks: list[Any] | None = None,
+    total_candidates: int | None = None,
     as_of_date: dt.date,
     deadline: dt.datetime,
     manual: bool,
-    include_forming_rechecks: bool = True,
     redis: Any = None,
 ) -> dict[str, Any]:
     counts = {key: 0 for key in ("generated", "rejected", "uncertain", "failed", "timed_out")}
     processed = 0
-    for index, candidate in enumerate(candidates):
+    all_candidates = list(candidates) + list(forming_rechecks or [])
+    total = total_candidates if total_candidates is not None else len(all_candidates)
+
+    for index, candidate in enumerate(all_candidates):
         if dt.datetime.now(dt.timezone.utc) >= deadline:
-            remaining = len(candidates) - index
+            remaining = len(all_candidates) - index
             counts["timed_out"] += remaining
             logger.warning(
                 "Proposal batch for scan %s hit the deadline with %s candidates unprocessed "
@@ -1212,53 +1273,8 @@ async def _process_automation_candidates(
             candidate.symbol,
             outcome,
             processed,
-            len(candidates),
+            total,
         )
-
-    if include_forming_rechecks:
-        try:
-            async with async_session() as session:
-                holidays = _holiday_dates()
-                expired = await expire_stale_forming_watches(
-                    session, as_of_date=as_of_date, holidays=holidays
-                )
-                if expired:
-                    logger.info("Expired %s stale forming watches as_of=%s", expired, as_of_date)
-                rechecks = await load_forming_rechecks(
-                    session, as_of_date=as_of_date, cap=FORMING_RECHECK_CAP
-                )
-                await session.commit()
-
-            shortlist_ids = {
-                str(c.screening_result_id)
-                for c in candidates
-                if getattr(c, "screening_result_id", None) is not None
-            }
-            for recheck in rechecks:
-                if dt.datetime.now(dt.timezone.utc) >= deadline:
-                    break
-                if recheck.screening_result_id is None:
-                    continue
-                if str(recheck.screening_result_id) in shortlist_ids:
-                    continue
-                try:
-                    outcome = await process_proposal_candidate(
-                        automation_run_id=automation_run_id,
-                        candidate=recheck,
-                        as_of_date=as_of_date,
-                        deadline=deadline,
-                        redis=redis,
-                    )
-                except Exception:
-                    logger.exception("Forming recheck %s failed", recheck.symbol)
-                    outcome = "failed"
-                counts[outcome] = counts.get(outcome, 0) + 1
-                processed += 1
-        except Exception:
-            logger.exception(
-                "Error processing forming watch rechecks for automation run %s",
-                automation_run_id,
-            )
 
     terminal_status = "timed_out" if counts["timed_out"] else "completed"
     error_message = None

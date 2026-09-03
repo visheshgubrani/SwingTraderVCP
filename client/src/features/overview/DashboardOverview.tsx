@@ -79,7 +79,23 @@ export function DashboardOverview({
     null
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-y-auto bg-background p-4 font-mono text-xs">
+    <section className="view h-full">
+      <div className="vhead">
+        <div>
+          <h2>
+            Operations <span className="sub">data ops · sync · rollout · controls</span>
+          </h2>
+          <p className="vmeta">
+            Fyers auth · EOD sync · tick worker · P10 rollout · paper account
+          </p>
+        </div>
+        <div className="vhead-right">
+          {rollout.data && (
+            <span className="note-demo">{rollout.data.stage.replaceAll("_", " ").toUpperCase()}</span>
+          )}
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 pt-1 font-mono text-xs">
       <div className="grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
         <section className="flex flex-col gap-3 rounded-lg border bg-card p-4">
           <div className="flex items-center justify-between">
@@ -386,5 +402,6 @@ export function DashboardOverview({
         </section>
       </div>
     </div>
+    </section>
   )
 }

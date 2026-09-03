@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import {
   AlertTriangleIcon,
-  BrainCircuitIcon,
   Building2Icon,
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -665,24 +664,21 @@ export function FundamentalsView() {
   }, [filter, resultsQuery.data, search, sortMode])
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    <section className="view h-full">
       {/* 1. Header Bar */}
-      <header className="flex flex-col gap-4 border-b bg-card px-6 py-4 xl:flex-row xl:items-center xl:justify-between shadow-2xs">
+      <header className="vhead">
         <div>
-          <div className="flex items-center gap-2.5">
-            <div className="rounded-lg bg-primary/10 p-2 text-primary">
-              <BrainCircuitIcon className="size-5" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold tracking-tight">Fundamental Screener & AI Analyst</h1>
-              <p className="text-xs text-muted-foreground">
-                Python evaluates hard growth metrics; OpenRouter GPT-5.6 provides grounded trade decision second opinions.
-              </p>
-            </div>
+          <div>
+            <h2>
+              Fundamentals <span className="sub">P7 fit · blind AI second opinion · human review</span>
+            </h2>
+            <p className="vmeta">
+              Python evaluates hard growth metrics · OpenRouter provides grounded second opinions
+            </p>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="vhead-right">
           <Field className="w-60">
             <FieldLabel className="sr-only" htmlFor="fundamental-search">
               Search symbol
@@ -748,7 +744,7 @@ export function FundamentalsView() {
       </header>
 
       {/* 2. Unified Processing & Execution Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b bg-muted/30 px-6 py-3">
+      <div className="flex flex-none flex-wrap items-center justify-between gap-4 border-b border-border-soft bg-surface px-5 py-2">
         <div className="flex items-center gap-4">
           <Button
             disabled={
@@ -1048,6 +1044,6 @@ export function FundamentalsView() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </section>
   )
 }

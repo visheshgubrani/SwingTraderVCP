@@ -61,9 +61,9 @@ export function ProposalAttemptDetailPage() {
   const detailChartSrc = `${API_BASE_URL}/automation/attempts/${attempt.id}/charts/detail`
 
   return (
-    <div className="flex h-full w-full flex-col overflow-y-auto bg-background font-mono text-xs text-foreground">
+    <section className="view h-full font-mono text-xs">
       {/* Top Header */}
-      <div className="sticky top-0 z-20 flex shrink-0 items-center justify-between border-b border-border/80 bg-card/95 px-4 py-3 backdrop-blur shadow-sm">
+      <header className="vhead !py-3">
         <div className="flex flex-wrap items-center gap-3">
           <Button
             variant="ghost"
@@ -99,9 +99,10 @@ export function ProposalAttemptDetailPage() {
             </div>
           </div>
         </div>
-      </div>
+      </header>
 
       {/* Main Content Area */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-7xl space-y-6 p-4 sm:p-6">
         {/* Rejection Cause Alert Banner */}
         <div className="rounded-xl border border-ko/40 bg-ko/10 p-4 shadow-sm">
@@ -314,6 +315,7 @@ export function ProposalAttemptDetailPage() {
             <div>Duration: {attempt.completed_at ? `${((new Date(attempt.completed_at).getTime() - new Date(attempt.started_at).getTime()) / 1000).toFixed(1)}s` : "-"}</div>
           </div>
         </div>
+        </div>
       </div>
 
       {/* Lightbox Image Modal */}
@@ -331,6 +333,6 @@ export function ProposalAttemptDetailPage() {
           </div>
         </div>
       )}
-    </div>
+    </section>
   )
 }

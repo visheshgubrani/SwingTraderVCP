@@ -12,7 +12,6 @@ __pycache__/
 .env.prod
 !.env.prod.example
 !server/.env.example
-!swyingify/.env.example
 
 # Build
 dist/
@@ -47,3 +46,6 @@ evidence/
 
 # Local pnpm content store (repo-local installs)
 .pnpm-store/
+
+# SaaS (standalone / private)
+swyingify/

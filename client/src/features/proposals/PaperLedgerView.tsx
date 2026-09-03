@@ -31,7 +31,7 @@ export function PaperLedgerView() {
         <Alert className="max-w-xl">
           <AlertTitle>Paper ledger is stage-gated</AlertTitle>
           <AlertDescription>
-            The paper cash ledger is available after P10 is promoted from Shadow to Paper.
+            The paper cash ledger is available when paper trading is active.
             Live Fyers balances are never fabricated here.
           </AlertDescription>
         </Alert>

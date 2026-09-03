@@ -8,7 +8,6 @@ import {
   LayersIcon,
   PlayIcon,
   SearchIcon,
-  SparklesIcon,
   XCircleIcon,
 } from "lucide-react"
 
@@ -168,8 +167,8 @@ export function ProposalInbox() {
   }, [proposalBatch.data?.automation_run_id, proposalBatch.data?.status, queryClient])
 
   const templateBadges: Record<string, string> = {
-    single: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
-    two_leg: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    single: "bg-green-500/10 text-green-400 border-green-500/20",
+    two_leg: "bg-accent/10 text-accent border-accent/20",
     three_leg_front: "bg-purple-500/10 text-purple-400 border-purple-500/20",
     three_leg_balanced: "bg-amber-500/10 text-amber-400 border-amber-500/20",
   }
@@ -178,33 +177,26 @@ export function ProposalInbox() {
     armed: { label: "ARMED", className: "bg-amber-500/10 text-amber-400 border-amber-500/30" },
     trigger_observed: { label: "TRIGGERED", className: "bg-amber-500/10 text-amber-400 border-amber-500/30" },
     waiting_for_reset: { label: "WAITING RESET", className: "bg-orange-500/10 text-orange-400 border-orange-500/30" },
-    executing: { label: "EXECUTING", className: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
-    filled: { label: "FILLED", className: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" },
-    expired: { label: "ENTRY EXPIRED", className: "bg-rose-500/10 text-rose-300 border-rose-500/30" },
+    executing: { label: "EXECUTING", className: "bg-accent/10 text-accent border-accent/30" },
+    filled: { label: "FILLED", className: "bg-green-500/10 text-green-400 border-green-500/30" },
+    expired: { label: "ENTRY EXPIRED", className: "bg-ko/10 text-ko border-ko/30" },
   }
 
   return (
-    <div className="flex h-full w-full flex-col overflow-y-auto bg-background font-mono text-xs text-foreground min-h-0">
+    <section className="view h-full">
       {/* Top Header & Supervisor Monitor */}
-      <div className="sticky top-0 z-20 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/80 bg-card/95 px-4 py-3 backdrop-blur shadow-sm">
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary">
-            <SparklesIcon className="h-4 w-4" />
-          </div>
-          <div>
-            <h1 className="text-sm font-bold tracking-tight text-foreground">
-              VCP Trade Proposals & Entry Supervisor
-            </h1>
-            <p className="text-[11px] text-muted-foreground">
-              Screening → serial Gemini pattern analysis → human decision → deterministic execution.
-            </p>
-          </div>
+      <div className="vhead">
+        <div>
+          <h2>
+            Trade Proposals <span className="sub">screening → serial Gemini audit → human decision</span>
+          </h2>
+          <p className="vmeta">Proposal pipeline · batch runs on the latest succeeded EOD scan</p>
         </div>
 
         {/* Action Controls & Supervisor Indicator */}
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2">
           <div
-            className="max-w-72 truncate text-[10px] text-muted-foreground hidden lg:block"
+            className="mono hidden max-w-72 truncate text-[10px] text-muted-text lg:block"
             title={batchMessage}
           >
             {batchMessage}
@@ -232,11 +224,11 @@ export function ProposalInbox() {
             {batchRunning ? "Generating" : "Generate batch"}
           </Button>
 
-          <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-1.5 text-[11px]">
+          <div className="flex items-center gap-2 text-[11px]">
             <div className="flex items-center gap-1.5">
-              <span className={`h-2 w-2 rounded-full ${supervisorActive ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
+              <span className={`h-2 w-2 rounded-full ${supervisorActive ? "bg-green-500 animate-pulse" : "bg-ko"}`} />
               <span className="text-muted-foreground">Supervisor:</span>
-              <span className={supervisorActive ? "font-bold text-emerald-400" : "font-bold text-rose-400"}>
+              <span className={supervisorActive ? "font-bold text-green-400" : "font-bold text-ko"}>
                 {supervisorActive ? "ACTIVE" : "INACTIVE"}
               </span>
             </div>
@@ -256,22 +248,22 @@ export function ProposalInbox() {
       </div>
 
       {batchFailed ? (
-        <div className="mx-4 mt-2 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[10px] text-rose-200">
+        <div className="flex-none border-b border-ko-soft bg-ko-soft px-5 py-1.5 font-mono text-[10.5px] text-ko">
           {batchMessage}
         </div>
       ) : null}
 
       {/* Main Content Area */}
-      <div className="p-4 space-y-4">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pt-2">
         {/* Run Selector & Collapsible Panels Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-card/60 p-3 shadow-sm">
+        <div className="flex flex-none flex-wrap items-center justify-between gap-3 py-1">
           <div className="flex items-center gap-2">
-            <HistoryIcon className="h-4 w-4 text-primary" />
-            <span className="font-semibold text-foreground">Generation Run History:</span>
+            <HistoryIcon aria-hidden="true" className="h-3.5 w-3.5 text-muted-text" />
+            <span className="mono text-[10px] font-bold uppercase tracking-[0.1em] text-muted-text">Generation Run History</span>
             <select
               value={selectedRunId}
               onChange={(e) => setSelectedRunId(e.target.value)}
-              className="rounded-md border border-border bg-background px-2.5 py-1 text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+              className="filter-select mono"
             >
               <option value="latest">Latest Batch / Run</option>
               <option value="all">All Historical Runs & Trades</option>
@@ -305,12 +297,12 @@ export function ProposalInbox() {
               className="text-[10px] text-muted-foreground hover:text-foreground gap-1"
             >
               <ChevronDownIcon className={`h-3 w-3 transition-transform ${showMarketContext ? "" : "-rotate-90"}`} />
-              {showMarketContext ? "Hide Market Context" : "P9 Market Context"}
+              {showMarketContext ? "Hide Market Context" : "Market Context"}
             </Button>
           </div>
         </div>
 
-        {/* Optional Collapsible P9 Context & Generation Ledger */}
+        {/* Optional Collapsible Market Context & Generation Ledger */}
         {showMarketContext && <MarketContextPanel />}
 
         {showGenerationLedger && (
@@ -390,7 +382,7 @@ export function ProposalInbox() {
                     </span>
                   )}
                   {tab.key === "system_rejected" && rejectedAttempts.length > 0 && (
-                    <span className="ml-1.5 rounded-full bg-rose-500/20 px-1.5 py-0.5 text-[9px] text-rose-300 font-bold">
+                    <span className="ml-1.5 rounded-full bg-ko/20 px-1.5 py-0.5 text-[9px] text-ko font-bold">
                       {rejectedAttempts.length}
                     </span>
                   )}
@@ -421,7 +413,7 @@ export function ProposalInbox() {
                 </div>
               </div>
             ) : formingError ? (
-              <div className="flex h-48 items-center justify-center rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-400">
+              <div className="flex h-48 items-center justify-center rounded-lg border border-ko/30 bg-ko/5 text-ko">
                 Error loading forming-pattern watches
               </div>
             ) : formingPatterns.length === 0 ? (
@@ -474,7 +466,7 @@ export function ProposalInbox() {
                 </div>
               </div>
             ) : rejectedError ? (
-              <div className="flex h-48 items-center justify-center rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-400">
+              <div className="flex h-48 items-center justify-center rounded-lg border border-ko/30 bg-ko/5 text-ko">
                 Error loading rejected trade candidates
               </div>
             ) : rejectedAttempts.length === 0 ? (
@@ -512,7 +504,7 @@ export function ProposalInbox() {
                         >
                           <td className="py-2.5 px-3 font-bold text-foreground group-hover:text-primary transition-colors">
                             <div className="flex items-center gap-1.5">
-                              <XCircleIcon className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+                              <XCircleIcon className="h-3.5 w-3.5 text-ko shrink-0" />
                               {attempt.symbol}
                             </div>
                           </td>
@@ -528,8 +520,8 @@ export function ProposalInbox() {
                               ? `${structured.python_count ?? "—"} / ${structured.llm_count ?? "—"}`
                               : "—"}
                           </td>
-                          <td className="py-2.5 px-3 text-rose-300/90 max-w-xs truncate" title={attempt.error_message || ""}>
-                            <span className="font-semibold text-rose-400">{attempt.error_type ?? "rejected"}:</span>{" "}
+                          <td className="py-2.5 px-3 text-ko/90 max-w-xs truncate" title={attempt.error_message || ""}>
+                            <span className="font-semibold text-ko">{attempt.error_type ?? "rejected"}:</span>{" "}
                             {attempt.error_message || "Rejected by deterministic risk rules"}
                           </td>
                           <td className="py-2.5 px-3 text-muted-foreground">
@@ -539,7 +531,7 @@ export function ProposalInbox() {
                             <Button
                               variant="outline"
                               size="sm"
-                              className="h-6 px-2.5 text-[10px] font-bold text-rose-400 border-rose-500/30 hover:bg-rose-500/10"
+                              className="h-6 px-2.5 text-[10px] font-bold text-ko border-ko/30 hover:bg-ko/10"
                               onClick={(e) => {
                                 e.stopPropagation()
                                 navigate(`/proposals/attempts/${attempt.id}`)
@@ -565,7 +557,7 @@ export function ProposalInbox() {
                 </div>
               </div>
             ) : proposalsError ? (
-              <div className="flex h-48 items-center justify-center rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-400">
+              <div className="flex h-48 items-center justify-center rounded-lg border border-ko/30 bg-ko/5 text-ko">
                 Error loading trade proposals
               </div>
             ) : proposals.length === 0 ? (
@@ -612,7 +604,7 @@ export function ProposalInbox() {
                             <div className="flex items-center gap-1.5">
                               {p.symbol}
                               {p.live_eligible ? (
-                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title="Live Eligible" />
+                                <span className="h-1.5 w-1.5 rounded-full bg-green-500" title="Live Eligible" />
                               ) : null}
                             </div>
                           </td>
@@ -627,11 +619,11 @@ export function ProposalInbox() {
                           <td className="py-2.5 px-3 font-semibold text-foreground">
                             ₹{Number(p.pivot_price).toFixed(2)}
                           </td>
-                          <td className="py-2.5 px-3 text-rose-400">
+                          <td className="py-2.5 px-3 text-ko">
                             ₹{Number(p.initial_stop).toFixed(2)} (
                             {Number(p.stop_distance_pct).toFixed(2)}%)
                           </td>
-                          <td className="py-2.5 px-3 text-emerald-400 font-semibold">
+                          <td className="py-2.5 px-3 text-green-400 font-semibold">
                             ₹{Number(p.t1).toFixed(2)}
                           </td>
                           <td className="py-2.5 px-3 text-muted-foreground">
@@ -676,6 +668,6 @@ export function ProposalInbox() {
           )}
         </div>
       </div>
-    </div>
+    </section>
   )
 }

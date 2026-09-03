@@ -4,7 +4,6 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
-  Filter,
   FlaskConical,
   LineChart,
   Play,
@@ -14,19 +13,14 @@ import {
 } from "lucide-react"
 import { useNavigate } from "react-router"
 
+import { GradeChip, StatusChip, type StatusTone } from "@/components/terminal/bits"
 import {
   Alert,
   AlertAction,
   AlertDescription,
   AlertTitle,
 } from "@/components/ui/alert"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select"
 import { Spinner } from "@/components/ui/spinner"
 import { useAuthStatus } from "@/features/auth/api"
 import { useTriggerSingleProposal } from "@/features/proposals/api"
@@ -35,7 +29,6 @@ import {
   productionScanRuns,
   type ScanResult,
   type ScanRun,
-  type TechnicalScoreGrade,
   useScanResults,
   useScanRuns,
 } from "@/features/screener/api"
@@ -56,13 +49,6 @@ function formatRun(run: ScanRun) {
     ?.replace("vcp_score_", "")
     .toUpperCase() ?? "LEGACY"
   return `EOD ${date} · ${version} · ${run.status} · ${run.passing_count} eligible setups`
-}
-
-function gradeVariant(grade: TechnicalScoreGrade | null) {
-  if (grade === "A") return "default" as const
-  if (grade === "B") return "secondary" as const
-  if (grade === "D") return "destructive" as const
-  return "outline" as const
 }
 
 export function ScannerPage() {
@@ -136,83 +122,86 @@ export function ScannerPage() {
     setSelectedResultId(result.id)
   }
 
-  const handleOpenChartInWorkstation = (_result: ScanResult) => {
-    // Navigate back to workstation dashboard
-    navigate("/")
+  const handleOpenChartInWorkstation = (result: ScanResult) => {
+    // Open the chart workspace on this exact symbol.
+    navigate(`/?symbol=${encodeURIComponent(result.fyers_symbol)}`)
   }
 
-  return (
-    <div className="flex h-full w-full flex-col bg-background font-mono text-xs">
-      {/* Top Header Banner */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b bg-card px-4 py-2.5">
-        <div className="flex items-center gap-3">
-          {scanWorkflow.message && (
-            <span
-              className={cn(
-                "max-w-96 truncate text-[11px]",
-                scanWorkflow.phase === "failed"
-                  ? "text-destructive"
-                  : "text-muted-foreground",
-              )}
-              title={scanWorkflow.message}
-            >
-              {scanWorkflow.message}
-            </span>
-          )}
-          <div className="flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-            <h1 className="text-sm font-bold tracking-tight text-foreground">
-              VCP TECHNICAL SCREENER
-            </h1>
-          </div>
-          <Badge variant="outline" className="font-mono text-[11px]">
-            {activeRun?.passing_count ?? scanResults.data?.length ?? 0} total setups
-          </Badge>
-          {activeRun && (
-            <Badge
-              variant={activeRun.status === "failed" ? "destructive" : "secondary"}
-              className="uppercase text-[10px]"
-            >
-              {activeRun.status}
-            </Badge>
-          )}
-        </div>
+  const runMetaDate = activeRun
+    ? activeRun.as_of_date
+      ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(
+          new Date(activeRun.as_of_date + "T00:00:00+05:30"),
+        )
+      : ""
+    : ""
+  const runTone: StatusTone = !activeRun
+    ? "off"
+    : activeRun.status === "succeeded"
+      ? "fill"
+      : activeRun.status === "failed"
+        ? "rej"
+        : activeRun.status === "cancelled"
+          ? "off"
+          : "work"
+  const runStateLabel = activeRun
+    ? activeRun.status.toUpperCase()
+    : productionRuns.length > 0
+      ? "IDLE"
+      : "NO RUNS"
 
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] text-muted-foreground">Run History:</span>
-            <NativeSelect
+  return (
+    <section className="view h-full">
+      {/* VCP Scoreboard header */}
+      <div className="vhead">
+        <div>
+          <h2>
+            VCP Scoreboard <span className="sub">top-ranked contraction setups</span>
+          </h2>
+          <p className="vmeta">
+            {activeRun ? (
+              <>
+                EOD <b>{runMetaDate}</b> · {runStateLabel} · <b>{activeRun.passing_count}</b> eligible setups
+              </>
+            ) : scanRuns.data?.length ? (
+              "No completed run yet — run the EOD scanner."
+            ) : (
+              "Connect the backend to load scanner runs."
+            )}
+          </p>
+        </div>
+        <div className="vhead-right">
+          <StatusChip tone={runTone}>{runStateLabel}</StatusChip>
+          <span className="fsel">
+            <select
               aria-label="Scanner run history"
-              className="h-8 min-w-64 text-xs"
-              disabled={!productionRuns.length}
-              onChange={(e) => {
-                setSelectedRunId(e.target.value)
+              disabled={productionRuns.length === 0}
+              onChange={(event) => {
+                setSelectedRunId(event.target.value)
                 setCurrentPage(1)
               }}
+              style={{ minWidth: 300, maxWidth: 340 }}
               value={activeRunId ?? ""}
             >
               {productionRuns.length === 0 && (
-                <NativeSelectOption value="">No scanner runs found</NativeSelectOption>
+                <option value="">No scanner runs found</option>
               )}
               {productionRuns.map((run) => (
-                <NativeSelectOption key={run.id} value={run.id}>
+                <option key={run.id} value={run.id}>
                   {formatRun(run)}
-                </NativeSelectOption>
+                </option>
               ))}
-            </NativeSelect>
-          </div>
-
-          <Button
+            </select>
+          </span>
+          <button
+            className="btn btn-primary"
             disabled={scanWorkflow.isBusy}
             onClick={handleRunScan}
-            size="sm"
             type="button"
-            className="h-8 gap-1.5 font-bold uppercase"
           >
             {scanWorkflow.isBusy ? (
               <Spinner data-icon="inline-start" />
             ) : (
-              <Play className="size-3.5 fill-current" />
+              <Play aria-hidden="true" className="btn-ic fill-current" />
             )}
             {scanWorkflow.phase === "syncing"
               ? "SYNCING EOD"
@@ -223,17 +212,19 @@ export function ScannerPage() {
                   : scanWorkflow.phase === "scanning"
                     ? "SCORING NIFTY 500"
                     : "RUN EOD SCAN"}
-          </Button>
+          </button>
         </div>
       </div>
 
+      {/* Proposal generation feedback strip */}
       {(generateProposal.isError || generateProposal.isSuccess) && (
         <div
-          className={
+          className={cn(
+            "flex-none border-b px-5 py-1.5 font-mono text-[11px]",
             generateProposal.isError
-              ? "border-b border-rose-500/30 bg-rose-500/10 px-4 py-2 text-[11px] text-rose-200"
-              : "border-b border-border/60 bg-muted/20 px-4 py-2 text-[11px] text-muted-foreground"
-          }
+              ? "border-ko-soft bg-ko-soft text-ko"
+              : "border-border-soft text-muted-text",
+          )}
         >
           {generateProposal.isError
             ? generateProposal.error instanceof Error
@@ -243,71 +234,59 @@ export function ScannerPage() {
         </div>
       )}
 
-      {/* Filter and Search Bar */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b bg-card/60 px-4 py-2">
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Search Input */}
-          <div className="relative w-64">
-            <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              className="h-8 pl-8 text-xs placeholder:text-muted-foreground/60"
-              onChange={(e) => {
-                setSearchQuery(e.target.value)
-                setCurrentPage(1)
-              }}
-              placeholder="Search symbol or name…"
-              value={searchQuery}
-            />
-          </div>
-
-          {/* Grade Filter */}
-          <div className="flex items-center gap-1.5 border-l pl-3">
-            <Filter className="size-3 text-muted-foreground" />
-            <span className="text-[11px] text-muted-foreground">Grade:</span>
-            {(["ALL", "A", "B", "C", "D"] as const).map((grade) => (
-              <button
-                key={grade}
-                className={cn(
-                  "h-7 rounded px-2.5 text-[11px] font-medium transition-colors",
-                  gradeFilter === grade
-                    ? "bg-primary text-primary-foreground font-semibold shadow-xs"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                )}
-                onClick={() => {
-                  setGradeFilter(grade)
-                  setCurrentPage(1)
-                }}
-                type="button"
-              >
-                {grade}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Page Size Selector */}
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] text-muted-foreground">Rows per page:</span>
-          <NativeSelect
+      {/* Filter row */}
+      <div className="sfilter">
+        <label className="fsearch">
+          <Search aria-hidden="true" className="ic" />
+          <input
+            onChange={(event) => {
+              setSearchQuery(event.target.value)
+              setCurrentPage(1)
+            }}
+            placeholder="Search symbol or name"
+            type="text"
+            value={searchQuery}
+          />
+        </label>
+        <span className="fsel">
+          <select
+            aria-label="Filter by grade"
+            onChange={(event) => {
+              setGradeFilter(event.target.value)
+              setCurrentPage(1)
+            }}
+            value={gradeFilter}
+          >
+            <option value="ALL">Grade: Any</option>
+            <option value="A">Grade: A</option>
+            <option value="B">Grade: B</option>
+            <option value="C">Grade: C</option>
+            <option value="D">Grade: D</option>
+          </select>
+        </span>
+        <span className="fsel">
+          <select
             aria-label="Rows per page"
-            className="h-7 w-20 text-xs"
-            onChange={(e) => {
-              setPageSize(Number(e.target.value))
+            onChange={(event) => {
+              setPageSize(Number(event.target.value))
               setCurrentPage(1)
             }}
             value={pageSize}
           >
-            <NativeSelectOption value={10}>10</NativeSelectOption>
-            <NativeSelectOption value={25}>25</NativeSelectOption>
-            <NativeSelectOption value={50}>50</NativeSelectOption>
-            <NativeSelectOption value={100}>100</NativeSelectOption>
-            <NativeSelectOption value={0}>All</NativeSelectOption>
-          </NativeSelect>
-        </div>
+            <option value={10}>Rows: 10</option>
+            <option value={25}>Rows: 25</option>
+            <option value={50}>Rows: 50</option>
+            <option value={100}>Rows: 100</option>
+            <option value={0}>Rows: All</option>
+          </select>
+        </span>
+        <span className="sfmeta">
+          <b>{totalItems}</b> of {activeRun?.passing_count ?? totalItems} shown
+        </span>
       </div>
 
-      {/* Main Table Content */}
-      <div className="flex-1 overflow-auto">
+      {/* Table area */}
+      <div className="tscroll">
         {scanResults.isLoading ? (
           <div className="flex h-full items-center justify-center gap-2 text-muted-foreground">
             <Spinner />
@@ -319,7 +298,9 @@ export function ScannerPage() {
               <XCircle aria-hidden="true" />
               <AlertTitle>Could not load scanner results</AlertTitle>
               <AlertDescription>
-                {scanResults.error instanceof Error ? scanResults.error.message : "The scanner results API is unavailable."}
+                {scanResults.error instanceof Error
+                  ? scanResults.error.message
+                  : "The scanner results API is unavailable."}
               </AlertDescription>
               <AlertAction>
                 <Button
@@ -335,7 +316,7 @@ export function ScannerPage() {
           </div>
         ) : activeRun?.status === "failed" ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
-            <XCircle className="text-destructive" />
+            <XCircle aria-hidden="true" className="text-ko" />
             <strong>Scanner run failed</strong>
             <span className="max-w-xl text-muted-foreground">
               {activeRun.error_message ?? "The worker did not provide an error message."}
@@ -350,8 +331,8 @@ export function ScannerPage() {
           </div>
         ) : displayedItems.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-muted-foreground">
-            <Search className="size-8 stroke-1 text-muted-foreground/50" />
-            <strong className="text-foreground">No matching setups found</strong>
+            <Search aria-hidden="true" className="size-8 stroke-1 text-muted-text/50" />
+            <strong>No matching setups found</strong>
             <span>
               {searchQuery || gradeFilter !== "ALL"
                 ? "Try clearing your search or grade filters."
@@ -359,148 +340,141 @@ export function ScannerPage() {
             </span>
           </div>
         ) : (
-          <table className="w-full border-collapse text-left">
-            <thead className="sticky top-0 z-10 border-b bg-card text-[10px] uppercase text-muted-foreground shadow-xs">
+          <table className="tbl tbl-scan">
+            <thead>
               <tr>
-                <th className="w-12 px-3 py-2 text-center">Rank</th>
-                <th className="px-3 py-2 text-right">Score</th>
-                <th className="px-3 py-2 text-center">Grade</th>
-                <th className="px-3 py-2">Symbol</th>
-                <th className="px-3 py-2 text-right">Close</th>
-                <th className="px-3 py-2 text-right">SMA 50</th>
-                <th className="px-3 py-2 text-right">SMA 150</th>
-                <th className="px-3 py-2 text-right">SMA 200</th>
-                <th className="px-3 py-2 text-right">Below 52W High</th>
-                <th className="px-3 py-2 text-center">RS Rating</th>
-                <th className="px-3 py-2 text-center">Setup</th>
-                <th className="px-3 py-2 text-center">Funda</th>
-                <th className="px-3 py-2 text-center">Vision</th>
-                <th className="w-36 px-3 py-2 text-center">Action</th>
+                <th className="l" style={{ minWidth: 48 }}>RANK</th>
+                <th style={{ minWidth: 60 }}>SCORE</th>
+                <th className="l" style={{ minWidth: 52 }}>GRADE</th>
+                <th className="l" style={{ minWidth: 128 }}>SYMBOL</th>
+                <th style={{ minWidth: 80 }}>CLOSE</th>
+                <th style={{ minWidth: 80 }}>SMA 50</th>
+                <th style={{ minWidth: 80 }}>SMA 150</th>
+                <th style={{ minWidth: 80 }}>SMA 200</th>
+                <th style={{ minWidth: 84 }}>BELOW 52W</th>
+                <th style={{ minWidth: 56 }}>RS</th>
+                <th className="l" style={{ minWidth: 74 }}>SETUP</th>
+                <th className="l" style={{ minWidth: 100 }}>FUNDA</th>
+                <th className="l" style={{ minWidth: 96 }}>VISION</th>
+                <th className="l" style={{ minWidth: 240 }}>ACTIONS</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-border/60">
+            <tbody>
               {displayedItems.map((row) => {
                 const selected = selectedResultId === row.id
                 return (
                   <tr
-                    className={cn(
-                      "cursor-pointer transition-colors hover:bg-muted/40",
-                      selected && "bg-accent/80 text-accent-foreground font-medium",
-                    )}
+                    className={cn("cursor-pointer", selected && "bg-accent-soft")}
                     key={row.id}
                     onClick={() => handleSelectStock(row)}
                   >
-                    <td className="px-3 py-2.5 text-center font-bold text-muted-foreground">
-                      #{row.rank}
-                    </td>
-                    <td className="px-3 py-2.5 text-right font-bold text-foreground">
+                    <td className="l rank">#{row.rank}</td>
+                    <td style={{ fontWeight: 700, color: "var(--fg)" }}>
                       {row.technical_score?.toFixed(2) ?? "—"}
                     </td>
-                    <td className="px-3 py-2.5 text-center">
-                      <Badge variant={gradeVariant(row.score_grade)} className="font-bold">
-                        {row.score_grade ?? "Legacy"}
-                      </Badge>
+                    <td className="l">
+                      {row.score_grade ? (
+                        <GradeChip grade={row.score_grade} />
+                      ) : (
+                        <span className="sc-chip off"><i />LEGACY</span>
+                      )}
                     </td>
-                    <td className="px-3 py-2.5">
-                      <strong className="block text-foreground">{row.symbol}</strong>
-                      <span className="block max-w-56 truncate text-[10px] text-muted-foreground">
+                    <td className="l">
+                      <strong style={{ color: "var(--fg)", fontSize: 12 }}>
+                        {row.symbol}
+                      </strong>
+                      <span
+                        className="block"
+                        style={{
+                          color: "var(--muted-text)",
+                          fontSize: 10,
+                          fontFamily: "var(--font-sans)",
+                          maxWidth: 190,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
                         {row.name ?? row.fyers_symbol}
                       </span>
                     </td>
-                    <td className="px-3 py-2.5 text-right font-bold text-foreground">
-                      ₹{row.close_price.toFixed(2)}
-                    </td>
-                    <td className="px-3 py-2.5 text-right text-muted-foreground">
-                      ₹{row.sma_50.toFixed(2)}
-                    </td>
-                    <td className="px-3 py-2.5 text-right text-muted-foreground">
-                      ₹{(row.sma_150 ?? 0).toFixed(2)}
-                    </td>
-                    <td className="px-3 py-2.5 text-right text-muted-foreground">
-                      ₹{row.sma_200.toFixed(2)}
-                    </td>
-                    <td className="px-3 py-2.5 text-right font-medium">
-                      {(row.pct_from_52w_high * 100).toFixed(2)}%
-                    </td>
-                    <td className="px-3 py-2.5 text-center font-bold">
-                      {row.rs_rating}
-                    </td>
-                    <td className="px-3 py-2.5 text-center">
-                      <Badge variant="outline">
+                    <td>₹{row.close_price.toFixed(2)}</td>
+                    <td>₹{row.sma_50.toFixed(2)}</td>
+                    <td>₹{(row.sma_150 ?? 0).toFixed(2)}</td>
+                    <td>₹{row.sma_200.toFixed(2)}</td>
+                    <td>{(row.pct_from_52w_high * 100).toFixed(2)}%</td>
+                    <td style={{ fontWeight: 700 }}>{row.rs_rating}</td>
+                    <td className="l">
+                      <span className={cn("sc-chip", row.technical_score === null ? "off" : "work")}>
+                        <i />
                         {row.technical_score === null ? "Legacy" : "Scored"}
-                      </Badge>
+                      </span>
                     </td>
-                    <td className="px-3 py-2.5 text-center">
-                      <Badge variant={row.fundamental_selected ? "secondary" : "outline"}>
+                    <td className="l">
+                      <span className={cn("sc-chip", row.fundamental_selected ? "fill" : "off")}>
+                        <i />
                         {row.fundamental_selected ? "Top 20" : "Technical only"}
-                      </Badge>
+                      </span>
                     </td>
-                    <td className="px-3 py-2.5 text-center">
+                    <td className="l">
                       <VcpVisionStatusBadge
                         aiVerdict={row.vcp_vision?.ai_verdict ?? null}
                         compact
                         status={row.vcp_vision?.status ?? null}
                       />
                     </td>
-                    <td className="px-3 py-2.5 text-center">
-                      <div className="flex items-center justify-center gap-1">
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
+                    <td className="l">
+                      <span className="act">
+                        <button
+                          aria-label={row.vcp_vision ? "Review VCP vision analysis" : "Analyze VCP with vision"}
+                          className="btn btn-line plan"
+                          onClick={(event) => {
+                            event.stopPropagation()
                             setVisionResult(row)
                           }}
-                          size="sm"
-                          title="Run or review the VCP vision validation"
                           type="button"
-                          variant={row.vcp_vision ? "secondary" : "outline"}
-                          className="h-7 gap-1 px-2 text-[11px]"
                         >
-                          <FlaskConical className="size-3" />
+                          <FlaskConical aria-hidden="true" className="btn-ic" />
                           {row.vcp_vision ? "Review VCP" : "Analyze VCP"}
-                        </Button>
-                        <Button
+                        </button>
+                        <button
+                          aria-label="Generate a proposal for this stock"
+                          className="btn btn-line plan"
                           disabled={
                             !row.fundamental_selected ||
-                            (generateProposal.isPending &&
-                              generateProposal.variables === row.id)
+                            (generateProposal.isPending && generateProposal.variables === row.id)
                           }
-                          onClick={(e) => {
-                            e.stopPropagation()
+                          onClick={(event) => {
+                            event.stopPropagation()
                             generateProposal.mutate(row.id)
                           }}
-                          size="sm"
                           title={
                             row.fundamental_selected
-                              ? "Generate a P10 proposal for this stock only"
-                              : "Only the P10 shortlist (Top 20) can generate a proposal"
+                              ? "Generate a proposal for this stock only"
+                              : "Only the shortlist (Top 20) can generate a proposal"
                           }
                           type="button"
-                          variant="outline"
-                          className="h-7 gap-1 px-2 text-[11px]"
                         >
-                          {generateProposal.isPending &&
-                          generateProposal.variables === row.id ? (
+                          {generateProposal.isPending && generateProposal.variables === row.id ? (
                             <Spinner data-icon="inline-start" />
                           ) : (
-                            <Sparkles className="size-3" />
+                            <Sparkles aria-hidden="true" className="btn-ic" />
                           )}
                           Proposal
-                        </Button>
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
+                        </button>
+                        <button
+                          aria-label="Open chart for this symbol"
+                          className="btn btn-line plan"
+                          onClick={(event) => {
+                            event.stopPropagation()
                             handleOpenChartInWorkstation(row)
                           }}
-                          size="sm"
-                          title="Open in Workstation"
                           type="button"
-                          variant="outline"
-                          className="h-7 gap-1 px-2 text-[11px]"
                         >
-                          <LineChart className="size-3" />
+                          <LineChart aria-hidden="true" className="btn-ic" />
                           Chart
-                        </Button>
-                      </div>
+                        </button>
+                      </span>
                     </td>
                   </tr>
                 )
@@ -510,23 +484,23 @@ export function ScannerPage() {
         )}
       </div>
 
-      {/* Pagination Footer */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t bg-card px-4 py-2 text-xs">
-        <div className="text-muted-foreground">
+      {/* Pagination footer */}
+      <div className="flex flex-none flex-wrap items-center justify-between gap-3 border-t border-border bg-surface px-4 py-1.5 font-mono text-[11px] text-muted-text">
+        <span>
           Showing{" "}
-          <span className="font-semibold text-foreground">
+          <b style={{ color: "var(--fg-2)" }}>
             {totalItems === 0 ? 0 : (pageIndex - 1) * (pageSize || totalItems) + 1}
-          </span>{" "}
+          </b>{" "}
           to{" "}
-          <span className="font-semibold text-foreground">
+          <b style={{ color: "var(--fg-2)" }}>
             {pageSize === 0 ? totalItems : Math.min(pageIndex * pageSize, totalItems)}
-          </span>{" "}
-          of <span className="font-semibold text-foreground">{totalItems}</span> filtered setups
-        </div>
-
+          </b>{" "}
+          of <b style={{ color: "var(--fg-2)" }}>{totalItems}</b> filtered setups
+        </span>
         {pageSize > 0 && totalPages > 1 && (
-          <div className="flex items-center gap-1.5">
+          <span className="flex items-center gap-1.5">
             <Button
+              aria-label="First page"
               disabled={pageIndex <= 1}
               onClick={() => setCurrentPage(1)}
               size="icon-xs"
@@ -536,23 +510,23 @@ export function ScannerPage() {
               <ChevronsLeft className="size-3.5" />
             </Button>
             <Button
+              aria-label="Previous page"
               disabled={pageIndex <= 1}
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
               size="icon-xs"
               type="button"
               variant="outline"
             >
               <ChevronLeft className="size-3.5" />
             </Button>
-
-            <span className="px-2 text-muted-foreground">
-              Page <strong className="text-foreground">{pageIndex}</strong> of{" "}
-              <strong className="text-foreground">{totalPages}</strong>
+            <span className="px-2 text-muted-text">
+              Page <b style={{ color: "var(--fg-2)" }}>{pageIndex}</b> of{" "}
+              <b style={{ color: "var(--fg-2)" }}>{totalPages}</b>
             </span>
-
             <Button
+              aria-label="Next page"
               disabled={pageIndex >= totalPages}
-              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
               size="icon-xs"
               type="button"
               variant="outline"
@@ -560,6 +534,7 @@ export function ScannerPage() {
               <ChevronRight className="size-3.5" />
             </Button>
             <Button
+              aria-label="Last page"
               disabled={pageIndex >= totalPages}
               onClick={() => setCurrentPage(totalPages)}
               size="icon-xs"
@@ -568,7 +543,7 @@ export function ScannerPage() {
             >
               <ChevronsRight className="size-3.5" />
             </Button>
-          </div>
+          </span>
         )}
       </div>
 
@@ -582,6 +557,6 @@ export function ScannerPage() {
           result={visionResult}
         />
       )}
-    </div>
+    </section>
   )
 }

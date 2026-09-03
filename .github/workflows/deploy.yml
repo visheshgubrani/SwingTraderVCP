@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        name: [server, client, swyingify]
+        name: [server, client]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -83,19 +83,6 @@ jobs:
             VITE_WS_URL=${{ env.VITE_WS_URL }}
           cache-from: type=gha,scope=client
           cache-to: type=gha,mode=max,scope=client
-
-      - name: Build and push swyingify
-        if: matrix.name == 'swyingify'
-        uses: docker/build-push-action@v6
-        with:
-          context: ./swyingify
-          file: ./swyingify/Dockerfile
-          platforms: linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=swyingify
-          cache-to: type=gha,mode=max,scope=swyingify
 
   deploy:
     name: Deploy to VPS

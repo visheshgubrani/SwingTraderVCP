@@ -1,17 +1,20 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ConstructionIcon } from "lucide-react"
-import { createBrowserRouter, Outlet, RouterProvider } from "react-router"
+import { createBrowserRouter, Outlet, RouterProvider, useNavigate, useSearchParams } from "react-router"
 
-import { Sidebar } from "@/components/layout/Sidebar"
-import { TopBar } from "@/components/layout/TopBar"
+import { AppRail } from "@/components/layout/AppRail"
+import { StageNav } from "@/components/layout/StageNav"
+import { TerminalTopBar } from "@/components/layout/TerminalTopBar"
+import { WatchlistSidebar } from "@/components/layout/WatchlistSidebar"
+import { ToastProvider } from "@/components/terminal/toast"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AuthBanner } from "@/features/auth/AuthBanner"
 import { AuthProvider, useAppAuth } from "@/features/auth/AuthContext"
 import { FyersCallback } from "@/features/auth/FyersCallback"
 import { LoginPage } from "@/features/auth/LoginPage"
-import { TradingDashboard } from "@/features/dashboard/TradingDashboard"
-import { useTradingAppContext, type ActiveInstrument, type TradingAppContext } from "@/features/dashboard/app-context"
+import { ChartWorkspace } from "@/features/chart/ChartWorkspace"
+import { TradingAppProvider, useTradingAppContext, type TradingAppContext } from "@/features/dashboard/app-context"
 import { FundamentalsView } from "@/features/fundamentals/FundamentalsView"
 import { JournalCaptureManager } from "@/features/journal/JournalCaptureManager"
 import { JournalView } from "@/features/journal/JournalView"
@@ -22,11 +25,12 @@ import { PaperLedgerView } from "@/features/proposals/PaperLedgerView"
 import { ProposalAttemptDetailPage } from "@/features/proposals/ProposalAttemptDetailPage"
 import { ProposalDetailPage } from "@/features/proposals/ProposalDetailPage"
 import { ProposalInbox } from "@/features/proposals/ProposalInbox"
-import { RolloutBanner } from "@/features/proposals/RolloutBanner"
 import { ScannerPage } from "@/features/screener/ScannerPage"
 import { TradebookView } from "@/features/tradebook/TradebookView"
 import { useOrderIntents, usePositions } from "@/features/trade/api"
+import { useWatchlistItems } from "@/features/watchlist/api"
 import { MarketWSProvider, useMarketData } from "@/lib/MarketWSContext"
+import { NIFTY50_INDEX } from "@/lib/marketSymbols"
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: true } },
@@ -51,8 +55,8 @@ function AuthGate({ children }: { children: ReactNode }) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-background text-foreground">
         <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
-          <p className="text-xs text-muted-foreground font-mono">Authenticating workstation session...</p>
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          <p className="font-mono text-xs text-muted-foreground">Authenticating workstation session...</p>
         </div>
       </div>
     )
@@ -68,24 +72,34 @@ function AuthGate({ children }: { children: ReactNode }) {
 function TradingAppProviders() {
   return (
     <AuthGate>
-      <MarketWSProvider>
-        <Outlet />
-        <JournalCaptureManager />
-      </MarketWSProvider>
+      <ToastProvider>
+        <MarketWSProvider>
+          <Outlet />
+          <JournalCaptureManager />
+        </MarketWSProvider>
+      </ToastProvider>
     </AuthGate>
   )
 }
 
+/** Terminal frame: top bar → banners/tape → rail + watchlist + stage. */
 function AppShell() {
-  const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [activeInstrument, setActiveInstrumentState] = useState<ActiveInstrument | null>(null)
+  const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
   const positionsQuery = usePositions(true)
   const orderIntentsQuery = useOrderIntents()
+  const watchlistItemsQuery = useWatchlistItems()
   const { ltpMap, subscribe, unsubscribe, tickWorkerStatus } = useMarketData()
+  const subscribedRef = useRef<Set<string>>(new Set())
 
-  const setActiveInstrument = useCallback((instrument: ActiveInstrument | null) => {
-    setActiveInstrumentState(instrument)
-  }, [])
+  const chartSymbol = searchParams.get("symbol")
+
+  const openChart = useCallback(
+    (fyersSymbol: string) => {
+      navigate(`/?symbol=${encodeURIComponent(fyersSymbol)}`)
+    },
+    [navigate],
+  )
 
   const positions: PositionItem[] = useMemo(() => (positionsQuery.data ?? []).map((position) => {
     const averageEntry = position.average_entry_price ? Number(position.average_entry_price) : null
@@ -130,46 +144,60 @@ function AppShell() {
     created_at: intent.created_at,
   })), [orderIntentsQuery.data])
 
+  // Keep the WS subscription set in sync: open positions ∪ chart symbol ∪
+  // active watchlist ∪ benchmark index.
   useEffect(() => {
-    const symbols = new Set((positionsQuery.data ?? []).map((position) => position.symbol))
-    if (activeInstrument?.symbol) symbols.add(activeInstrument.symbol)
-    const requested = [...symbols]
-    if (!requested.length) return
-    subscribe(requested)
-    return () => unsubscribe(requested)
-  }, [activeInstrument?.symbol, positionsQuery.data, subscribe, unsubscribe])
+    const watchlistSymbols = (watchlistItemsQuery.data ?? []).map((item) => item.fyers_symbol)
+    const symbols = new Set<string>([NIFTY50_INDEX])
+    for (const position of positionsQuery.data ?? []) symbols.add(position.symbol)
+    if (chartSymbol) symbols.add(chartSymbol)
+    for (const symbol of watchlistSymbols) symbols.add(symbol)
+
+    const added = [...symbols].filter((symbol) => !subscribedRef.current.has(symbol))
+    const dropped = [...subscribedRef.current].filter((symbol) => !symbols.has(symbol))
+    if (added.length) subscribe(added)
+    if (dropped.length) unsubscribe(dropped)
+    dropped.forEach((symbol) => subscribedRef.current.delete(symbol))
+    added.forEach((symbol) => subscribedRef.current.add(symbol))
+  }, [chartSymbol, positionsQuery.data, subscribe, unsubscribe, watchlistItemsQuery.data])
 
   const outletContext: TradingAppContext = {
     orderIntents,
     positions,
     rawPositions: positionsQuery.data ?? [],
-    setActiveInstrument,
     tickWorkerStatus,
+    chartSymbol,
+    openChart,
   }
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
-      <TopBar activeLtp={activeInstrument?.ltp} activeSymbol={activeInstrument?.symbol} activeTick={activeInstrument?.tick} setSidebarOpen={setSidebarOpen} sidebarOpen={sidebarOpen} />
-      <RolloutBanner />
-      <AuthBanner />
-      <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <Sidebar open={sidebarOpen} setOpen={setSidebarOpen} />
-        <main className="relative min-w-0 flex-1 overflow-hidden bg-background">
-          <Outlet context={outletContext} />
-        </main>
-      </div>
+    <div className="app">
+      <TradingAppProvider value={outletContext}>
+        <TerminalTopBar />
+        <AuthBanner />
+        <div className="main max-[720px]:flex-col max-[720px]:overflow-y-auto">
+          <AppRail />
+          <WatchlistSidebar />
+          <div className="stage max-[720px]:min-h-[640px]">
+            <div className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+              <Outlet />
+            </div>
+            <StageNav positionsCount={positions.length} orderIntentsCount={orderIntents.length} />
+          </div>
+        </div>
+      </TradingAppProvider>
     </div>
   )
 }
 
 function PositionsRoute() {
-  const { positions } = useTradingAppContext()
-  return <PositionsTable positions={positions} />
+  const { positions, openChart } = useTradingAppContext()
+  return <PositionsTable onOpenSymbol={openChart} positions={positions} />
 }
 
 function OrdersRoute() {
-  const { orderIntents } = useTradingAppContext()
-  return <OrderBookTable orders={orderIntents} />
+  const { orderIntents, openChart } = useTradingAppContext()
+  return <OrderBookTable onOpenSymbol={openChart} orders={orderIntents} />
 }
 
 function OperationsRoute() {
@@ -184,7 +212,7 @@ const router = createBrowserRouter([
     children: [{
       Component: AppShell,
       children: [
-        { index: true, Component: TradingDashboard },
+        { index: true, Component: ChartWorkspace },
         { path: "scanner", Component: ScannerPage },
         { path: "proposals", Component: ProposalInbox },
         { path: "proposals/:proposalId", Component: ProposalDetailPage },

@@ -1,114 +1,145 @@
-import React from 'react';
-import { CheckCircle, Clock, XCircle } from 'lucide-react';
+import { StatusChip, type StatusTone } from "@/components/terminal/bits"
+import { cn } from "@/lib/utils"
 
 export interface OrderIntentItem {
-  id: string;
-  idempotency_key: string;
-  intent_type: string;
-  symbol: string;
-  side: string;
-  quantity: number;
-  order_type: string;
-  limit_price?: number;
-  status: string;
-  execution_mode: 'paper' | 'live';
-  fyers_async_id?: string;
-  fyers_order_id?: string;
-  reason?: string;
-  created_at: string;
+  id: string
+  idempotency_key: string
+  intent_type: string
+  symbol: string
+  side: string
+  quantity: number
+  order_type: string
+  limit_price?: number
+  status: string
+  execution_mode: "paper" | "live"
+  fyers_async_id?: string
+  fyers_order_id?: string
+  reason?: string
+  created_at: string
 }
 
 interface OrderBookTableProps {
-  orders: OrderIntentItem[];
+  orders: OrderIntentItem[]
+  onOpenSymbol?: (symbol: string) => void
 }
 
-export const OrderBookTable: React.FC<OrderBookTableProps> = ({ orders }) => {
+function intentTone(status: string): StatusTone {
+  const s = status.toLowerCase()
+  if (s.includes("filled")) return "fill"
+  if (s.includes("rejected")) return "rej"
+  if (s.includes("cancelled") || s.includes("cancel") || s.includes("expired")) return "off"
+  if (s.includes("partial")) return "wait"
+  return "work"
+}
+
+function intentLabel(status: string): string {
+  const s = status.toLowerCase()
+  if (s.includes("partial")) return "PARTIAL"
+  if (s.includes("acknowledged")) return "ACK"
+  return status.toUpperCase()
+}
+
+function fmtTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleTimeString("en-IN", { hour12: false })
+}
+
+/** Order intents — engine execution intents (entries, adds, exits). */
+export const OrderBookTable: React.FC<OrderBookTableProps> = ({ orders, onOpenSymbol }) => {
+  const active = orders.filter((order) => intentTone(order.status) !== "off").length
+  const mode = orders[0]?.execution_mode ?? "paper"
+  const showMode = orders.some((order) => order.execution_mode !== mode)
+
   return (
-    <div className="flex flex-col h-full bg-[#080a0e] font-mono text-xs select-none">
-      {/* Header Bar */}
-      <div className="h-9 bg-[#0d1117] border-b border-[#252932] flex items-center justify-between px-3 shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="font-bold text-[#e6edf3]">TODAY ORDER BOOK</span>
-          <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#161b22] text-[#3b82f6] border border-[#252932]">
-            {orders.length} INTENTS LOGGED
-          </span>
+    <section className="view">
+      <div className="vhead">
+        <div>
+          <h2>
+            Order Intents <span className="sub">execution-engine intents · entries, adds, exits</span>
+          </h2>
+          <p className="vmeta">
+            <b>{orders.length}</b> intents logged · {active} in flight · {mode.toUpperCase()} account
+          </p>
+        </div>
+        <div className="vhead-right">
+          <span className="note-demo">IDEMPOTENT · ENGINE-ISSUED</span>
         </div>
       </div>
-
-      {/* Table */}
-      <div className="flex-1 overflow-auto">
-        <table className="w-full text-left border-collapse">
-          <thead className="bg-[#0d1117] sticky top-0 border-b border-[#252932] text-[#8b949e] text-[10px] uppercase font-semibold">
+      <div className="tscroll">
+        <table className="tbl">
+          <thead>
             <tr>
-              <th className="py-2 px-3">TIME</th>
-              <th className="py-2 px-3">INTENT TYPE</th>
-              <th className="py-2 px-3">SYMBOL</th>
-              <th className="py-2 px-3">SIDE</th>
-              <th className="py-2 px-3">TYPE</th>
-              <th className="py-2 px-3 text-right">QTY</th>
-              <th className="py-2 px-3 text-right">LIMIT PRICE</th>
-              <th className="py-2 px-3">MODE</th>
-              <th className="py-2 px-3">BROKER ID</th>
-              <th className="py-2 px-3 text-center">STATUS</th>
+              <th className="l" style={{ minWidth: 62 }}>TIME</th>
+              <th className="l" style={{ minWidth: 110 }}>SYMBOL</th>
+              <th className="l" style={{ minWidth: 84 }}>INTENT</th>
+              <th className="l" style={{ minWidth: 52 }}>SIDE</th>
+              <th style={{ minWidth: 60 }}>QTY</th>
+              <th className="l" style={{ minWidth: 76 }}>TYPE</th>
+              <th style={{ minWidth: 92 }}>PRICE</th>
+              <th className="l" style={{ minWidth: 88 }}>STATUS</th>
+              {showMode && <th className="l" style={{ minWidth: 60 }}>MODE</th>}
+              <th style={{ minWidth: 96 }}>BROKER ID</th>
+              <th className="l" style={{ minWidth: 150 }}>REASON</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-[#161b22]">
-            {orders.map((ord) => (
-              <tr key={ord.id} className="hover:bg-[#0d1117] transition-colors">
-                <td className="py-2 px-3 text-[#8b949e] text-[11px]">
-                  {new Date(ord.created_at).toLocaleTimeString('en-IN', { hour12: false })}
-                </td>
-                <td className="py-2 px-3 font-semibold text-[#e6edf3] uppercase">
-                  {ord.intent_type}
-                </td>
-                <td className="py-2 px-3 font-bold text-[#3b82f6]">{ord.symbol}</td>
-                <td className="py-2 px-3 font-semibold uppercase text-[#e6edf3]">
-                  {ord.side}
-                </td>
-                <td className="py-2 px-3 text-[#8b949e] uppercase">{ord.order_type}</td>
-                <td className="py-2 px-3 text-right font-bold text-[#e6edf3]">
-                  {ord.quantity}
-                </td>
-                <td className="py-2 px-3 text-right text-[#e6edf3]">
-                  {ord.limit_price ? `₹${ord.limit_price.toFixed(2)}` : 'MARKET'}
-                </td>
-                <td className="py-2 px-3 text-[#8b949e] text-[11px] uppercase">
-                  {ord.execution_mode}
-                </td>
-                <td className="py-2 px-3 text-[#8b949e] text-[11px]">
-                  {ord.fyers_order_id || ord.fyers_async_id || '-'}
-                </td>
-                <td className="py-2 px-3 text-center">
-                  {ord.status === 'filled' && (
-                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30 text-[10px] font-bold">
-                      <CheckCircle className="w-3 h-3" /> FILLED
-                    </span>
-                  )}
-                  {ord.execution_mode === 'paper' && ord.status === 'created' && (
-                    <span
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/30 text-[10px] font-bold"
-                      title={ord.reason}
-                    >
-                      <Clock className="w-3 h-3" /> PENDING
-                    </span>
-                  )}
-                  {(ord.execution_mode === 'live' || ord.execution_mode === 'paper') &&
-                    (ord.status === 'submitted' || ord.status === 'acknowledged' || ord.status === 'partially_filled') && (
-                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/30 text-[10px] font-bold">
-                      <Clock className="w-3 h-3" /> PENDING
-                    </span>
-                  )}
-                  {(ord.status === 'rejected' || ord.status === 'cancelled') && (
-                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#ef4444]/10 text-[#ef4444] border border-[#ef4444]/30 text-[10px] font-bold">
-                      <XCircle className="w-3 h-3" /> {ord.status.toUpperCase()}
-                    </span>
-                  )}
+          <tbody>
+            {orders.length === 0 && (
+              <tr>
+                <td colSpan={10} className="l" style={{ padding: 26, textAlign: "center" }}>
+                  No order intents yet — approved entries, adds and exits appear here.
                 </td>
               </tr>
-            ))}
+            )}
+            {orders.map((order) => {
+              const buy = order.side === "buy"
+              const tone = intentTone(order.status)
+              return (
+                <tr key={order.id}>
+                  <td className="l">{fmtTime(order.created_at)}</td>
+                  <td className="l">
+                    {onOpenSymbol ? (
+                      <button
+                        className="symlink"
+                        onClick={() => onOpenSymbol(order.symbol)}
+                        title={order.symbol}
+                        type="button"
+                      >
+                        {order.symbol}
+                      </button>
+                    ) : (
+                      order.symbol
+                    )}
+                  </td>
+                  <td className="l" style={{ color: "var(--fg-2)" }}>{order.intent_type}</td>
+                  <td className={cn("l", buy ? "up" : "down")} style={{ fontWeight: 700 }}>
+                    {order.side.toUpperCase()}
+                  </td>
+                  <td>{order.quantity}</td>
+                  <td className="l">{order.order_type.toUpperCase()}</td>
+                  <td>
+                    {order.limit_price != null ? `₹${Number(order.limit_price).toFixed(2)}` : "MARKET"}
+                  </td>
+                  <td className="l">
+                    <StatusChip tone={tone}>{intentLabel(order.status)}</StatusChip>
+                  </td>
+                  {showMode && <td className="l">{order.execution_mode}</td>}
+                  <td title={`${order.fyers_order_id ?? order.fyers_async_id ?? ""}`}>
+                    {order.fyers_order_id ?? order.fyers_async_id ?? "—"}
+                  </td>
+                  <td
+                    className="l"
+                    style={{ color: "var(--fg-2)", fontFamily: "var(--font-sans)", fontSize: 11.5 }}
+                    title={order.reason}
+                  >
+                    {order.reason ?? "—"}
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>
-    </div>
-  );
-};
+    </section>
+  )
+}

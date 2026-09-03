@@ -32,11 +32,11 @@ export function LoginPage() {
     <div className="flex min-h-screen w-screen items-center justify-center bg-background px-4 text-foreground">
       <div className="relative w-full max-w-md overflow-hidden rounded-xl border border-border/80 bg-card/60 p-8 shadow-2xl backdrop-blur-md">
         {/* Subtle top accent line */}
-        <div className="absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r from-emerald-500/0 via-emerald-500/80 to-emerald-500/0" />
+        <div className="absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r from-accent/0 via-accent/80 to-accent/0" />
 
         <div className="mb-6 text-center">
           <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-lg border border-border bg-muted/40 shadow-inner">
-            <ShieldCheck className="h-6 w-6 text-emerald-400" />
+            <ShieldCheck className="h-6 w-6 text-accent" />
           </div>
           <h1 className="text-xl font-bold tracking-tight text-foreground">
             SwingTraderVCP

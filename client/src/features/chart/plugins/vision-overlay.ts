@@ -91,12 +91,12 @@ class VisionOverlayPaneRenderer implements IPrimitivePaneRenderer {
           const textWidth = ctx.measureText(label).width
           const padX = 5 * hr
           const labelY = top + 12 * vr
-          ctx.fillStyle = "#0d1117"
+          ctx.fillStyle = "#101826"
           ctx.fillRect(left + 4 * hr, labelY - 8 * vr, textWidth + padX * 2, 14 * vr)
           ctx.strokeStyle = this.first[index] ? FIRST_BAND_STROKE : BAND_STROKE
           ctx.lineWidth = 1 * avg(hr, vr)
           ctx.strokeRect(left + 4 * hr, labelY - 8 * vr, textWidth + padX * 2, 14 * vr)
-          ctx.fillStyle = "#d1d5db"
+          ctx.fillStyle = "#cbd5e1"
           ctx.textBaseline = "middle"
           ctx.fillText(label, left + 4 * hr + padX, labelY + 1 * vr)
         }

@@ -26,7 +26,7 @@ from app.services.screening_config import TechnicalScreeningConfig
 router = APIRouter(prefix="/historical", tags=["historical"])
 
 class SyncRequest(BaseModel):
-    backfill_years: int = Field(default=1, ge=1, le=2)
+    backfill_years: int = Field(default=2, ge=1, le=5)
     repair_history: bool = False
 
 
@@ -63,6 +63,13 @@ async def trigger_sync(
             status_code=401,
             detail="Fyers authentication is required before EOD data can be synced.",
         )
+
+    # Ensure active universe memberships are ready in DB
+    try:
+        from app.services.instrument_importer import ensure_nifty500_universe_imported
+        await ensure_nifty500_universe_imported(db)
+    except Exception:
+        pass
 
     run_id = str(uuid.uuid4())
     enqueued_at = datetime.datetime.now(datetime.timezone.utc).isoformat()

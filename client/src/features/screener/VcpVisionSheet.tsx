@@ -46,7 +46,7 @@ import { ApiError } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 function verdictClass(verdict: VcpVisionVerdict) {
-  if (verdict === "valid") return "bg-emerald-500/15 text-emerald-400 border-emerald-500/40"
+  if (verdict === "valid") return "bg-green-500/15 text-green-400 border-green-500/40"
   if (verdict === "invalid") return "bg-red-500/15 text-red-400 border-red-500/40"
   return "bg-amber-500/15 text-amber-400 border-amber-500/40"
 }
@@ -468,7 +468,7 @@ export function VcpVisionSheet({
                   />
                 </div>
               ) : (
-                <div className="h-80 rounded border border-border bg-[#131722]">
+                <div className="h-80 rounded border border-border bg-[#070b12]">
                   {frozen ? (
                     <VcpVisionOverlayChart
                       contractions={contractions}
@@ -550,7 +550,7 @@ export function VcpVisionSheet({
               <div className="grid gap-2 sm:grid-cols-2">
                 {analysis.result.supporting_evidence.length > 0 && (
                   <div>
-                    <span className="text-[11px] font-bold uppercase text-emerald-500/80">
+                    <span className="text-[11px] font-bold uppercase text-green-500/80">
                       Supporting evidence
                     </span>
                     <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">

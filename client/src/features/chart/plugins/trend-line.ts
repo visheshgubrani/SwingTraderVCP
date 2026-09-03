@@ -18,7 +18,7 @@ export interface TrendLineOptions extends DrawingStyle {
 }
 
 const defaultOptions: TrendLineOptions = {
-  color: "#2962ff",
+  color: "#38bdf8",
   lineWidth: 2,
   lineStyle: 0,
   showStats: true,
@@ -118,7 +118,7 @@ class TrendLinePaneRenderer implements IPrimitivePaneRenderer {
         const padX = 6 * hr
         const padY = 3 * vr
 
-        ctx.fillStyle = "#1e222d"
+        ctx.fillStyle = "#101826"
         ctx.strokeStyle = this.options.color
         ctx.lineWidth = 1 * hr
         ctx.beginPath()
@@ -132,7 +132,7 @@ class TrendLinePaneRenderer implements IPrimitivePaneRenderer {
         ctx.fill()
         ctx.stroke()
 
-        ctx.fillStyle = "#d1d5db"
+        ctx.fillStyle = "#cbd5e1"
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
         ctx.fillText(text, midX, midY + 1 * vr)
@@ -159,7 +159,7 @@ class TrendLinePaneRenderer implements IPrimitivePaneRenderer {
           ctx.fill()
 
           ctx.lineWidth = 2 * avg(hr, vr)
-          ctx.strokeStyle = isHoveredHandle ? "#3b82f6" : "#2962ff"
+          ctx.strokeStyle = isHoveredHandle ? "#38bdf8" : "#38bdf8"
           ctx.stroke()
           ctx.restore()
         }

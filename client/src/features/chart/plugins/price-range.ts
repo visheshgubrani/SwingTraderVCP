@@ -81,7 +81,7 @@ class PriceRangePaneRenderer implements IPrimitivePaneRenderer {
 
       const diff = this.p2Price - this.p1Price
       const isPositive = diff >= 0
-      const accentColor = isPositive ? "#089981" : "#f23645"
+      const accentColor = isPositive ? "#22c55e" : "#ef4444"
       const fillColor = isPositive
         ? "rgba(8, 153, 129, 0.16)"
         : "rgba(242, 54, 69, 0.16)"
@@ -119,7 +119,7 @@ class PriceRangePaneRenderer implements IPrimitivePaneRenderer {
       const padX = 8 * hr
       const padY = 4 * vr
 
-      ctx.fillStyle = "#131722"
+      ctx.fillStyle = "#070b12"
       ctx.strokeStyle = accentColor
       ctx.lineWidth = 1.5 * hr
       ctx.beginPath()

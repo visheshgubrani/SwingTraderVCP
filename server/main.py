@@ -14,12 +14,14 @@ from app.database import db_dep
 from app.routers.auth import router as auth_router
 from app.routers.automation import router as automation_router
 from app.routers.historical import router as historical_router
+from app.routers.instruments import router as instruments_router
 from app.routers.journal import router as journal_router
 from app.routers.saas_scans import router as saas_scans_router
 from app.routers.screening import router as screening_router
 from app.routers.system_controls import router as system_controls_router
 from app.routers.trading import router as trading_router
 from app.routers.vcp_vision import router as vcp_vision_router
+from app.routers.watchlists import router as watchlists_router
 from app.routers.ws import router as ws_router, manager as ws_manager
 
 # Module-level reference — set during lifespan, usable by background workers.
@@ -80,6 +82,13 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger(__name__).warning("Startup schema check failed: %s", exc)
 
+    # Ensure Nifty 500 universe is seeded if empty
+    try:
+        from app.services.instrument_importer import ensure_nifty500_universe_imported
+        await ensure_nifty500_universe_imported()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Startup universe check/import failed: %s", exc)
+
     yield
 
     # Shutdown
@@ -126,10 +135,12 @@ personal_auth_dep = [Depends(require_authenticated_user)]
 
 app.include_router(automation_router, dependencies=personal_auth_dep)
 app.include_router(historical_router, prefix="/api/v1", dependencies=personal_auth_dep)
+app.include_router(instruments_router, prefix="/api/v1", dependencies=personal_auth_dep)
 app.include_router(screening_router, prefix="/api/v1", dependencies=personal_auth_dep)
 app.include_router(trading_router, prefix="/api/v1", dependencies=personal_auth_dep)
 app.include_router(journal_router, prefix="/api/v1", dependencies=personal_auth_dep)
 app.include_router(system_controls_router, prefix="/api/v1", dependencies=personal_auth_dep)
+app.include_router(watchlists_router, prefix="/api/v1", dependencies=personal_auth_dep)
 app.include_router(vcp_vision_router, prefix="/api/v1", dependencies=personal_auth_dep)
 
 # SaaS public scans (uses signed HMAC internal assertion)

@@ -22,12 +22,12 @@ export interface RiskRewardOptions extends DrawingStyle {
 }
 
 const defaultOptions: RiskRewardOptions = {
-  color: "#2962ff",
+  color: "#38bdf8",
   profitFillColor: "rgba(8, 153, 129, 0.22)",
   lossFillColor: "rgba(242, 54, 69, 0.22)",
-  entryLineColor: "#3b82f6",
-  targetLineColor: "#089981",
-  stopLineColor: "#f23645",
+  entryLineColor: "#38bdf8",
+  targetLineColor: "#22c55e",
+  stopLineColor: "#ef4444",
   lineWidth: 1.5,
   lineStyle: 0,
 }
@@ -159,8 +159,8 @@ class RiskRewardPaneRenderer implements IPrimitivePaneRenderer {
       const padX = 8 * hr
       const padY = 4 * vr
 
-      ctx.fillStyle = "#131722"
-      ctx.strokeStyle = "#2962ff"
+      ctx.fillStyle = "#070b12"
+      ctx.strokeStyle = "#38bdf8"
       ctx.lineWidth = 1.5 * hr
       ctx.beginPath()
       ctx.roundRect(
@@ -182,19 +182,19 @@ class RiskRewardPaneRenderer implements IPrimitivePaneRenderer {
       // 6. Price labels on right edge of box
       ctx.save()
       ctx.font = `${9.5 * vr}px "JetBrains Mono", monospace`
-      ctx.fillStyle = "#089981"
+      ctx.fillStyle = "#22c55e"
       ctx.fillText(
         `Target: ${formatPrice(targetPrice)}`,
         xLeft + width + 6 * hr,
         targetY,
       )
-      ctx.fillStyle = "#f23645"
+      ctx.fillStyle = "#ef4444"
       ctx.fillText(
         `Stop: ${formatPrice(stopPrice)}`,
         xLeft + width + 6 * hr,
         stopY,
       )
-      ctx.fillStyle = "#3b82f6"
+      ctx.fillStyle = "#38bdf8"
       ctx.fillText(
         `Entry: ${formatPrice(entryPrice)}`,
         xLeft + width + 6 * hr,
@@ -206,9 +206,9 @@ class RiskRewardPaneRenderer implements IPrimitivePaneRenderer {
       if (this.selected || this.hovered) {
         const handleCenterX = xLeft + width / 2
         const handles = [
-          { x: handleCenterX, y: entryY, index: 0, color: "#3b82f6" },
-          { x: handleCenterX, y: stopY, index: 1, color: "#f23645" },
-          { x: handleCenterX, y: targetY, index: 2, color: "#089981" },
+          { x: handleCenterX, y: entryY, index: 0, color: "#38bdf8" },
+          { x: handleCenterX, y: stopY, index: 1, color: "#ef4444" },
+          { x: handleCenterX, y: targetY, index: 2, color: "#22c55e" },
         ]
 
         for (const h of handles) {

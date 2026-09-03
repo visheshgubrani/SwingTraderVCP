@@ -1,16 +1,24 @@
 # SwingTraderVCP Client
 
-The web frontend for the SwingTraderVCP trading workstation. Built with React 19, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query, and TradingView `lightweight-charts`.
+The web frontend for the SwingTraderVCP trading workstation, built as the **VCP Trader Core Terminal**
+(design reference: `docs/design/vcp-trader-dashboard.html`). React 19, TypeScript, Vite, Tailwind CSS v4,
+shadcn/ui, TanStack Query, and TradingView `lightweight-charts` v5.
 
 ## Key Features
 
-- **Dashboard**: Overview of current market status, active positions, open orders, and recent screening results.
-- **Screener Workspace**: Stage-2 and VCP scan shortlists with interactive filtering, score breakdown, and VCP vision sheets.
-- **Trading Chart**: High-performance candlestick charting powered by lightweight-charts v5 with EMA overlays, volume bars, and drawing tools.
-- **Proposals Inbox**: Review automated trade proposals generated from shortlisted patterns. Inspect pivot levels, risk limits, chase ceilings, and multi-leg risk templates before issuing explicit approvals or rejections.
-- **Positions & Orders**: Real-time position tracking with software stop-loss levels, profit targets (T1/T2/T3), step trailing indicators, and live order book synchronization.
-- **Paper & Live Trading**: Safe paper mode simulation and double-armed live CNC execution controls.
-- **Trade Journal**: Automated fill logging, entry/exit chart capture, P&L calculations, and structured AI coaching reviews.
+- **Terminal frame**: top bar with global instrument search, scrolling ticker tape, left module rail,
+  persistent **watchlist** sidebar (hearts in the scanner/search add/remove symbols; the backend keeps
+  watchlist state in Postgres and the tick worker quotes active lists), NSE markets footer.
+- **Chart module** (`/`): quote bar with live LTP/OHLC via the market WebSocket, timeframe × SMA
+  20/50/200 × VOL toolbar, lightweight-charts with drawing tools + VCP vision overlays, and a
+  traceable order ticket (manual instruction draft → review → confirm, paper/log only per AGENTS.md).
+- **Scanner** (`/scanner`): VCP scoreboard over real EOD scan runs with filters, run history,
+  VCP-vision analysis and proposal-generation row actions.
+- **Positions / Order Intents / Tradebook** modules bound to `/trading/positions`,
+  `/trading/order-intents` and journal closed trades.
+- **Proposals**: P10 inbox, immutable proposal review/approval (hash-checked), attempt audits,
+  capacity conflicts, forming patterns, P9 market context, paper ledger.
+- **Fundamentals / Journal / Operations**: P7 manual review, journal + AI coach, EOD sync/operations.
 
 ## Local Development
 

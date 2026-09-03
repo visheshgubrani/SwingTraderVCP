@@ -43,32 +43,32 @@ export function VcpVisionOverlayChart({
     const chart = createChart(container, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: "#131722" },
-        textColor: "#787b86",
+        background: { type: ColorType.Solid, color: "#070b12" },
+        textColor: "#8492a6",
         fontSize: 11,
         fontFamily: "'JetBrains Mono', system-ui, monospace",
       },
       grid: {
-        vertLines: { color: "#1e222d" },
-        horzLines: { color: "#1e222d" },
+        vertLines: { color: "#101826" },
+        horzLines: { color: "#101826" },
       },
       rightPriceScale: {
-        borderColor: "#2a2e39",
+        borderColor: "#263246",
         mode: PriceScaleMode.Logarithmic,
         scaleMargins: { top: 0.1, bottom: 0.25 },
       },
-      timeScale: { borderColor: "#2a2e39", timeVisible: false },
+      timeScale: { borderColor: "#263246", timeVisible: false },
       handleScroll: false,
       handleScale: false,
     })
     chartRef.current = chart
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#089981",
-      downColor: "#f23645",
+      upColor: "#22c55e",
+      downColor: "#ef4444",
       borderVisible: false,
-      wickUpColor: "#089981",
-      wickDownColor: "#f23645",
+      wickUpColor: "#22c55e",
+      wickDownColor: "#ef4444",
     })
     seriesRef.current = candleSeries
 
@@ -93,7 +93,7 @@ export function VcpVisionOverlayChart({
       frozen.candles.map((c) => ({
         time: c.date as Time,
         value: c.volume,
-        color: c.close >= c.open ? "#08998155" : "#f2364555",
+        color: c.close >= c.open ? "#22c55e55" : "#ef444455",
       })),
     )
     chart.timeScale().fitContent()

@@ -26,6 +26,7 @@ import {
   useP10Rollout,
   type DecisionPayload,
 } from "./api"
+import { API_BASE_URL } from "@/lib/api"
 
 function asFiniteNumber(value: unknown): number | null {
   if (value == null || value === "") return null
@@ -65,7 +66,7 @@ function LegStatusBadge({ leg }: { leg: { status: string; derived_status?: strin
         : "outline"
   const className =
     displayStatus === "expired"
-      ? "border-rose-500/30 text-rose-300"
+      ? "border-ko/30 text-ko"
       : displayStatus === "cancelled"
         ? "text-muted-foreground"
         : undefined
@@ -170,20 +171,20 @@ export function ProposalDetailPage() {
   }
 
   const templateColors: Record<string, string> = {
-    single: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
-    two_leg: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    single: "bg-green-500/10 text-green-400 border-green-500/20",
+    two_leg: "bg-accent/10 text-accent border-accent/20",
     two_leg_staged: "bg-cyan-500/10 text-cyan-400 border-cyan-500/20",
     three_leg_front: "bg-purple-500/10 text-purple-400 border-purple-500/20",
     three_leg_balanced: "bg-amber-500/10 text-amber-400 border-amber-500/20",
   }
 
-  const contextChartSrc = `/api/v1/automation/proposals/${proposal.id}/charts/context`
-  const detailChartSrc = `/api/v1/automation/proposals/${proposal.id}/charts/detail`
+  const contextChartSrc = `${API_BASE_URL}/automation/proposals/${proposal.id}/charts/context`
+  const detailChartSrc = `${API_BASE_URL}/automation/proposals/${proposal.id}/charts/detail`
 
   return (
-    <div className="flex h-full w-full flex-col overflow-y-auto bg-background font-mono text-xs text-foreground">
+    <section className="view h-full font-mono text-xs">
       {/* Top Header */}
-      <div className="sticky top-0 z-20 flex shrink-0 items-center justify-between border-b border-border/80 bg-card/95 px-4 py-3 backdrop-blur shadow-sm">
+      <header className="vhead !py-3">
         <div className="flex flex-wrap items-center gap-3">
           <Button
             variant="ghost"
@@ -204,7 +205,7 @@ export function ProposalDetailPage() {
               {proposal.entry_template.toUpperCase()}
             </Badge>
             {proposal.live_eligible ? (
-              <Badge variant="default" className="bg-emerald-600/20 text-emerald-400 border-emerald-500/30">
+              <Badge variant="default" className="bg-ok/20 text-green-400 border-green-500/30">
                 LIVE ELIGIBLE
               </Badge>
             ) : (
@@ -230,9 +231,10 @@ export function ProposalDetailPage() {
             {proposal.status.replaceAll("_", " ")}
           </Badge>
         </div>
-      </div>
+      </header>
 
       {/* Main Content Area */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-7xl space-y-6 p-4 sm:p-6">
         {/* Key Numerical Levels Dashboard */}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
@@ -265,12 +267,12 @@ export function ProposalDetailPage() {
           <div className="rounded-lg border border-border/70 bg-card p-3 shadow-sm">
             <div className="flex items-center justify-between text-[10px] uppercase text-muted-foreground">
               <span>Structural SL</span>
-              <ShieldAlertIcon className="h-3 w-3 text-rose-400" />
+              <ShieldAlertIcon className="h-3 w-3 text-ko" />
             </div>
-            <div className="mt-1 text-base font-bold text-rose-400">
+            <div className="mt-1 text-base font-bold text-ko">
               ₹{Number(proposal.initial_stop).toFixed(2)}
             </div>
-            <div className="mt-0.5 text-[10px] text-rose-400/80">
+            <div className="mt-0.5 text-[10px] text-ko/80">
               -{Number(proposal.stop_distance_pct).toFixed(2)}% risk distance
             </div>
           </div>
@@ -278,12 +280,12 @@ export function ProposalDetailPage() {
           <div className="rounded-lg border border-border/70 bg-card p-3 shadow-sm">
             <div className="flex items-center justify-between text-[10px] uppercase text-muted-foreground">
               <span>Target 1</span>
-              <TargetIcon className="h-3 w-3 text-emerald-400" />
+              <TargetIcon className="h-3 w-3 text-green-400" />
             </div>
-            <div className="mt-1 text-base font-bold text-emerald-400">
+            <div className="mt-1 text-base font-bold text-green-400">
               ₹{Number(proposal.t1).toFixed(2)}
             </div>
-            <div className="mt-0.5 text-[10px] text-emerald-400/80 font-semibold">
+            <div className="mt-0.5 text-[10px] text-green-400/80 font-semibold">
               {targetSlots.t1 ? `${targetSlots.t1}${t1R ? ` · ${t1R}` : ""}` : t1R ?? "≥2R floor"}
             </div>
           </div>
@@ -291,7 +293,7 @@ export function ProposalDetailPage() {
           <div className="rounded-lg border border-border/70 bg-card p-3 shadow-sm">
             <div className="flex items-center justify-between text-[10px] uppercase text-muted-foreground">
               <span>Target 2</span>
-              <TargetIcon className="h-3 w-3 text-emerald-400/80" />
+              <TargetIcon className="h-3 w-3 text-green-400/80" />
             </div>
             <div className="mt-1 text-base font-bold text-foreground">
               ₹{Number(proposal.t2).toFixed(2)}
@@ -304,7 +306,7 @@ export function ProposalDetailPage() {
           <div className="rounded-lg border border-border/70 bg-card p-3 shadow-sm">
             <div className="flex items-center justify-between text-[10px] uppercase text-muted-foreground">
               <span>Target 3 (Runner)</span>
-              <TargetIcon className="h-3 w-3 text-emerald-400/60" />
+              <TargetIcon className="h-3 w-3 text-green-400/60" />
             </div>
             <div className="mt-1 text-base font-bold text-foreground">
               ₹{Number(proposal.t3).toFixed(2)}
@@ -340,7 +342,7 @@ export function ProposalDetailPage() {
                 </p>
                 {!approvalsAllowed && (
                   <p className="mt-1 text-[10px] text-amber-400">
-                    Shadow stage active: Review or reject only. Promote rollout stage to Paper before approving live trades.
+                    Review mode active: Review or reject only. Trade approval is currently disabled.
                   </p>
                 )}
               </div>
@@ -351,7 +353,7 @@ export function ProposalDetailPage() {
               <div className="flex items-center gap-4">
                 <div>
                   <span className="text-muted-foreground">Stop Distance: </span>
-                  <strong className={Number(liveStopDistPct) <= 8 && Number(liveStopDistPct) > 0 ? "text-emerald-400" : "text-destructive"}>
+                  <strong className={Number(liveStopDistPct) <= 8 && Number(liveStopDistPct) > 0 ? "text-green-400" : "text-destructive"}>
                     {Number(liveStopDistPct).toFixed(2)}%
                   </strong>
                   {Number(liveStopDistPct) > 8 && (
@@ -365,7 +367,7 @@ export function ProposalDetailPage() {
                 </div>
                 <div>
                   <span className="text-muted-foreground">T1 R:R: </span>
-                  <strong className={Number(liveT1R ?? 0) >= 1 ? "text-emerald-400" : "text-amber-400"}>
+                  <strong className={Number(liveT1R ?? 0) >= 1 ? "text-green-400" : "text-amber-400"}>
                     {liveT1R ? `${liveT1R}R` : "—"}
                   </strong>
                 </div>
@@ -392,7 +394,7 @@ export function ProposalDetailPage() {
                 <Button
                   variant="default"
                   size="sm"
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold"
+                  className="bg-ok hover:bg-green-500 text-white font-bold"
                   disabled={recordDecision.isPending || !approvalsAllowed || Number(liveStopDistPct) > 8 || Number(liveStopDistPct) <= 0}
                   onClick={() => handleDecision("approved")}
                 >
@@ -566,9 +568,9 @@ export function ProposalDetailPage() {
             <div className="flex flex-col rounded-xl border border-border/70 bg-card p-4 shadow-sm">
               <div className="flex items-center justify-between border-b border-border/50 pb-2">
                 <span className="flex items-center gap-2 font-bold text-foreground">
-                  <ShieldAlertIcon className="h-4 w-4 text-rose-400" /> 2. Structural Stop Loss (SL)
+                  <ShieldAlertIcon className="h-4 w-4 text-ko" /> 2. Structural Stop Loss (SL)
                 </span>
-                <Badge variant="outline" className="text-rose-400 border-rose-500/30">
+                <Badge variant="outline" className="text-ko border-ko/30">
                   {Number(proposal.stop_distance_pct).toFixed(2)}% Risk (≤ 8.0% Max)
                 </Badge>
               </div>
@@ -576,7 +578,7 @@ export function ProposalDetailPage() {
               <div className="mt-3 space-y-2 text-[11px]">
                 <div className="flex justify-between py-1 border-b border-border/30">
                   <span className="text-muted-foreground">Decided Stop Loss:</span>
-                  <strong className="text-rose-400">₹{Number(proposal.initial_stop).toFixed(2)}</strong>
+                  <strong className="text-ko">₹{Number(proposal.initial_stop).toFixed(2)}</strong>
                 </div>
 
                 <div className="flex justify-between py-1 border-b border-border/30">
@@ -595,7 +597,7 @@ export function ProposalDetailPage() {
 
                 <div className="flex justify-between py-1 border-b border-border/30">
                   <span className="text-muted-foreground">Monetary Distance from Pivot:</span>
-                  <span className="text-rose-400">₹{(Number(proposal.pivot_price) - Number(proposal.initial_stop)).toFixed(2)} (1R distance)</span>
+                  <span className="text-ko">₹{(Number(proposal.pivot_price) - Number(proposal.initial_stop)).toFixed(2)} (1R distance)</span>
                 </div>
 
                 <div className="mt-3 rounded bg-muted/20 p-2.5 text-[10px] leading-relaxed text-muted-foreground border border-border/40">
@@ -653,9 +655,9 @@ export function ProposalDetailPage() {
             <div className="flex flex-col rounded-xl border border-border/70 bg-card p-4 shadow-sm">
               <div className="flex items-center justify-between border-b border-border/50 pb-2">
                 <span className="flex items-center gap-2 font-bold text-foreground">
-                  <TargetIcon className="h-4 w-4 text-emerald-400" /> 4. Profit Targets & R:R Ratios
+                  <TargetIcon className="h-4 w-4 text-green-400" /> 4. Profit Targets & R:R Ratios
                 </span>
-                <Badge variant="outline" className="text-emerald-400 border-emerald-500/30">
+                <Badge variant="outline" className="text-green-400 border-green-500/30">
                   Frozen at planned entry
                 </Badge>
               </div>
@@ -663,7 +665,7 @@ export function ProposalDetailPage() {
               <div className="mt-3 space-y-2 text-[11px]">
                 <div className="flex justify-between py-1 border-b border-border/30">
                   <span className="text-muted-foreground">Target 1 ({targetSlots.t1 ?? "floor"}):</span>
-                  <strong className="text-emerald-400">
+                  <strong className="text-green-400">
                     ₹{Number(proposal.t1).toFixed(2)} {t1R ? `(${t1R} at planned entry)` : ""}
                   </strong>
                 </div>
@@ -901,6 +903,7 @@ export function ProposalDetailPage() {
             <div>Generated: {new Date(proposal.generated_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST</div>
           </div>
         </div>
+        </div>
       </div>
 
       {/* Lightbox Image Modal */}
@@ -918,6 +921,6 @@ export function ProposalDetailPage() {
           </div>
         </div>
       )}
-    </div>
+    </section>
   )
 }

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import {
   AlertTriangleIcon,
-  BrainCircuitIcon,
   Building2Icon,
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -106,8 +105,8 @@ function fitBadge(result: Pick<ScanResult, "fundamental_assessment" | "fundament
   }
   const grade = result.fundamental_assessment?.grade
   if (grade === "insufficient") return <Badge variant="outline">Insufficient data</Badge>
-  if (grade === "A") return <Badge className="bg-emerald-600 text-white font-semibold">Fit A</Badge>
-  if (grade === "B") return <Badge className="bg-blue-600 text-white font-semibold">Fit B</Badge>
+  if (grade === "A") return <Badge className="bg-ok text-white font-semibold">Fit A</Badge>
+  if (grade === "B") return <Badge className="bg-accent text-white font-semibold">Fit B</Badge>
   if (grade === "C") return <Badge variant="outline">Fit C</Badge>
   if (grade === "D") return <Badge variant="destructive">Fit D</Badge>
   return <Badge variant="outline">Awaiting analysis</Badge>
@@ -115,7 +114,7 @@ function fitBadge(result: Pick<ScanResult, "fundamental_assessment" | "fundament
 
 function aiVerdictBadge(verdict: string | null, status: string) {
   if (verdict === "pass") {
-    return <Badge className="bg-emerald-600 hover:bg-emerald-600 text-white font-bold px-2.5 py-0.5">PASS</Badge>
+    return <Badge className="bg-ok hover:bg-ok text-white font-bold px-2.5 py-0.5">PASS</Badge>
   }
   if (verdict === "fail") {
     return <Badge className="bg-red-600 hover:bg-red-600 text-white font-bold px-2.5 py-0.5">FAIL</Badge>
@@ -341,8 +340,8 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
 
   const verdictMeta = {
     pass: {
-      bg: "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300",
-      badgeClass: "bg-emerald-600 hover:bg-emerald-600 text-white font-black text-sm tracking-wider px-3 py-1",
+      bg: "bg-green-500/10 border-green-500/30 text-ok dark:text-ok",
+      badgeClass: "bg-ok hover:bg-ok text-white font-black text-sm tracking-wider px-3 py-1",
       icon: CheckCircle2Icon,
       label: "AI VERDICT: PASS",
       desc: "Fundamental evidence aligns with SEPA/Minervini growth criteria.",
@@ -376,7 +375,7 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
               <div className="flex items-center gap-2">
                 <Badge className={verdictMeta.badgeClass}>{verdictMeta.label}</Badge>
                 {assessment && (
-                  <Badge className={cn(assessment.grade === "A" ? "bg-emerald-700 text-white" : assessment.grade === "B" ? "bg-blue-700 text-white" : "bg-muted text-muted-foreground")}>
+                  <Badge className={cn(assessment.grade === "A" ? "bg-ok text-white" : assessment.grade === "B" ? "bg-accent text-white" : "bg-muted text-muted-foreground")}>
                     Python Grade {assessment.grade} ({scoreLabel(assessment)})
                   </Badge>
                 )}
@@ -458,14 +457,14 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
       {(detail.ai_opinion.strengths.length > 0 || detail.ai_opinion.risks.length > 0 || detail.ai_opinion.review_focus.length > 0) && (
         <section className="grid gap-4 md:grid-cols-3">
           {detail.ai_opinion.strengths.length > 0 && (
-            <div className="flex flex-col gap-2.5 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
-              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
+            <div className="flex flex-col gap-2.5 rounded-xl border border-green-500/20 bg-green-500/5 p-4">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ok dark:text-green-400">
                 <TrendingUpIcon className="size-4" />
                 <span>Key Strengths ({detail.ai_opinion.strengths.length})</span>
               </div>
               <div className="flex flex-col gap-2">
                 {detail.ai_opinion.strengths.map((note, index) => (
-                  <div className="rounded-lg border border-emerald-500/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`str-${index}`}>
+                  <div className="rounded-lg border border-green-500/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`str-${index}`}>
                     <p className="font-medium">{note.text}</p>
                   </div>
                 ))}
@@ -490,14 +489,14 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
           )}
 
           {detail.ai_opinion.review_focus.length > 0 && (
-            <div className="flex flex-col gap-2.5 rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
-              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-blue-700 dark:text-blue-400">
+            <div className="flex flex-col gap-2.5 rounded-xl border border-accent/20 bg-accent/5 p-4">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-accent dark:text-accent">
                 <TargetIcon className="size-4" />
                 <span>Review Focus ({detail.ai_opinion.review_focus.length})</span>
               </div>
               <div className="flex flex-col gap-2">
                 {detail.ai_opinion.review_focus.map((note, index) => (
-                  <div className="rounded-lg border border-blue-500/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`focus-${index}`}>
+                  <div className="rounded-lg border border-accent/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`focus-${index}`}>
                     <p className="font-medium">{note.text}</p>
                   </div>
                 ))}
@@ -515,7 +514,7 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
               <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Deterministic Python Fit</p>
               <div className="mt-1 flex items-baseline gap-3">
                 <strong className="text-3xl font-black tabular-nums">{scoreLabel(assessment)}</strong>
-                <Badge className={cn(assessment.grade === "A" ? "bg-emerald-600 text-white" : assessment.grade === "B" ? "bg-blue-600 text-white" : "bg-muted text-muted-foreground")}>
+                <Badge className={cn(assessment.grade === "A" ? "bg-ok text-white" : assessment.grade === "B" ? "bg-accent text-white" : "bg-muted text-muted-foreground")}>
                   Grade {assessment.grade}
                 </Badge>
               </div>
@@ -665,24 +664,21 @@ export function FundamentalsView() {
   }, [filter, resultsQuery.data, search, sortMode])
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    <section className="view h-full">
       {/* 1. Header Bar */}
-      <header className="flex flex-col gap-4 border-b bg-card px-6 py-4 xl:flex-row xl:items-center xl:justify-between shadow-2xs">
+      <header className="vhead">
         <div>
-          <div className="flex items-center gap-2.5">
-            <div className="rounded-lg bg-primary/10 p-2 text-primary">
-              <BrainCircuitIcon className="size-5" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold tracking-tight">Fundamental Screener & AI Analyst</h1>
-              <p className="text-xs text-muted-foreground">
-                Python evaluates hard growth metrics; OpenRouter GPT-5.6 provides grounded trade decision second opinions.
-              </p>
-            </div>
+          <div>
+            <h2>
+              Fundamentals <span className="sub">Fit score · blind AI second opinion · human review</span>
+            </h2>
+            <p className="vmeta">
+              Python evaluates hard growth metrics · OpenRouter provides grounded second opinions
+            </p>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="vhead-right">
           <Field className="w-60">
             <FieldLabel className="sr-only" htmlFor="fundamental-search">
               Search symbol
@@ -748,7 +744,7 @@ export function FundamentalsView() {
       </header>
 
       {/* 2. Unified Processing & Execution Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b bg-muted/30 px-6 py-3">
+      <div className="flex flex-none flex-wrap items-center justify-between gap-4 border-b border-border-soft bg-surface px-5 py-2">
         <div className="flex items-center gap-4">
           <Button
             disabled={
@@ -785,7 +781,7 @@ export function FundamentalsView() {
               size="sm"
               variant={controlsQuery.data?.processing.paused ? "outline" : "secondary"}
             >
-              {controlsQuery.data?.processing.paused ? <PlayCircleIcon className="mr-1 size-3.5 text-emerald-600" /> : <PauseCircleIcon className="mr-1 size-3.5 text-amber-600" />}
+              {controlsQuery.data?.processing.paused ? <PlayCircleIcon className="mr-1 size-3.5 text-ok" /> : <PauseCircleIcon className="mr-1 size-3.5 text-amber-600" />}
               {controlsQuery.data?.processing.paused ? "Resume Pipeline" : "Pause Pipeline"}
             </Button>
 
@@ -795,7 +791,7 @@ export function FundamentalsView() {
               size="sm"
               variant={controlsQuery.data?.ai.paused ? "outline" : "ghost"}
             >
-              {controlsQuery.data?.ai.paused ? <PlayCircleIcon className="mr-1 size-3.5 text-emerald-600" /> : <PauseCircleIcon className="mr-1 size-3.5 text-muted-foreground" />}
+              {controlsQuery.data?.ai.paused ? <PlayCircleIcon className="mr-1 size-3.5 text-ok" /> : <PauseCircleIcon className="mr-1 size-3.5 text-muted-foreground" />}
               {controlsQuery.data?.ai.paused ? "Resume AI" : "Pause AI"}
             </Button>
 
@@ -820,7 +816,7 @@ export function FundamentalsView() {
         {progressData && (
           <div className="flex items-center gap-3 rounded-lg border bg-card px-3.5 py-1.5 text-xs shadow-2xs">
             <div className="flex items-center gap-2">
-              <span className="size-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="size-2 rounded-full bg-green-500 animate-pulse" />
               <strong className="font-semibold">{progressData.status}</strong>
               {progressData.current_symbol && (
                 <span className="font-mono text-muted-foreground">· #{progressData.current_rank} {progressData.current_symbol}</span>
@@ -1025,7 +1021,7 @@ export function FundamentalsView() {
             </AlertDialogTitle>
             <AlertDialogDescription>
               {pendingControl === "processing"
-                ? "The active P7 pipeline will pause at the next stock boundary."
+                ? "The active pipeline will pause at the next stock boundary."
                 : "No new OpenRouter calls will be issued; deterministic Upstox scoring will continue."}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -1048,6 +1044,6 @@ export function FundamentalsView() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </section>
   )
 }

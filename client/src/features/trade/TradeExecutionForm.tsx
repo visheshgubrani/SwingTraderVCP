@@ -60,6 +60,8 @@ interface TradeExecutionFormProps {
   symbol: string
   currentLtp: number
   screeningResultId?: string | null
+  /** Pre-select the side when the ticket opens (BUY/SELL quote-bar flow). */
+  initialSide?: TradeSide
   onTradeConfirmed?: (confirmation: TradeConfirmation) => void
   onValuesChange?: (entry: number, sl: number, target: number) => void
 }
@@ -74,10 +76,11 @@ export function TradeExecutionForm({
   symbol,
   currentLtp,
   screeningResultId = null,
+  initialSide = "buy",
   onTradeConfirmed,
   onValuesChange,
 }: TradeExecutionFormProps) {
-  const [side, setSide] = useState<TradeSide>("buy")
+  const [side, setSide] = useState<TradeSide>(initialSide)
   const [orderType, setOrderType] = useState<EntryOrderType>("limit")
   const [quantity, setQuantity] = useState("1")
   const [plannedEntry, setPlannedEntry] = useState(currentLtp.toFixed(2))

@@ -370,6 +370,15 @@
   .fsel select { appearance: none; height: 28px; padding: 0 24px 0 10px; background: var(--field); border: 1px solid var(--border-soft); border-radius: 4px; font-size: 11.5px; font-weight: 600; color: var(--fg-2); outline: 0; cursor: pointer; }
   .fsel select:focus-visible { border-color: var(--accent); box-shadow: var(--focus-ring); }
   .fsel::after { content: "▾"; position: absolute; right: 8px; top: 50%; translate: 0 -50%; font-size: 9px; color: var(--muted-text); pointer-events: none; }
+  /* Standalone design select used where markup cannot nest a .fsel wrapper */
+  .filter-select {
+    appearance: none; height: 28px; padding: 0 26px 0 10px;
+    background: var(--field); border: 1px solid var(--border-soft); border-radius: 4px;
+    font-size: 11.5px; font-weight: 600; color: var(--fg-2); outline: 0; cursor: pointer;
+  }
+  .filter-select:focus-visible { border-color: var(--accent); box-shadow: var(--focus-ring); }
+  .filter-select option { background: var(--surface); color: var(--fg); }
+  .filter-select:disabled { opacity: 0.5; cursor: not-allowed; }
   .sfmeta { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--muted-text); }
   .sfmeta b { color: var(--fg-2); }
   .sf-clear { font-size: 11.5px; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; background: none; }

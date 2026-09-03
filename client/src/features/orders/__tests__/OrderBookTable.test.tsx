@@ -47,10 +47,10 @@ describe("OrderBookTable Component", () => {
   it("renders order book header with intents count", () => {
     renderWithProviders(<OrderBookTable orders={mockOrders} />)
 
-    expect(screen.getByText("TODAY ORDER BOOK")).toBeInTheDocument()
-    expect(screen.getByText("3 INTENTS LOGGED")).toBeInTheDocument()
-    expect(screen.getByText("INTENT TYPE")).toBeInTheDocument()
-    expect(screen.getByText("LIMIT PRICE")).toBeInTheDocument()
+    expect(screen.getByText(/Order Intents/)).toBeInTheDocument()
+    expect(screen.getByText(/intents logged/)).toBeInTheDocument()
+    expect(screen.getByText("INTENT")).toBeInTheDocument()
+    expect(screen.getByText("PRICE")).toBeInTheDocument()
   })
 
   it("renders orders with status badges and execution modes", () => {

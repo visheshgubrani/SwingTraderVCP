@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { useProposalAttempt } from "./api"
+import { API_BASE_URL } from "@/lib/api"
 
 export function ProposalAttemptDetailPage() {
   const { attemptId } = useParams<{ attemptId: string }>()
@@ -56,8 +57,8 @@ export function ProposalAttemptDetailPage() {
   const classification = String(structured.classification ?? structured.verdict ?? "unknown")
   const assessments = Array.isArray(structured.candidate_assessments) ? structured.candidate_assessments : []
 
-  const contextChartSrc = `/api/v1/automation/attempts/${attempt.id}/charts/context`
-  const detailChartSrc = `/api/v1/automation/attempts/${attempt.id}/charts/detail`
+  const contextChartSrc = `${API_BASE_URL}/automation/attempts/${attempt.id}/charts/context`
+  const detailChartSrc = `${API_BASE_URL}/automation/attempts/${attempt.id}/charts/detail`
 
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto bg-background font-mono text-xs text-foreground">
@@ -103,19 +104,19 @@ export function ProposalAttemptDetailPage() {
       {/* Main Content Area */}
       <div className="mx-auto w-full max-w-7xl space-y-6 p-4 sm:p-6">
         {/* Rejection Cause Alert Banner */}
-        <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 shadow-sm">
+        <div className="rounded-xl border border-ko/40 bg-ko/10 p-4 shadow-sm">
           <div className="flex items-start gap-3">
-            <XCircleIcon className="h-5 w-5 shrink-0 text-rose-400 mt-0.5" />
+            <XCircleIcon className="h-5 w-5 shrink-0 text-ko mt-0.5" />
             <div className="space-y-1">
-              <div className="text-sm font-bold text-rose-300">
+              <div className="text-sm font-bold text-ko">
                 System Rejection: {attempt.error_type || "Validation Rule Violation"}
               </div>
-              <p className="text-[11px] leading-relaxed text-rose-200">
+              <p className="text-[11px] leading-relaxed text-fg2">
                 {attempt.error_message || "This candidate setup was deterministically rejected by Python risk and geometry rules."}
               </p>
               {attempt.error_details && Object.keys(attempt.error_details).length > 0 && (
                 <div className="mt-2 rounded bg-black/40 p-2 text-[10px] text-muted-foreground">
-                  <span className="font-semibold text-rose-400">Error Details: </span>
+                  <span className="font-semibold text-ko">Error Details: </span>
                   {JSON.stringify(attempt.error_details)}
                 </div>
               )}

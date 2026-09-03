@@ -57,11 +57,11 @@ describe("PositionsTable Component", () => {
   it("renders active positions count and table headers", () => {
     renderWithProviders(<PositionsTable positions={mockPositions} />)
 
-    expect(screen.getByText("ACTIVE POSITIONS")).toBeInTheDocument()
-    expect(screen.getByText("2 OPEN")).toBeInTheDocument() // pos-1 and pos-2 are non-closed
+    expect(screen.getByText(/Open Positions/)).toBeInTheDocument()
+    expect(screen.getByText("2 lines")).toBeInTheDocument() // pos-1 and pos-2 are non-closed
     expect(screen.getByText("STATE")).toBeInTheDocument()
     expect(screen.getByText("SYMBOL")).toBeInTheDocument()
-    expect(screen.getByText("UNREALIZED P&L")).toBeInTheDocument()
+    expect(screen.getByText("P&L ₹")).toBeInTheDocument()
   })
 
   it("renders position details with state badges and P&L formatting", () => {
@@ -82,8 +82,8 @@ describe("PositionsTable Component", () => {
     expect(screen.getByText("25 / 50")).toBeInTheDocument()
 
     // Check Unrealized P&L
-    expect(screen.getByText("+₹5000.00")).toBeInTheDocument()
-    expect(screen.getByText("+₹2500.00")).toBeInTheDocument()
+    expect(screen.getByText("+₹5,000.00")).toBeInTheDocument()
+    expect(screen.getByText("+₹2,500.00")).toBeInTheDocument()
   })
 
   it("triggers onManualExit callback when Close Market button is clicked", async () => {
@@ -92,7 +92,7 @@ describe("PositionsTable Component", () => {
       <PositionsTable positions={mockPositions} onManualExit={mockExit} />
     )
 
-    const closeButtons = screen.getAllByRole("button", { name: /EXIT/i })
+    const closeButtons = screen.getAllByRole("button", { name: /Close/i })
     expect(closeButtons.length).toBe(2) // pos-1 and pos-2
 
     await user.click(closeButtons[0])

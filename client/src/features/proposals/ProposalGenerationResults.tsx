@@ -30,12 +30,12 @@ function statusBadge(attempt: ProposalGenerationAttempt) {
 
 function outcomeIcon(attempt: ProposalGenerationAttempt) {
   if (attempt.status === "valid" || attempt.error_type === "proposal_already_exists") {
-    return <CheckCircle2Icon aria-hidden="true" className="text-emerald-400" />
+    return <CheckCircle2Icon aria-hidden="true" className="text-green-400" />
   }
   if (attempt.status === "uncertain" || attempt.status === "partial" || attempt.status === "running" || attempt.status === "timed_out") {
     return <Clock3Icon aria-hidden="true" className="text-amber-300" />
   }
-  return <XCircleIcon aria-hidden="true" className="text-rose-400" />
+  return <XCircleIcon aria-hidden="true" className="text-ko" />
 }
 
 function chartUrl(runId: string, attemptId: string, chart: "context" | "detail") {
@@ -94,7 +94,7 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
       </div>
 
       {data?.error_message ? (
-        <div className="border-b border-rose-500/20 bg-rose-500/5 px-3 py-2 text-[10px] text-rose-300">
+        <div className="border-b border-ko/20 bg-ko/5 px-3 py-2 text-[10px] text-ko">
           {data.error_message}
         </div>
       ) : null}
@@ -128,8 +128,8 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
                   </Button>
                 </div>
                 {attempt.error_message ? (
-                  <div className="mt-1 pl-6 text-[10px] leading-relaxed text-rose-300">
-                    <span className="text-rose-400/70">{attempt.error_type ?? "validation"}:</span>{" "}
+                  <div className="mt-1 pl-6 text-[10px] leading-relaxed text-ko">
+                    <span className="text-ko/70">{attempt.error_type ?? "validation"}:</span>{" "}
                     {attempt.error_message}
                   </div>
                 ) : null}

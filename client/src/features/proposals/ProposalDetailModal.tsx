@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { useRecordProposalDecision, useTradeProposal, useP10Rollout, type TradeProposalItem } from "./api"
+import { API_BASE_URL } from "@/lib/api"
 
 interface ProposalDetailModalProps {
   proposal: TradeProposalItem | null
@@ -71,8 +72,8 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
   }
 
   const templateColors: Record<string, string> = {
-    single: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
-    two_leg: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    single: "bg-green-500/10 text-green-400 border-green-500/20",
+    two_leg: "bg-accent/10 text-accent border-accent/20",
     two_leg_staged: "bg-cyan-500/10 text-cyan-400 border-cyan-500/20",
     three_leg_front: "bg-purple-500/10 text-purple-400 border-purple-500/20",
     three_leg_balanced: "bg-amber-500/10 text-amber-400 border-amber-500/20",
@@ -116,12 +117,12 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
             </div>
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
               <div className="text-[10px] text-muted-foreground uppercase">Structural Stop</div>
-              <div className="text-sm font-bold text-rose-400">₹{Number(activeProposal.initial_stop).toFixed(2)}</div>
-              <div className="text-[9px] text-rose-400/80">-{Number(activeProposal.stop_distance_pct).toFixed(2)}% Risk</div>
+              <div className="text-sm font-bold text-ko">₹{Number(activeProposal.initial_stop).toFixed(2)}</div>
+              <div className="text-[9px] text-ko/80">-{Number(activeProposal.stop_distance_pct).toFixed(2)}% Risk</div>
             </div>
             <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
               <div className="text-[10px] text-muted-foreground uppercase">Target 1</div>
-              <div className="text-sm font-bold text-emerald-400">₹{Number(activeProposal.t1).toFixed(2)}</div>
+              <div className="text-sm font-bold text-green-400">₹{Number(activeProposal.t1).toFixed(2)}</div>
               <div className="text-[9px] text-muted-foreground">{targetSlots.t1 ? `${targetSlots.t1}${t1R ? ` · ${t1R}` : ""}` : t1R ?? "≥2R floor"}</div>
             </div>
           </div>
@@ -148,16 +149,16 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
           <div className="grid gap-3">
             <div>
               <div className="mb-1 text-[10px] uppercase text-muted-foreground">Frozen 252-session context</div>
-              <img className="w-full rounded-lg border border-border/60 bg-black" src={`/api/v1/automation/proposals/${activeProposal.id}/charts/context`} alt={`${activeProposal.symbol} frozen context chart`} />
+              <img className="w-full rounded-lg border border-border/60 bg-black" src={`${API_BASE_URL}/automation/proposals/${activeProposal.id}/charts/context`} alt={`${activeProposal.symbol} frozen context chart`} />
             </div>
             <div>
               <div className="mb-1 text-[10px] uppercase text-muted-foreground">126-session LLM chart (no overlays)</div>
-              <img className="w-full rounded-lg border border-border/60 bg-black" src={`/api/v1/automation/proposals/${activeProposal.id}/charts/detail`} alt={`${activeProposal.symbol} 126-session LLM chart`} />
+              <img className="w-full rounded-lg border border-border/60 bg-black" src={`${API_BASE_URL}/automation/proposals/${activeProposal.id}/charts/detail`} alt={`${activeProposal.symbol} 126-session LLM chart`} />
             </div>
           </div>
 
           {mismatchBanner && (
-            <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-[11px] text-rose-200">
+            <div className="rounded-lg border border-ko/40 bg-ko/10 p-3 text-[11px] text-fg2">
               Python found {activeProposal.gemini_evidence?.python_count ?? "?"} candidate(s) and Gemini resolved {activeProposal.gemini_evidence?.llm_count ?? "?"} survivor(s). Template is forced to single.
             </div>
           )}
@@ -237,7 +238,7 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
                 <Button
                   variant="default"
                   size="sm"
-                  className="flex-1 font-mono bg-emerald-600 hover:bg-emerald-500 text-white"
+                  className="flex-1 font-mono bg-ok hover:bg-green-500 text-white"
                   disabled={recordDecision.isPending || !approvalsAllowed}
                   onClick={() => handleDecision("approved")}
                 >
@@ -253,7 +254,7 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
           )}
 
           {isApproved && (
-            <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-400">
+            <div className="flex items-center gap-2 rounded-lg border border-green-500/30 bg-green-500/10 p-3 text-green-400">
               <CheckCircle2Icon className="h-4 w-4 shrink-0" />
               <span>Approved by operator. Entry supervisor is monitoring 5m bars for confirmation.</span>
             </div>
@@ -267,7 +268,7 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
           )}
 
           {isRejected && (
-            <div className="flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-rose-400">
+            <div className="flex items-center gap-2 rounded-lg border border-ko/30 bg-ko/10 p-3 text-ko">
               <XCircleIcon className="h-4 w-4 shrink-0" />
               <span>Proposal was rejected by operator.</span>
             </div>

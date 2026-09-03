@@ -11,9 +11,9 @@ interface DrawingPropertiesBarProps {
 }
 
 const colorPresets = [
-  { name: "Blue", value: "#2962ff" },
-  { name: "Green", value: "#089981" },
-  { name: "Red", value: "#f23645" },
+  { name: "Blue", value: "#38bdf8" },
+  { name: "Green", value: "#22c55e" },
+  { name: "Red", value: "#ef4444" },
   { name: "Amber", value: "#f59e0b" },
   { name: "Purple", value: "#8b5cf6" },
   { name: "White", value: "#ffffff" },
@@ -26,16 +26,16 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
 }) => {
   if (!selectedRecord) return null
 
-  const currentColor = selectedRecord.style?.color ?? "#2962ff"
+  const currentColor = selectedRecord.style?.color ?? "#38bdf8"
   const currentLineWidth = selectedRecord.style?.lineWidth ?? 2
 
   return (
-    <div className="absolute top-12 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-[#2a2e39] bg-[#1e222d] px-3 py-1.5 shadow-xl font-mono text-xs text-[#d1d5db] backdrop-blur-md">
-      <span className="text-[11px] font-semibold text-[#8b949e] uppercase tracking-wider">
+    <div className="absolute top-12 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-[#263246] bg-[#101826] px-3 py-1.5 shadow-xl font-mono text-xs text-[#cbd5e1] backdrop-blur-md">
+      <span className="text-[11px] font-semibold text-[#8492a6] uppercase tracking-wider">
         {selectedRecord.type}
       </span>
 
-      <div className="h-4 w-px bg-[#2a2e39]" />
+      <div className="h-4 w-px bg-[#263246]" />
 
       {/* Color Palette */}
       <div className="flex items-center gap-1.5">
@@ -45,7 +45,7 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
             aria-label={c.name}
             className={cn(
               "h-4 w-4 rounded-full border border-black/40 transition-transform hover:scale-110",
-              currentColor === c.value && "ring-2 ring-white ring-offset-1 ring-offset-[#1e222d]",
+              currentColor === c.value && "ring-2 ring-white ring-offset-1 ring-offset-[#101826]",
             )}
             style={{ backgroundColor: c.value }}
             onClick={() => onUpdateStyle({ color: c.value })}
@@ -55,7 +55,7 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
         ))}
       </div>
 
-      <div className="h-4 w-px bg-[#2a2e39]" />
+      <div className="h-4 w-px bg-[#263246]" />
 
       {/* Line Width */}
       <div className="flex items-center gap-1">
@@ -65,8 +65,8 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
             className={cn(
               "flex h-5 w-5 items-center justify-center rounded border text-[10px] font-bold transition-colors",
               currentLineWidth === w
-                ? "border-[#2962ff] bg-[#2962ff]/20 text-[#2962ff]"
-                : "border-transparent text-[#8b949e] hover:bg-[#2a2e39] hover:text-[#d1d5db]",
+                ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
+                : "border-transparent text-[#8492a6] hover:bg-[#263246] hover:text-[#cbd5e1]",
             )}
             onClick={() => onUpdateStyle({ lineWidth: w })}
             title={`Line Width ${w}px`}
@@ -77,12 +77,12 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
         ))}
       </div>
 
-      <div className="h-4 w-px bg-[#2a2e39]" />
+      <div className="h-4 w-px bg-[#263246]" />
 
       {/* Delete Button */}
       <button
         aria-label="Delete drawing"
-        className="inline-flex h-6 w-6 items-center justify-center rounded text-[#8b949e] transition-colors hover:bg-[#f23645]/20 hover:text-[#f23645]"
+        className="inline-flex h-6 w-6 items-center justify-center rounded text-[#8492a6] transition-colors hover:bg-[#ef4444]/20 hover:text-[#ef4444]"
         onClick={onDelete}
         title="Delete drawing (Delete / Backspace)"
         type="button"

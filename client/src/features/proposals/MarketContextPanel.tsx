@@ -19,9 +19,9 @@ import {
 } from "./api"
 
 function lightClass(light: MarketLight | SectorTier) {
-  if (light === "green" || light === "leading") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+  if (light === "green" || light === "leading") return "border-green-500/30 bg-green-500/10 text-green-400"
   if (light === "yellow" || light === "neutral") return "border-amber-500/30 bg-amber-500/10 text-amber-300"
-  if (light === "red" || light === "lagging") return "border-rose-500/30 bg-rose-500/10 text-rose-400"
+  if (light === "red" || light === "lagging") return "border-ko/30 bg-ko/10 text-ko"
   return "border-border bg-muted/30 text-muted-foreground"
 }
 

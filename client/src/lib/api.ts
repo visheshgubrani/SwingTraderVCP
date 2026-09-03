@@ -98,5 +98,12 @@ export async function apiRequest<T>(
     throw new ApiError(response.status, message)
   }
 
-  return response.json() as Promise<T>
+  // 204 No Content and other empty bodies are valid (e.g. DELETE endpoints).
+  const body = await response.text()
+  if (!body) return undefined as T
+  try {
+    return JSON.parse(body) as T
+  } catch {
+    throw new ApiError(response.status, `Invalid JSON response (${response.status}).`)
+  }
 }

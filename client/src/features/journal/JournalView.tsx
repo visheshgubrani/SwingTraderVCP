@@ -97,8 +97,8 @@ export function JournalView() {
   const summaryMetrics = (summary?.summary ?? {}) as Record<string, unknown>
 
   return (
-    <div className="flex h-full flex-col bg-[#080a0e] font-mono text-xs select-none">
-      <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-[#252932] bg-[#0d1117] p-3 md:grid-cols-4 lg:grid-cols-6">
+    <div className="flex h-full flex-col bg-[#070b12] font-mono text-xs select-none">
+      <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-[#263246] bg-[#101826] p-3 md:grid-cols-4 lg:grid-cols-6">
         <StatCard label="TRADES" value={String(summaryMetrics.trade_count ?? 0)} />
         <StatCard
           label="WIN RATE"
@@ -139,17 +139,17 @@ export function JournalView() {
         />
       </div>
 
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#252932] bg-[#0d1117] px-3 py-2">
-        <FilterIcon className="h-3.5 w-3.5 text-[#8b949e]" aria-hidden="true" />
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#263246] bg-[#101826] px-3 py-2">
+        <FilterIcon className="h-3.5 w-3.5 text-[#8492a6]" aria-hidden="true" />
         <Input
-          className="h-7 w-36 bg-[#080a0e] text-xs"
+          className="h-7 w-36 bg-[#070b12] text-xs"
           placeholder="Symbol filter"
           onChange={(e) =>
             setFilters((prev) => ({ ...prev, symbol: e.target.value || undefined }))
           }
         />
         <select
-          className="h-7 rounded border border-[#252932] bg-[#080a0e] px-2 text-xs"
+          className="h-7 rounded border border-[#263246] bg-[#070b12] px-2 text-xs"
           value={filters.execution_mode ?? ""}
           onChange={(e) =>
             setFilters((prev) => ({
@@ -163,7 +163,7 @@ export function JournalView() {
           <option value="live">Live</option>
         </select>
         <select
-          className="h-7 rounded border border-[#252932] bg-[#080a0e] px-2 text-xs"
+          className="h-7 rounded border border-[#263246] bg-[#070b12] px-2 text-xs"
           value={bucket}
           onChange={(e) => setBucket(e.target.value as PeriodBucket)}
         >
@@ -189,17 +189,17 @@ export function JournalView() {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        <div className="flex w-80 shrink-0 flex-col border-r border-[#252932] bg-[#0d1117]">
-          <div className="flex h-9 items-center gap-1.5 border-b border-[#252932] px-3 font-bold text-[#e6edf3]">
-            <BookOpen className="h-4 w-4 text-[#3b82f6]" aria-hidden="true" />
+        <div className="flex w-80 shrink-0 flex-col border-r border-[#263246] bg-[#101826]">
+          <div className="flex h-9 items-center gap-1.5 border-b border-[#263246] px-3 font-bold text-[#f8fafc]">
+            <BookOpen className="h-4 w-4 text-[#38bdf8]" aria-hidden="true" />
             <span>TRADE JOURNAL</span>
           </div>
-          <div className="flex-1 divide-y divide-[#161b22] overflow-y-auto">
+          <div className="flex-1 divide-y divide-[#1c2331] overflow-y-auto">
             {listLoading && (
-              <div className="p-3 text-[#8b949e]">Loading journal entries…</div>
+              <div className="p-3 text-[#8492a6]">Loading journal entries…</div>
             )}
             {!listLoading && items.length === 0 && (
-              <div className="p-3 text-[#8b949e]">
+              <div className="p-3 text-[#8492a6]">
                 No journal entries yet. Future fills will appear here automatically.
               </div>
             )}
@@ -212,12 +212,12 @@ export function JournalView() {
                   onClick={() => setSelectedId(entry.id)}
                   className={`w-full p-3 text-left transition-colors ${
                     selectedId === entry.id
-                      ? "border-l-2 border-[#3b82f6] bg-[#1c2128]"
-                      : "hover:bg-[#161b22]"
+                      ? "border-l-2 border-[#38bdf8] bg-[#1c2331]"
+                      : "hover:bg-[#1c2331]"
                   }`}
                 >
                   <div className="mb-1 flex items-center justify-between">
-                    <span className="font-bold text-[#3b82f6]">{entry.symbol}</span>
+                    <span className="font-bold text-[#38bdf8]">{entry.symbol}</span>
                     <span
                       className={`font-bold ${
                         (pnl ?? 0) >= 0 ? "text-[#22c55e]" : "text-[#ef4444]"
@@ -226,7 +226,7 @@ export function JournalView() {
                       {formatMoney(pnl)}
                     </span>
                   </div>
-                  <div className="flex justify-between text-[11px] text-[#8b949e]">
+                  <div className="flex justify-between text-[11px] text-[#8492a6]">
                     <span>{entry.setup_tags?.[0] ?? entry.regime ?? entry.execution_mode}</span>
                     <span>
                       {entry.closed_at
@@ -242,19 +242,19 @@ export function JournalView() {
 
         <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
           {!selectedId && (
-            <div className="text-[#8b949e]">Select a trade to review entry context and fills.</div>
+            <div className="text-[#8492a6]">Select a trade to review entry context and fills.</div>
           )}
           {selectedId && detailLoading && (
-            <div className="text-[#8b949e]">Loading trade detail…</div>
+            <div className="text-[#8492a6]">Loading trade detail…</div>
           )}
           {detail && (
             <>
-              <div className="flex items-center justify-between rounded border border-[#252932] bg-[#0d1117] p-3">
+              <div className="flex items-center justify-between rounded border border-[#263246] bg-[#101826] p-3">
                 <div>
-                  <h3 className="text-sm font-bold text-[#3b82f6]">
+                  <h3 className="text-sm font-bold text-[#38bdf8]">
                     {detail.symbol} — {detail.status.toUpperCase()}
                   </h3>
-                  <p className="text-[11px] text-[#8b949e]">
+                  <p className="text-[11px] text-[#8492a6]">
                     Closed {detail.closed_at ? new Date(detail.closed_at).toLocaleString("en-IN") : "—"}
                     {" · "}
                     {formatR(detail.net_r_multiple)} · Regime: {detail.regime ?? "—"}
@@ -268,7 +268,7 @@ export function JournalView() {
                   >
                     {formatMoney(detail.net_pnl)}
                   </div>
-                  <div className="text-[10px] text-[#8b949e]">
+                  <div className="text-[10px] text-[#8492a6]">
                     Gross {formatMoney(detail.gross_pnl)} · Charges{" "}
                     {detail.charge_quality}
                   </div>
@@ -279,7 +279,7 @@ export function JournalView() {
                 <img
                   src={journalChartUrl(detail.id)}
                   alt={`Entry chart for ${detail.symbol}`}
-                  className="max-h-80 rounded border border-[#252932]"
+                  className="max-h-80 rounded border border-[#263246]"
                 />
               )}
 
@@ -301,12 +301,12 @@ export function JournalView() {
               <Panel title="Fill timeline">
                 <div className="space-y-1">
                   {(detail.exit_fills ?? []).map((fill) => (
-                    <div key={String(fill.order_fill_id)} className="text-[11px] text-[#8b949e]">
+                    <div key={String(fill.order_fill_id)} className="text-[11px] text-[#8492a6]">
                       Exit {String(fill.quantity)} @ {String(fill.price)} ({String(fill.exit_reason)})
                     </div>
                   ))}
                   {detail.exit_fills?.length === 0 && (
-                    <div className="text-[11px] text-[#8b949e]">No exit fills recorded yet.</div>
+                    <div className="text-[11px] text-[#8492a6]">No exit fills recorded yet.</div>
                   )}
                 </div>
               </Panel>
@@ -324,7 +324,7 @@ export function JournalView() {
                         className={`h-4 w-4 ${
                           rating != null && star <= rating
                             ? "fill-[#eab308] text-[#eab308]"
-                            : "text-[#8b949e]"
+                            : "text-[#8492a6]"
                         }`}
                       />
                     </button>
@@ -333,31 +333,31 @@ export function JournalView() {
                 <Textarea
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
-                  className="mb-2 min-h-24 bg-[#080a0e] text-xs"
+                  className="mb-2 min-h-24 bg-[#070b12] text-xs"
                   placeholder="Trade notes…"
                 />
                 <Input
                   value={setupTags}
                   onChange={(e) => setSetupTags(e.target.value)}
-                  className="mb-2 h-7 bg-[#080a0e] text-xs"
+                  className="mb-2 h-7 bg-[#070b12] text-xs"
                   placeholder="Setup tags (comma separated)"
                 />
                 <Input
                   value={mistakeTags}
                   onChange={(e) => setMistakeTags(e.target.value)}
-                  className="mb-2 h-7 bg-[#080a0e] text-xs"
+                  className="mb-2 h-7 bg-[#070b12] text-xs"
                   placeholder="Mistake tags"
                 />
                 <Input
                   value={emotionTags}
                   onChange={(e) => setEmotionTags(e.target.value)}
-                  className="mb-2 h-7 bg-[#080a0e] text-xs"
+                  className="mb-2 h-7 bg-[#070b12] text-xs"
                   placeholder="Emotion / discipline tags"
                 />
                 <Textarea
                   value={lessons}
                   onChange={(e) => setLessons(e.target.value)}
-                  className="mb-2 min-h-16 bg-[#080a0e] text-xs"
+                  className="mb-2 min-h-16 bg-[#070b12] text-xs"
                   placeholder="Lessons learned"
                 />
                 <Button
@@ -380,7 +380,7 @@ export function JournalView() {
                 ) : null}
               </div>
               {aiRun.status === "succeeded" && aiRun.result && (
-                <div className="space-y-2 text-[11px] text-[#e6edf3]">
+                <div className="space-y-2 text-[11px] text-[#f8fafc]">
                   <SectionList title="Strengths" items={aiRun.result.strengths as string[]} />
                   <SectionList title="Weaknesses" items={aiRun.result.weaknesses as string[]} />
                   <SectionList
@@ -410,12 +410,12 @@ function StatCard({
   positive?: boolean
 }) {
   return (
-    <div className="rounded border border-[#252932] bg-[#080a0e] p-2">
-      <span className="block text-[10px] text-[#8b949e]">{label}</span>
+    <div className="rounded border border-[#263246] bg-[#070b12] p-2">
+      <span className="block text-[10px] text-[#8492a6]">{label}</span>
       <span
         className={`text-sm font-bold ${
           positive === undefined
-            ? "text-[#e6edf3]"
+            ? "text-[#f8fafc]"
             : positive
               ? "text-[#22c55e]"
               : "text-[#ef4444]"
@@ -435,8 +435,8 @@ function Panel({
   children: React.ReactNode
 }) {
   return (
-    <div className="rounded border border-[#252932] bg-[#0d1117] p-3">
-      <h4 className="mb-2 text-[11px] font-bold uppercase text-[#8b949e]">{title}</h4>
+    <div className="rounded border border-[#263246] bg-[#101826] p-3">
+      <h4 className="mb-2 text-[11px] font-bold uppercase text-[#8492a6]">{title}</h4>
       {children}
     </div>
   )
@@ -445,8 +445,8 @@ function Panel({
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between text-[11px]">
-      <span className="text-[#8b949e]">{label}</span>
-      <span className="text-[#e6edf3]">{value}</span>
+      <span className="text-[#8492a6]">{label}</span>
+      <span className="text-[#f8fafc]">{value}</span>
     </div>
   )
 }
@@ -455,8 +455,8 @@ function SectionList({ title, items }: { title: string; items?: string[] }) {
   if (!items?.length) return null
   return (
     <div>
-      <div className="mb-1 font-bold text-[#3b82f6]">{title}</div>
-      <ul className="list-disc pl-4 text-[#8b949e]">
+      <div className="mb-1 font-bold text-[#38bdf8]">{title}</div>
+      <ul className="list-disc pl-4 text-[#8492a6]">
         {items.map((item) => (
           <li key={item}>{item}</li>
         ))}

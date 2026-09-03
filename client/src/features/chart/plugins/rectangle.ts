@@ -19,7 +19,7 @@ export interface RectangleOptions extends DrawingStyle {
 }
 
 const defaultOptions: RectangleOptions = {
-  color: "#2962ff",
+  color: "#38bdf8",
   fillColor: "rgba(41, 98, 255, 0.16)",
   lineWidth: 1.5,
   lineStyle: 0,
@@ -90,7 +90,7 @@ class RectanglePaneRenderer implements IPrimitivePaneRenderer {
       ctx.lineWidth = this.options.lineWidth * avg(hr, vr)
       ctx.strokeStyle = this.options.color
       if (this.selected) {
-        ctx.strokeStyle = "#3b82f6"
+        ctx.strokeStyle = "#38bdf8"
       }
       ctx.strokeRect(left, top, width, height)
       ctx.restore()
@@ -112,7 +112,7 @@ class RectanglePaneRenderer implements IPrimitivePaneRenderer {
         const padX = 6 * hr
         const padY = 3 * vr
 
-        ctx.fillStyle = "#1e222d"
+        ctx.fillStyle = "#101826"
         ctx.strokeStyle = this.options.color
         ctx.lineWidth = 1 * hr
         ctx.beginPath()
@@ -126,7 +126,7 @@ class RectanglePaneRenderer implements IPrimitivePaneRenderer {
         ctx.fill()
         ctx.stroke()
 
-        ctx.fillStyle = "#d1d5db"
+        ctx.fillStyle = "#cbd5e1"
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
         ctx.fillText(text, midX, badgeY + 1 * vr)
@@ -155,7 +155,7 @@ class RectanglePaneRenderer implements IPrimitivePaneRenderer {
           ctx.fill()
 
           ctx.lineWidth = 2 * avg(hr, vr)
-          ctx.strokeStyle = isHoveredHandle ? "#3b82f6" : "#2962ff"
+          ctx.strokeStyle = isHoveredHandle ? "#38bdf8" : "#38bdf8"
           ctx.stroke()
           ctx.restore()
         }

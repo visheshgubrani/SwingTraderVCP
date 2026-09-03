@@ -79,36 +79,36 @@ export function VcpVisionCaptureChart({
       width: WIDTH,
       height: HEIGHT,
       layout: {
-        background: { type: ColorType.Solid, color: "#080a0e" },
-        textColor: "#8b949e",
+        background: { type: ColorType.Solid, color: "#070b12" },
+        textColor: "#8492a6",
       },
       grid: {
-        vertLines: { color: "#161b22" },
-        horzLines: { color: "#161b22" },
+        vertLines: { color: "#1c2331" },
+        horzLines: { color: "#1c2331" },
       },
       rightPriceScale: {
-        borderColor: "#252932",
+        borderColor: "#263246",
         mode: PriceScaleMode.Logarithmic,
       },
-      timeScale: { borderColor: "#252932" },
+      timeScale: { borderColor: "#263246" },
     })
 
     const detailChart = createChart(detailContainer, {
       width: WIDTH,
       height: HEIGHT,
       layout: {
-        background: { type: ColorType.Solid, color: "#080a0e" },
-        textColor: "#8b949e",
+        background: { type: ColorType.Solid, color: "#070b12" },
+        textColor: "#8492a6",
       },
       grid: {
-        vertLines: { color: "#161b22" },
-        horzLines: { color: "#161b22" },
+        vertLines: { color: "#1c2331" },
+        horzLines: { color: "#1c2331" },
       },
       rightPriceScale: {
-        borderColor: "#252932",
+        borderColor: "#263246",
         mode: PriceScaleMode.Logarithmic,
       },
-      timeScale: { borderColor: "#252932" },
+      timeScale: { borderColor: "#263246" },
     })
 
     const buildSeries = (chart: IChartApi) => {
@@ -120,7 +120,7 @@ export function VcpVisionCaptureChart({
         wickDownColor: "#ef4444",
       })
       const volumeSeries = chart.addSeries(HistogramSeries, {
-        color: "#3b82f6",
+        color: "#38bdf8",
         priceFormat: { type: "volume" },
         priceScaleId: "",
       })

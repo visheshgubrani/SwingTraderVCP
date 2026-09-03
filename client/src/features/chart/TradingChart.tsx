@@ -52,6 +52,8 @@ interface TradingChartProps {
   stopLossPrice?: number
   targetPrice?: number
   liveLtp?: number
+  volumeVisible?: boolean
+  smaOverlays?: { period: number; color: string }[]
   visionOverlay?: {
     contractions: VisionContractionBand[]
     pivotPrice?: number | null
@@ -98,12 +100,15 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   stopLossPrice,
   targetPrice,
   liveLtp,
+  volumeVisible = true,
+  smaOverlays = [],
   visionOverlay,
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick" | "Line" | "Area"> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null)
+  const smaSeriesRef = useRef<Map<number, ISeriesApi<"Line">>>(new Map())
   const futureSeriesRef = useRef<ISeriesApi<"Line"> | null>(null)
   const drawingControllerRef = useRef<ChartDrawingController | null>(null)
   const symbolRef = useRef(symbol)
@@ -141,37 +146,37 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     const chart = createChart(chartContainerRef.current, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: "#131722" },
-        textColor: "#787b86",
+        background: { type: ColorType.Solid, color: "#070b12" },
+        textColor: "#8492a6",
         fontSize: 11,
-        fontFamily: "'JetBrains Mono', system-ui, monospace",
+        fontFamily: "'Roboto Mono', system-ui, monospace",
       },
       grid: {
-        vertLines: { color: "#1e222d" },
-        horzLines: { color: "#1e222d" },
+        vertLines: { color: "#101826" },
+        horzLines: { color: "#101826" },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
         vertLine: {
-          color: "#2962ff",
+          color: "#38bdf8",
           width: 1,
           style: 3,
-          labelBackgroundColor: "#2a2e39",
+          labelBackgroundColor: "#263246",
         },
         horzLine: {
-          color: "#2962ff",
+          color: "#38bdf8",
           width: 1,
           style: 3,
-          labelBackgroundColor: "#2a2e39",
+          labelBackgroundColor: "#263246",
         },
       },
       rightPriceScale: {
-        borderColor: "#2a2e39",
+        borderColor: "#263246",
         scaleMargins: { top: 0.1, bottom: 0.2 },
         autoScale: true,
       },
       timeScale: {
-        borderColor: "#2a2e39",
+        borderColor: "#263246",
         timeVisible: false,
         secondsVisible: false,
         shiftVisibleRangeOnNewBar: false,
@@ -198,20 +203,13 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
     // Add initial Candlestick series
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#089981",
-      downColor: "#f23645",
+      upColor: "#22c55e",
+      downColor: "#ef4444",
       borderVisible: false,
-      wickUpColor: "#089981",
-      wickDownColor: "#f23645",
+      wickUpColor: "#22c55e",
+      wickDownColor: "#ef4444",
     })
     candleSeriesRef.current = candleSeries
-
-    // Add Volume Series in separate pane margin
-    const volumeSeries = chart.addSeries(HistogramSeries, {
-      priceFormat: { type: "volume" },
-      priceScaleId: "volume",
-    })
-    volumeSeriesRef.current = volumeSeries
 
     // An invisible whitespace series makes future weekday coordinates real
     // chart coordinates, so every drawing tool can extend past the last bar.
@@ -223,10 +221,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       crosshairMarkerVisible: false,
     })
     futureSeriesRef.current = futureSeries
-
-    chart.priceScale("volume").applyOptions({
-      scaleMargins: { top: 0.8, bottom: 0 },
-    })
 
     // Bind Drawing Controller
     const controller = new ChartDrawingController()
@@ -255,9 +249,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         | { value: number }
         | undefined
 
-      const volPoint = param.seriesData.get(volumeSeries) as
-        | { value: number }
-        | undefined
+      const volPoint = volumeSeriesRef.current
+        ? (param.seriesData.get(volumeSeriesRef.current) as { value: number } | undefined)
+        : undefined
 
       if (dataPoint && "open" in dataPoint) {
         const change = dataPoint.close - dataPoint.open
@@ -304,7 +298,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
   // Data update effect
   useEffect(() => {
-    if (!candleSeriesRef.current || !volumeSeriesRef.current || !chartRef.current) return
+    if (!candleSeriesRef.current || !chartRef.current) return
     dataRef.current = data
     const chart = chartRef.current
     const symbolChanged = renderedSymbolRef.current !== symbol
@@ -312,15 +306,18 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
     candleSeriesRef.current.setData(seriesData(data, chartTypeRef.current))
 
-    const volumes = data.map((d) => ({
-      time: d.time as Time,
-      value: d.volume || 0,
-      color:
-        d.close >= d.open
-          ? "rgba(8, 153, 129, 0.35)"
-          : "rgba(242, 54, 69, 0.35)",
-    }))
-    volumeSeriesRef.current.setData(volumes)
+    if (volumeSeriesRef.current) {
+      volumeSeriesRef.current.setData(
+        data.map((d) => ({
+          time: d.time as Time,
+          value: d.volume || 0,
+          color:
+            d.close >= d.open
+              ? "rgba(34, 197, 94, 0.45)"
+              : "rgba(239, 68, 68, 0.45)",
+        })),
+      )
+    }
     futureSeriesRef.current?.setData(
       data.length > 0
         ? nextWeekdays(data[data.length - 1]!.time, FUTURE_WHITESPACE_SLOTS).map((time) => ({ time }))
@@ -341,6 +338,74 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     renderedSymbolRef.current = symbol
   }, [data, symbol])
 
+  // Volume visibility — the histogram pane is added/removed on demand without
+  // touching candle data or user drawings.
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    if (volumeVisible && !volumeSeriesRef.current) {
+      const series = chart.addSeries(HistogramSeries, {
+        priceFormat: { type: "volume" },
+        priceScaleId: "volume",
+      })
+      volumeSeriesRef.current = series
+      series.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } })
+      const bars = dataRef.current
+      if (bars.length > 0) {
+        series.setData(
+          bars.map((d) => ({
+            time: d.time as Time,
+            value: d.volume || 0,
+            color: d.close >= d.open ? "rgba(34, 197, 94, 0.45)" : "rgba(239, 68, 68, 0.45)",
+          })),
+        )
+      }
+    } else if (!volumeVisible && volumeSeriesRef.current) {
+      chart.removeSeries(volumeSeriesRef.current)
+      volumeSeriesRef.current = null
+    }
+  }, [volumeVisible])
+
+  // SMA overlays (design toolbar): one thin line per enabled window.
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    const seriesMap = smaSeriesRef.current
+    const wanted = new Set(smaOverlays.map((overlay) => overlay.period))
+    for (const [period, series] of [...seriesMap]) {
+      if (!wanted.has(period)) {
+        chart.removeSeries(series)
+        seriesMap.delete(period)
+      }
+    }
+    for (const overlay of smaOverlays) {
+      let series = seriesMap.get(overlay.period)
+      if (!series) {
+        series = chart.addSeries(LineSeries, {
+          color: overlay.color,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        })
+        seriesMap.set(overlay.period, series)
+      } else {
+        series.applyOptions({ color: overlay.color })
+      }
+      const period = overlay.period
+      const points: { time: Time; value: number }[] = []
+      let sum = 0
+      for (let index = 0; index < data.length; index++) {
+        sum += data[index]!.close
+        if (index >= period) sum -= data[index - period]!.close
+        if (index >= period - 1) {
+          points.push({ time: data[index]!.time as Time, value: sum / period })
+        }
+      }
+      series.setData(points)
+    }
+  }, [data, smaOverlays])
+
   // Chart type switch effect
   useEffect(() => {
     if (!chartRef.current || !candleSeriesRef.current) return
@@ -351,23 +416,23 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     let newSeries: ISeriesApi<"Candlestick" | "Line" | "Area">
     if (chartType === "line") {
       newSeries = chart.addSeries(LineSeries, {
-        color: "#2962ff",
+        color: "#38bdf8",
         lineWidth: 2,
       })
     } else if (chartType === "area") {
       newSeries = chart.addSeries(AreaSeries, {
         topColor: "rgba(41, 98, 255, 0.4)",
         bottomColor: "rgba(41, 98, 255, 0.04)",
-        lineColor: "#2962ff",
+        lineColor: "#38bdf8",
         lineWidth: 2,
       })
     } else {
       newSeries = chart.addSeries(CandlestickSeries, {
-        upColor: "#089981",
-        downColor: "#f23645",
+        upColor: "#22c55e",
+        downColor: "#ef4444",
         borderVisible: false,
-        wickUpColor: "#089981",
-        wickDownColor: "#f23645",
+        wickUpColor: "#22c55e",
+        wickDownColor: "#ef4444",
       })
     }
 
@@ -413,8 +478,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     }
 
     syncLine("ltp", liveLtp, { color: "#f59e0b", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "LTP" })
-    syncLine("stop", stopLossPrice, { color: "#f23645", lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: "STOP LOSS" })
-    syncLine("target", targetPrice, { color: "#089981", lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: "TARGET" })
+    syncLine("stop", stopLossPrice, { color: "#ef4444", lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: "STOP LOSS" })
+    syncLine("target", targetPrice, { color: "#22c55e", lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: "TARGET" })
   }, [chartType, stopLossPrice, targetPrice, liveLtp])
 
   // Read-only AI VCP overlay (contraction bands + pivot), visually separate
@@ -531,18 +596,18 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     : null)
 
   return (
-    <div className="relative flex h-full flex-col bg-[#131722] select-none font-mono">
+    <div className="relative flex h-full flex-col bg-[#070b12] select-none font-mono">
       {/* Top Header Bar */}
-      <div className="z-10 flex h-10 shrink-0 items-center justify-between border-b border-[#2a2e39] bg-[#1e222d] px-3 text-xs">
+      <div className="z-10 flex h-10 shrink-0 items-center justify-between border-b border-[#263246] bg-[#101826] px-3 text-xs">
         <div className="flex items-center gap-3">
-          <span className="font-bold text-[#2962ff] tracking-wide">
+          <span className="font-bold text-[#38bdf8] tracking-wide">
             {symbol}
           </span>
-          <span className="rounded border border-[#2a2e39] bg-[#131722] px-2 py-0.5 text-[11px] font-bold text-[#2962ff]">
-            1D
+          <span className="rounded border border-[#263246] bg-[#070b12] px-2 py-0.5 text-[11px] font-bold text-[#38bdf8]">
+            DAILY
           </span>
 
-          <div className="h-4 w-px bg-[#2a2e39]" />
+          <div className="h-4 w-px bg-[#263246]" />
 
           {/* Chart Type Toggle Buttons */}
           <div className="flex items-center gap-1">
@@ -551,8 +616,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               className={cn(
                 "inline-flex h-6 w-6 items-center justify-center rounded border transition-colors",
                 chartType === "candlestick"
-                  ? "border-[#2962ff] bg-[#2962ff]/20 text-[#2962ff]"
-                  : "border-transparent text-[#787b86] hover:border-[#2a2e39] hover:bg-[#131722] hover:text-[#d1d5db]",
+                  ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
+                  : "border-transparent text-[#8492a6] hover:border-[#263246] hover:bg-[#070b12] hover:text-[#cbd5e1]",
               )}
               onClick={() => setChartType("candlestick")}
               title="Candlestick Chart"
@@ -565,8 +630,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               className={cn(
                 "inline-flex h-6 w-6 items-center justify-center rounded border transition-colors",
                 chartType === "line"
-                  ? "border-[#2962ff] bg-[#2962ff]/20 text-[#2962ff]"
-                  : "border-transparent text-[#787b86] hover:border-[#2a2e39] hover:bg-[#131722] hover:text-[#d1d5db]",
+                  ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
+                  : "border-transparent text-[#8492a6] hover:border-[#263246] hover:bg-[#070b12] hover:text-[#cbd5e1]",
               )}
               onClick={() => setChartType("line")}
               title="Line Chart"
@@ -576,7 +641,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             </button>
           </div>
 
-          <div className="h-4 w-px bg-[#2a2e39]" />
+          <div className="h-4 w-px bg-[#263246]" />
 
           {/* Drawing Tools Palette */}
           <div className="flex items-center gap-1">
@@ -588,8 +653,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 className={cn(
                   "inline-flex h-6.5 w-6.5 items-center justify-center rounded border transition-colors",
                   activeTool === id
-                    ? "border-[#2962ff] bg-[#2962ff]/20 text-[#2962ff]"
-                    : "border-transparent text-[#787b86] hover:border-[#2a2e39] hover:bg-[#131722] hover:text-[#d1d5db]",
+                    ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
+                    : "border-transparent text-[#8492a6] hover:border-[#263246] hover:bg-[#070b12] hover:text-[#cbd5e1]",
                 )}
                 onClick={() => selectTool(id)}
                 title={label}
@@ -600,7 +665,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             ))}
             <button
               aria-label="Clear drawings"
-              className="inline-flex h-6.5 w-6.5 items-center justify-center rounded border border-transparent text-[#787b86] transition-colors hover:border-[#2a2e39] hover:bg-[#131722] hover:text-[#f23645]"
+              className="inline-flex h-6.5 w-6.5 items-center justify-center rounded border border-transparent text-[#8492a6] transition-colors hover:border-[#263246] hover:bg-[#070b12] hover:text-[#ef4444]"
               onClick={clearDrawings}
               title="Clear all drawings"
               type="button"
@@ -617,7 +682,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               "inline-flex h-6 px-2 items-center justify-center rounded border text-[11px] font-semibold transition-colors",
               showVisionOverlay
                 ? "border-[#eab308] bg-[#eab308]/20 text-[#eab308]"
-                : "border-[#2a2e39] text-[#787b86] hover:bg-[#131722] hover:text-[#d1d5db]",
+                : "border-[#263246] text-[#8492a6] hover:bg-[#070b12] hover:text-[#cbd5e1]",
               !visionOverlay && "opacity-40",
             )}
             disabled={!visionOverlay}
@@ -631,8 +696,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             className={cn(
               "inline-flex h-6 px-2 items-center justify-center rounded border text-[11px] font-semibold transition-colors",
               isAutoScale
-                ? "border-[#2962ff] bg-[#2962ff]/20 text-[#2962ff]"
-                : "border-[#2a2e39] text-[#787b86] hover:bg-[#131722] hover:text-[#d1d5db]",
+                ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
+                : "border-[#263246] text-[#8492a6] hover:bg-[#070b12] hover:text-[#cbd5e1]",
             )}
             onClick={toggleAutoScale}
             title="Auto Scale"
@@ -644,8 +709,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             className={cn(
               "inline-flex h-6 px-2 items-center justify-center rounded border text-[11px] font-semibold transition-colors",
               isLogScale
-                ? "border-[#2962ff] bg-[#2962ff]/20 text-[#2962ff]"
-                : "border-[#2a2e39] text-[#787b86] hover:bg-[#131722] hover:text-[#d1d5db]",
+                ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
+                : "border-[#263246] text-[#8492a6] hover:bg-[#070b12] hover:text-[#cbd5e1]",
             )}
             onClick={toggleLogScale}
             title="Logarithmic Scale"
@@ -655,7 +720,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </button>
           <button
             aria-label="Reset view"
-            className="inline-flex h-6 w-6 items-center justify-center rounded border border-[#2a2e39] text-[#787b86] transition-colors hover:bg-[#131722] hover:text-[#d1d5db]"
+            className="inline-flex h-6 w-6 items-center justify-center rounded border border-[#263246] text-[#8492a6] transition-colors hover:bg-[#070b12] hover:text-[#cbd5e1]"
             onClick={resetZoom}
             title="Reset Zoom (Fit Content)"
             type="button"
@@ -673,38 +738,38 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       />
 
       {/* Interactive OHLCV Legend Overlay (TradingView style) */}
-      <div className="pointer-events-none absolute top-12 left-4 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-[#787b86]">
-        <span className="font-bold text-[#d1d5db]">{symbol}</span>
+      <div className="pointer-events-none absolute top-12 left-4 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-[#8492a6]">
+        <span className="font-bold text-[#cbd5e1]">{symbol}</span>
         {displayCandle && (
           <>
             <span>
               O:{" "}
-              <strong className="text-[#d1d5db]">
+              <strong className="text-[#cbd5e1]">
                 {displayCandle.open.toFixed(2)}
               </strong>
             </span>
             <span>
               H:{" "}
-              <strong className="text-[#d1d5db]">
+              <strong className="text-[#cbd5e1]">
                 {displayCandle.high.toFixed(2)}
               </strong>
             </span>
             <span>
               L:{" "}
-              <strong className="text-[#d1d5db]">
+              <strong className="text-[#cbd5e1]">
                 {displayCandle.low.toFixed(2)}
               </strong>
             </span>
             <span>
               C:{" "}
-              <strong className="text-[#d1d5db]">
+              <strong className="text-[#cbd5e1]">
                 {displayCandle.close.toFixed(2)}
               </strong>
             </span>
             <span
               className={cn(
                 "font-semibold",
-                displayCandle.change >= 0 ? "text-[#089981]" : "text-[#f23645]",
+                displayCandle.change >= 0 ? "text-[#22c55e]" : "text-[#ef4444]",
               )}
             >
               {displayCandle.change >= 0 ? "+" : ""}
@@ -715,7 +780,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             {displayCandle.volume !== undefined && (
               <span>
                 Vol:{" "}
-                <strong className="text-[#d1d5db]">
+                <strong className="text-[#cbd5e1]">
                   {(displayCandle.volume / 1000).toFixed(1)}k
                 </strong>
               </span>

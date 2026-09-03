@@ -1,4 +1,6 @@
-import React from 'react';
+import { StatusChip, type StatusTone } from "@/components/terminal/bits"
+import { fmtNum, fmtPct, toneCls } from "@/lib/format"
+import { cn } from "@/lib/utils"
 
 export interface PositionItem {
   id: string;
@@ -20,131 +22,149 @@ export interface PositionItem {
 interface PositionsTableProps {
   positions: PositionItem[];
   onManualExit?: (positionId: string) => void;
+  onOpenSymbol?: (symbol: string) => void;
 }
 
-export const PositionsTable: React.FC<PositionsTableProps> = ({ positions, onManualExit }) => {
+const POSITION_TONES: Record<PositionItem["state"], StatusTone> = {
+  open: "work",
+  trailing_active: "fill",
+  exit_pending: "wait",
+  pending_entry: "wait",
+  closed: "off",
+  cancelled: "off",
+}
+
+const POSITION_LABELS: Record<PositionItem["state"], string> = {
+  open: "OPEN",
+  trailing_active: "TRAILING",
+  exit_pending: "EXITING",
+  pending_entry: "PENDING",
+  closed: "CLOSED",
+  cancelled: "CANCELLED",
+}
+
+/** Open positions — holdings at last price with software stops and targets. */
+export const PositionsTable: React.FC<PositionsTableProps> = ({
+  positions,
+  onManualExit,
+  onOpenSymbol,
+}) => {
+  const open = positions.filter((p) => !["closed", "cancelled"].includes(p.state))
+  const netUnrealized = open.reduce((sum, p) => sum + (p.unrealized_pnl ?? 0), 0)
+  const invested = open.reduce(
+    (sum, p) => sum + (p.average_entry_price ?? 0) * Math.abs(p.open_quantity),
+    0,
+  )
+  const pct = invested > 0 ? (netUnrealized / invested) * 100 : 0
+  const netTone = toneCls(netUnrealized)
+
   return (
-    <div className="flex flex-col h-full bg-[#080a0e] font-mono text-xs select-none">
-      {/* Header Bar */}
-      <div className="h-9 bg-[#0d1117] border-b border-[#252932] flex items-center justify-between px-3 shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="font-bold text-[#e6edf3]">ACTIVE POSITIONS</span>
-          <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#161b22] text-[#22c55e] border border-[#252932]">
-            {positions.filter((p) => p.state !== 'closed').length} OPEN
-          </span>
+    <section className="view h-full">
+      <div className="vhead">
+        <div>
+          <h2>
+            Open Positions <span className="sub">{open.length} lines</span>
+          </h2>
+          <p className="vmeta">Holdings at last price · software stop / target / trailing levels</p>
+        </div>
+        <div className="vhead-right">
+          <div className="netp">
+            <span className="lbl">NET UNREALIZED</span>
+            <span className={cn("val", netTone)}>
+              {netUnrealized >= 0 ? "+" : ""}₹{fmtNum(netUnrealized)} ({fmtPct(pct)})
+            </span>
+          </div>
         </div>
       </div>
-
-      {/* Table */}
-      <div className="flex-1 overflow-auto">
-        <table className="w-full text-left border-collapse">
-          <thead className="bg-[#0d1117] sticky top-0 border-b border-[#252932] text-[#8b949e] text-[10px] uppercase font-semibold">
+      <div className="tscroll">
+        <table className="tbl">
+          <thead>
             <tr>
-              <th className="py-2 px-3">STATE</th>
-              <th className="py-2 px-3">SYMBOL</th>
-              <th className="py-2 px-3">SIDE</th>
-              <th className="py-2 px-3 text-right">QTY</th>
-              <th className="py-2 px-3 text-right">AVG ENTRY (₹)</th>
-              <th className="py-2 px-3 text-right">LTP (₹)</th>
-              <th className="py-2 px-3 text-right">STOP LOSS (₹)</th>
-              <th className="py-2 px-3 text-right">TARGET (₹)</th>
-              <th className="py-2 px-3 text-[#8b949e]">TRAILING RULE</th>
-              <th className="py-2 px-3 text-right">UNREALIZED P&L</th>
-              <th className="py-2 px-3 text-center">ACTION</th>
+              <th className="l" style={{ minWidth: 118 }}>SYMBOL</th>
+              <th className="l" style={{ minWidth: 64 }}>SIDE</th>
+              <th className="l" style={{ minWidth: 84 }}>STATE</th>
+              <th style={{ minWidth: 74 }}>QTY</th>
+              <th style={{ minWidth: 92 }}>AVG PRICE</th>
+              <th style={{ minWidth: 92 }}>STOP</th>
+              <th style={{ minWidth: 92 }}>TARGET</th>
+              <th style={{ minWidth: 92 }}>LTP</th>
+              <th style={{ minWidth: 96 }}>P&L ₹</th>
+              <th style={{ minWidth: 80 }}>P&L %</th>
+              <th className="l" style={{ minWidth: 110 }}>TRAILING RULE</th>
+              <th className="l" style={{ minWidth: 92 }}>ACTIONS</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-[#161b22]">
+          <tbody>
+            {open.length === 0 && (
+              <tr>
+                <td colSpan={12} className="l" style={{ padding: 26, textAlign: "center" }}>
+                  No open positions. Tracked holdings from approved trades appear here.
+                </td>
+              </tr>
+            )}
             {positions.map((pos) => {
-              const isProfit = (pos.unrealized_pnl ?? 0) >= 0;
+              const isClosed = ["closed", "cancelled"].includes(pos.state)
+              const long = pos.side === "long"
+              const pnl = pos.unrealized_pnl ?? 0
+              const pnlTone = toneCls(pnl)
+              const invest = (pos.average_entry_price ?? 0) * Math.abs(pos.open_quantity)
+              const pnlPct = invest > 0 ? (pnl / invest) * 100 : 0
+              const exitable = onManualExit && !isClosed && pos.state !== "pending_entry"
               return (
-                <tr key={pos.id} className="hover:bg-[#0d1117] transition-colors">
-                  <td className="py-2 px-3">
-                    {pos.state === 'open' && (
-                      <span className="px-1.5 py-0.5 rounded bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/30 text-[10px] font-bold">
-                        OPEN
-                      </span>
-                    )}
-                    {pos.state === 'trailing_active' && (
-                      <span className="px-1.5 py-0.5 rounded bg-[#3b82f6]/10 text-[#3b82f6] border border-[#3b82f6]/30 text-[10px] font-bold">
-                        TRAILING
-                      </span>
-                    )}
-                    {pos.state === 'pending_entry' && (
-                      <span className="px-1.5 py-0.5 rounded bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/30 text-[10px] font-bold">
-                        PENDING
-                      </span>
-                    )}
-                    {pos.state === 'exit_pending' && (
-                      <span className="px-1.5 py-0.5 rounded bg-[#f97316]/10 text-[#f97316] border border-[#f97316]/30 text-[10px] font-bold animate-pulse">
-                        EXITING
-                      </span>
-                    )}
-                    {pos.state === 'closed' && (
-                      <span className="px-1.5 py-0.5 rounded bg-[#161b22] text-[#8b949e] text-[10px]">
-                        CLOSED
-                      </span>
-                    )}
-                    {pos.state === 'cancelled' && (
-                      <span className="px-1.5 py-0.5 rounded bg-[#161b22] text-[#8b949e] text-[10px]">
-                        CANCELLED
-                      </span>
+                <tr className={cn(isClosed && "opacity-45")} key={pos.id}>
+                  <td className="l">
+                    {onOpenSymbol ? (
+                      <button
+                        className="symlink"
+                        onClick={() => onOpenSymbol(pos.symbol)}
+                        title={pos.symbol}
+                        type="button"
+                      >
+                        {pos.symbol}
+                      </button>
+                    ) : (
+                      pos.symbol
                     )}
                   </td>
-                  <td className="py-2 px-3 font-bold text-[#3b82f6]">{pos.symbol}</td>
-                  <td className="py-2 px-3 font-semibold uppercase text-[#e6edf3]">
-                    {pos.side}
+                  <td className={cn("l", long ? "up" : "down")} style={{ fontWeight: 700 }}>
+                    {long ? "LONG" : "SHORT"}
                   </td>
-                  <td className="py-2 px-3 text-right font-bold text-[#e6edf3]">
-                    {pos.open_quantity} / {pos.quantity}
+                  <td className="l">
+                    <StatusChip tone={POSITION_TONES[pos.state]}>{POSITION_LABELS[pos.state]}</StatusChip>
                   </td>
-                  <td className="py-2 px-3 text-right text-[#e6edf3]">
-                    {pos.average_entry_price === null
-                      ? '—'
-                      : `₹${pos.average_entry_price.toFixed(2)}`}
+                  <td>
+                    {fmtNum(pos.open_quantity, 0)} / {fmtNum(pos.quantity, 0)}
                   </td>
-                  <td className="py-2 px-3 text-right font-bold text-[#e6edf3]">
-                    {pos.current_ltp === null ? '—' : `₹${pos.current_ltp.toFixed(2)}`}
+                  <td>{fmtNum(pos.average_entry_price)}</td>
+                  <td className="down">{pos.current_stop_loss !== null ? fmtNum(pos.current_stop_loss) : "—"}</td>
+                  <td className="up">{pos.current_target !== null ? fmtNum(pos.current_target) : "—"}</td>
+                  <td>{fmtNum(pos.current_ltp)}</td>
+                  <td className={pnlTone}>
+                    {pos.unrealized_pnl === null
+                      ? "—"
+                      : `${pnl >= 0 ? "+" : "-"}₹${fmtNum(Math.abs(pnl))}`}
                   </td>
-                  <td className="py-2 px-3 text-right font-bold text-[#ef4444]">
-                    {pos.current_stop_loss === null
-                      ? '—'
-                      : `₹${pos.current_stop_loss.toFixed(2)}`}
-                  </td>
-                  <td className="py-2 px-3 text-right font-bold text-[#22c55e]">
-                    {pos.current_target === null
-                      ? '—'
-                      : `₹${pos.current_target.toFixed(2)}`}
-                  </td>
-                  <td className="py-2 px-3 text-[#8b949e] text-[11px]">
+                  <td className={pnlTone}>{fmtPct(pnlPct)}</td>
+                  <td className="l" style={{ color: "var(--fg-2)", fontFamily: "var(--font-sans)", fontSize: 11.5 }}>
                     {pos.trailing_rule_desc}
                   </td>
-                  <td
-                    className={`py-2 px-3 text-right font-bold ${
-                      isProfit ? 'text-[#22c55e]' : 'text-[#ef4444]'
-                    }`}
-                  >
-                    {pos.unrealized_pnl === null
-                      ? '—'
-                      : `${isProfit ? '+' : ''}₹${pos.unrealized_pnl.toFixed(2)}`}
-                  </td>
-                  <td className="py-2 px-3 text-center">
-                    {onManualExit &&
-                      !['closed', 'cancelled', 'pending_entry'].includes(pos.state) && (
-                      <button
-                        onClick={() => onManualExit(pos.id)}
-                        className="px-2 py-0.5 rounded bg-[#ef4444]/10 hover:bg-[#ef4444] text-[#ef4444] hover:text-white border border-[#ef4444]/30 text-[10px] font-bold transition-all"
-                      >
-                        EXIT
-                      </button>
+                  <td className="l">
+                    {exitable ? (
+                      <span className="act">
+                        <button className="link-act danger" onClick={() => onManualExit(pos.id)} type="button">
+                          Close
+                        </button>
+                      </span>
+                    ) : (
+                      <span style={{ color: "var(--muted-text)", fontSize: 10.5 }}>—</span>
                     )}
-                    {!onManualExit && <span className="text-[#8b949e]">—</span>}
                   </td>
                 </tr>
-              );
+              )
             })}
           </tbody>
         </table>
       </div>
-    </div>
-  );
-};
+    </section>
+  )
+}

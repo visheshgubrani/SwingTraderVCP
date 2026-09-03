@@ -26,7 +26,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session
-from app.domain.p10_geometry import CandleData, derive_chart_geometry, format_candidate_summary
+from app.domain.p10_geometry import (
+    CandleData,
+    compute_structural_facts,
+    derive_chart_geometry,
+    evaluate_structural_gates,
+    format_candidate_summary,
+    structural_facts_to_dict,
+)
 from app.domain.p10_sizing import TEMPLATE_CONFIG, EntryTemplate
 from app.redis_pool import redis_settings_from_config, tune_arq_redis_pool
 from app.services.distributed_lease import (
@@ -44,9 +51,12 @@ from app.services.p10_forming_watch import (
 from app.services.proposal_generator import (
     GEOMETRY_VERSION,
     PROMPT_VERSION,
+    PROPOSAL_STRUCTURAL_FORMING,
+    PROPOSAL_STRUCTURAL_INVALID,
     ProposalBuildResult,
     ProposalProviderError,
     SCHEMA_VERSION,
+    structural_rejection_message,
     calculate_next_session_and_deadline,
     call_gemini_vision_for_proposal,
     compute_frozen_source_hash,
@@ -59,7 +69,9 @@ from app.services.proposal_renderer import render_proposal_charts
 
 logger = logging.getLogger("proposal_worker")
 IST_TZ = ZoneInfo("Asia/Kolkata")
-CandidateOutcome = Literal["generated", "rejected", "uncertain", "failed", "timed_out"]
+CandidateOutcome = Literal[
+    "generated", "rejected", "uncertain", "existing", "failed", "timed_out"
+]
 PROPOSAL_BATCH_HARD_CAP = 20
 _LOCK_KEY = "proposal_worker:singleton"
 _LOCK_TTL_SECONDS = 30
@@ -615,6 +627,18 @@ async def process_proposal_candidate(
     deadline: dt.datetime,
     redis: Any = None,
 ) -> CandidateOutcome:
+    """Process one candidate under the structural-first audit lifecycle.
+
+    Dispositions:
+      proposal  - Gemini valid + structural gates ok + numeric gates + geometry
+      forming   - immature / still developing / not yet tightened (watch row)
+      invalid   - structural breakdown (undercut, distribution, climax-fade,
+                  flat shelf) or model-level not_vcp / numeric-gate failure
+      existing  - identical immutable proposal already exists (no-op)
+      failed    - provider / infrastructure failure
+    Structural gates run on RAW geometry before inference and short-circuit
+    hard-invalid charts (no provider cost); Gemini can never hide a lower low.
+    """
     async with async_session() as session:
         candles = await _load_frozen_candles(
             session,
@@ -650,7 +674,11 @@ async def process_proposal_candidate(
 
     tick_size = Decimal(str(candidate.tick_size))
     annotations = derive_chart_geometry(candles, tick_size=tick_size)
-    candidate_summary = format_candidate_summary(annotations.contractions)
+    facts = compute_structural_facts(
+        candles, annotations.contractions, tick_size=tick_size
+    )
+    verdict = evaluate_structural_gates(facts)
+    candidate_summary = format_candidate_summary(annotations.contractions, facts=facts)
     charts = await asyncio.to_thread(
         render_proposal_charts, candles=candles, symbol=candidate.symbol
     )
@@ -673,12 +701,40 @@ async def process_proposal_candidate(
                 candidate_summary=candidate_summary,
             )
         logger.info(
-            "Processing candidate %s (attempt %s/%s) for automation run %s",
+            "Processing candidate %s (attempt %s/%s) for automation run %s "
+            "structural_disposition=%s codes=%s",
             candidate.symbol,
             attempt_number,
             settings.proposal_max_attempts,
             automation_run_id,
+            verdict.disposition,
+            ",".join(verdict.codes) or "-",
         )
+
+        if verdict.disposition == "invalid":
+            # Deterministic structural breakdown: no inference needed.
+            async with async_session() as session:
+                await _finish_attempt(
+                    session,
+                    attempt_id=attempt_id,
+                    status="invalid",
+                    error_type=PROPOSAL_STRUCTURAL_INVALID,
+                    error_message=structural_rejection_message(facts, verdict),
+                    error_details={
+                        "gate_disposition": verdict.disposition,
+                        "gate_codes": list(verdict.codes),
+                        "gate_details": verdict.details,
+                        "structural_facts": structural_facts_to_dict(facts),
+                    },
+                )
+                await close_forming_watch(
+                    session,
+                    instrument_id=str(candidate.instrument_id),
+                    status="broken_down",
+                )
+                await session.commit()
+            return "rejected"
+
         try:
             ai_output, usage, cost, request_id = await asyncio.wait_for(
                 call_gemini_vision_for_proposal(
@@ -691,9 +747,12 @@ async def process_proposal_candidate(
                 timeout=timeout,
             )
             logger.info(
-                "Gemini vision output for %s: classification=%s, dry_up=%s, tightening=%s, confidence=%s",
+                "Gemini vision output for %s: classification=%s, pattern_type=%s, "
+                "primary_reason=%s, dry_up=%s, tightening=%s, confidence=%s",
                 candidate.symbol,
                 ai_output.classification,
+                getattr(ai_output, "pattern_type", None),
+                getattr(ai_output, "primary_reason", None),
                 ai_output.volume_dry_up,
                 ai_output.progressive_tightening,
                 ai_output.confidence,
@@ -778,6 +837,10 @@ async def process_proposal_candidate(
                     request_id=request_id,
                     error_type=ai_error_type,
                     error_message=ai_error_message,
+                    error_details={
+                        "structural_facts": structural_facts_to_dict(facts),
+                        "gate_details": verdict.details,
+                    },
                 )
                 if ai_output.classification == "forming":
                     if ai_output.forming_state == "breaking_down":
@@ -816,6 +879,52 @@ async def process_proposal_candidate(
                 await session.commit()
             return outcome
 
+        # classification == valid below this point.
+        if verdict.disposition == "forming":
+            # Gemini says valid but the deterministic structure is still
+            # immature / not yet tightened: route into the forming watch.
+            async with async_session() as session:
+                await _finish_attempt(
+                    session,
+                    attempt_id=attempt_id,
+                    status="partial",
+                    output=output_json,
+                    usage=usage,
+                    cost=cost,
+                    request_id=request_id,
+                    error_type=PROPOSAL_STRUCTURAL_FORMING,
+                    error_message=structural_rejection_message(facts, verdict),
+                    error_details={
+                        "gate_disposition": verdict.disposition,
+                        "gate_codes": list(verdict.codes),
+                        "gate_details": verdict.details,
+                        "structural_facts": structural_facts_to_dict(facts),
+                        "llm_snapshot": output_json,
+                    },
+                )
+                await upsert_forming_watch(
+                    session,
+                    instrument_id=str(candidate.instrument_id),
+                    screening_result_id=str(candidate.screening_result_id),
+                    symbol=candidate.symbol,
+                    as_of_date=as_of_date,
+                    forming_state="developing",
+                    llm_snapshot=output_json,
+                    python_candidates=[
+                        {
+                            "index": wave.index,
+                            "high_date": wave.high_date,
+                            "low_date": wave.low_date,
+                            "depth_pct": str(wave.depth_pct),
+                        }
+                        for wave in annotations.contractions
+                    ],
+                    attempt_id=attempt_id,
+                    holidays=_holiday_dates(),
+                )
+                await session.commit()
+            return "uncertain"
+
         build_result: ProposalBuildResult = generate_trade_proposal_from_analysis(
             symbol=candidate.symbol,
             as_of_date=as_of_date,
@@ -827,6 +936,8 @@ async def process_proposal_candidate(
             model=settings.vcp_vision_model,
             tick_size=tick_size,
             python_candidates=annotations.contractions,
+            structural_facts=facts,
+            structural_verdict=verdict,
             risk_policy_id=str(policy["id"]),
             risk_policy_version=int(policy["version"]),
             risk_per_trade_pct=Decimal(str(policy["risk_per_trade_pct"])),
@@ -840,19 +951,49 @@ async def process_proposal_candidate(
             holidays=_holiday_dates(),
         )
         if not build_result.accepted:
+            code = build_result.rejection_code or "proposal_rejected"
             logger.info(
-                "Proposal candidate %s rejected code=%s subreason=%s detail=%s",
+                "Proposal candidate %s rejected code=%s detail=%s",
                 candidate.symbol,
-                build_result.rejection_code,
-                (build_result.rejection_details or {}).get("subreason"),
+                code,
                 build_result.rejection_message,
             )
             async with async_session() as session:
-                await close_forming_watch(
-                    session,
-                    instrument_id=str(candidate.instrument_id),
-                    status="broken_down",
-                )
+                if code == PROPOSAL_STRUCTURAL_FORMING:
+                    # Defensive double-guard: generator flagged forming that
+                    # the worker pre-check missed. Route to the forming watch.
+                    await upsert_forming_watch(
+                        session,
+                        instrument_id=str(candidate.instrument_id),
+                        screening_result_id=str(candidate.screening_result_id),
+                        symbol=candidate.symbol,
+                        as_of_date=as_of_date,
+                        forming_state="developing",
+                        llm_snapshot=output_json,
+                        python_candidates=[
+                            {
+                                "index": wave.index,
+                                "high_date": wave.high_date,
+                                "low_date": wave.low_date,
+                                "depth_pct": str(wave.depth_pct),
+                            }
+                            for wave in annotations.contractions
+                        ],
+                        attempt_id=attempt_id,
+                        holidays=_holiday_dates(),
+                    )
+                elif code not in {
+                    "proposal_risk_budget_missing",
+                    PROPOSAL_STRUCTURAL_INVALID,
+                }:
+                    # Structural invalid double-guard + every model/numeric/
+                    # geometry rejection means the pattern is broken down.
+                    # Budget/operational failures leave any watch untouched.
+                    await close_forming_watch(
+                        session,
+                        instrument_id=str(candidate.instrument_id),
+                        status="broken_down",
+                    )
                 await _finish_attempt(
                     session,
                     attempt_id=attempt_id,
@@ -861,7 +1002,7 @@ async def process_proposal_candidate(
                     usage=usage,
                     cost=cost,
                     request_id=request_id,
-                    error_type=build_result.rejection_code,
+                    error_type=code,
                     error_message=build_result.rejection_message,
                     error_details=build_result.rejection_details,
                 )
@@ -908,7 +1049,7 @@ async def process_proposal_candidate(
                     },
                 )
                 await session.commit()
-                return "rejected"
+                return "existing"
             await close_forming_watch(
                 session,
                 instrument_id=str(candidate.instrument_id),
@@ -1215,7 +1356,7 @@ async def _process_automation_candidates(
     manual: bool,
     redis: Any = None,
 ) -> dict[str, Any]:
-    counts = {key: 0 for key in ("generated", "rejected", "uncertain", "failed", "timed_out")}
+    counts = {key: 0 for key in ("generated", "rejected", "uncertain", "existing", "failed", "timed_out")}
     processed = 0
     all_candidates = list(candidates) + list(forming_rechecks or [])
     total = total_candidates if total_candidates is not None else len(all_candidates)
@@ -1264,7 +1405,10 @@ async def _process_automation_candidates(
                 {
                     "run_id": automation_run_id,
                     "processed": processed,
-                    **counts,
+                    "generated": counts["generated"],
+                    "rejected": counts["rejected"],
+                    "uncertain": counts["uncertain"],
+                    "failed": counts["failed"],
                 },
             )
             await session.commit()
@@ -1310,7 +1454,10 @@ async def _process_automation_candidates(
                 "status": terminal_status,
                 "processed": processed,
                 "error_message": error_message,
-                **counts,
+                "generated": counts["generated"],
+                "rejected": counts["rejected"],
+                "uncertain": counts["uncertain"],
+                "failed": counts["failed"],
             },
         )
         await session.commit()
@@ -1318,6 +1465,7 @@ async def _process_automation_candidates(
         "status": terminal_status,
         "scan_run_id": scan_run_id,
         "automation_run_id": automation_run_id,
+        "proposals_existing": counts["existing"],
         "counts": counts,
     }
 

@@ -675,18 +675,74 @@ def _find_parent(parent: dict[int, int], index: int) -> int:
     return index
 
 
-def format_candidate_summary(contractions: Sequence[VcpContractionWave]) -> str:
-    """Short text packet sent with the 126-session chart. Not a raw OHLCV table."""
+def format_candidate_summary(
+    contractions: Sequence[VcpContractionWave],
+    facts: "StructuralFacts | None" = None,
+) -> str:
+    """Short text packet sent with the 126-session chart. Not a raw OHLCV
+    table, and never contains absolute prices (percentages/statuses only).
+
+    When ``facts`` is provided (StructuralFacts over the raw geometry),
+    deterministic right-edge context lines are appended so the model judges
+    maturity, low progression, and pullback volume from Python-computed
+    facts instead of pixel estimates.
+    """
+    lines: list[str] = []
     if not contractions:
-        return "No Python swing-detector candidates in the 126-session window."
-    lines = []
-    for wave in contractions:
-        vol20 = f"{wave.vol_adv20:.2f}" if wave.vol_adv20 is not None else "n/a"
-        vol50 = f"{wave.vol_adv50:.2f}" if wave.vol_adv50 is not None else "n/a"
+        lines.append("No Python swing-detector candidates in the 126-session window.")
+    else:
+        for wave in contractions:
+            vol20 = f"{wave.vol_adv20:.2f}" if wave.vol_adv20 is not None else "n/a"
+            vol50 = f"{wave.vol_adv50:.2f}" if wave.vol_adv50 is not None else "n/a"
+            lines.append(
+                f"C{wave.index}: {wave.high_date}→{wave.low_date} "
+                f"depth {wave.depth_pct:.1f}% vol/ADV20 {vol20} vol/ADV50 {vol50}"
+            )
+    if facts is None:
+        return "\n".join(lines)
+
+    first_high = contractions[0].high_date if contractions else None
+    lines.append("— Deterministic structure (Python-computed, do not re-estimate):")
+    lines.append(
+        f"Base age: {facts.base_age_sessions} completed sessions since the first "
+        f"pullback high ({first_high}); raw pullbacks detected: {facts.raw_count}."
+    )
+    if facts.undercut_gap is not None and facts.lowest_prior_low:
+        gap_pct = facts.undercut_gap / facts.lowest_prior_low * Decimal("100")
+        if facts.undercut_gap > 0:
+            lines.append(
+                f"Low progression: latest pullback low is {gap_pct:.2f}% BELOW the "
+                "prior pullback floor (lower low / undercut)."
+            )
+        else:
+            lines.append("Low progression: lows are rising or equal (no undercut).")
+    if facts.close_vs_pivot_pct is not None:
         lines.append(
-            f"C{wave.index}: {wave.high_date}→{wave.low_date} "
-            f"depth {wave.depth_pct:.1f}% vol/ADV20 {vol20} vol/ADV50 {vol50}"
+            f"Right edge: last close is {facts.close_vs_pivot_pct:+.1f}% vs the "
+            "final pullback high (pivot candidate) and "
+            f"{facts.close_vs_final_low_pct:+.1f}% vs the final pullback low."
         )
+    pb = facts.final_pullback
+    if pb is not None:
+        seg_txt = (
+            f"Final pullback segment: {pb.segment_days} session(s), "
+            f"{pb.down_days} down day(s)"
+        )
+        if pb.seg_max_down_vs_adv_ratio is not None:
+            seg_txt += f"; max down-day volume {pb.seg_max_down_vs_adv_ratio:.2f}x its prior-20-day ADV"
+        if pb.seg_mean_vs_prev_ratio is not None:
+            seg_txt += f"; segment mean {pb.seg_mean_vs_prev_ratio:.2f}x the previous pullback-window mean"
+        lines.append(seg_txt + ".")
+    pd = facts.pivot_day
+    if pd is not None:
+        pivot_txt = "Final pivot day:"
+        if pd.vol_ratio is not None:
+            pivot_txt += f" volume {pd.vol_ratio:.2f}x its prior-20-day ADV"
+        if pd.upper_wick_frac is not None:
+            pivot_txt += f"; upper-wick share {pd.upper_wick_frac:.0%}"
+        if pd.fade_atr is not None and pd.later_sessions:
+            pivot_txt += f"; later closes faded up to {pd.fade_atr:.2f}x ATR14"
+        lines.append(pivot_txt + ".")
     return "\n".join(lines)
 
 
@@ -1374,3 +1430,643 @@ def construct_and_validate_proposal(
         rejection_reason=reason,
         **rr_fields,
     )
+
+
+# ---------------------------------------------------------------------------
+# Structural facts & gates (P10 audit reliability v2)
+#
+# Versioned, deterministic facts computed from the frozen candles and the RAW
+# Python swing geometry BEFORE any model call or survivor resolution, so a
+# Gemini confirm/merge/reject can never hide a lower low or rewrite the
+# pullback volume story. Gate policy semantics travel with GEOMETRY_VERSION
+# (dedupe key), so every change to these rules must bump that version.
+# ---------------------------------------------------------------------------
+
+# Default rule parameters (gate sweep may tune these on development data
+# only; they are frozen into the gate-policy version at review time).
+MATURITY_FLOOR_SESSIONS = 15  # <15 completed sessions after first raw high => forming
+UNDERCUT_TOLERANCE_ATR = Decimal("0.10")  # swept 0.05-0.20 ATR
+TIGHTENING_RATIO_MAX = Decimal("0.90")  # curr/prev must be <= this ...
+TIGHTENING_STEP_PP_MIN = Decimal("0.75")  # ... or the step must fall >= this many pp
+NOISE_DEPTH_PCT = Decimal("1.25")  # raw dips below this depth are excluded from tightening steps
+PULLBACK_MAX_DOWN_ADV_RATIO = Decimal("1.75")  # max down-session vol / ADV before segment
+PULLBACK_MEAN_PREV_RATIO = Decimal("1.10")  # segment mean vs previous contraction window mean
+PULLBACK_MIN_ADV_RATIO = Decimal("0.75")  # segment mean must also be >= this x ADV to fail
+PIVOT_CLIMAX_VOL_RATIO = Decimal("1.75")  # pivot-day volume / ADV before pivot
+PIVOT_FADE_ATR = Decimal("1.0")  # later close drawdown in ATR terms
+POST_PIVOT_FADE_SESSIONS = 5
+STRUCTURAL_GATE_POLICY_VERSION = "p10_structural_gates_v1"
+
+# Dispositions the structural gates return (see AGENTS.md lifecycle).
+StructuralDisposition = str  # 'ok' | 'forming' | 'invalid'
+
+
+@dataclass(frozen=True)
+class DepthStep:
+    prev_index: int
+    curr_index: int
+    prev_depth: Decimal
+    curr_depth: Decimal
+    ratio: Decimal | None
+    diff_pp: Decimal
+
+
+@dataclass(frozen=True)
+class PullbackFacts:
+    """Volume facts for the final raw contraction's pullback segment.
+
+    Segment = completed sessions strictly after the final contraction high
+    date through its low date (both from the frozen window).
+    """
+
+    segment_start_date: str | None
+    segment_end_date: str | None
+    segment_days: int = 0
+    down_days: int = 0
+    segment_mean_vol: Decimal | None = None
+    segment_max_vol: Decimal | None = None
+    segment_max_down_vol: Decimal | None = None
+    prev_window_mean_vol: Decimal | None = None
+    adv20_before_segment: Decimal | None = None
+    seg_mean_vs_prev_ratio: Decimal | None = None
+    seg_mean_vs_adv_ratio: Decimal | None = None
+    seg_max_down_vs_adv_ratio: Decimal | None = None
+    insufficient_baseline: bool = False
+
+
+@dataclass(frozen=True)
+class PivotDayFacts:
+    pivot_date: str | None
+    pivot_vol: Decimal | None = None
+    adv20_before_pivot: Decimal | None = None
+    vol_ratio: Decimal | None = None
+    upper_wick_frac: Decimal | None = None
+    pivot_close: Decimal | None = None
+    min_later_close: Decimal | None = None
+    fade_atr: Decimal | None = None
+    later_sessions: int = 0
+
+
+@dataclass(frozen=True)
+class StructuralFacts:
+    as_of_date: str | None
+    tick_size: Decimal
+    atr14: Decimal
+    raw_count: int = 0
+    base_age_sessions: int = 0
+    depths: tuple[Decimal, ...] = ()
+    depth_steps: tuple[DepthStep, ...] = ()
+    eligible_wave_indices: tuple[int, ...] = ()
+    noise_wave_indices: tuple[int, ...] = ()
+    lows: tuple[tuple[int, str, Decimal], ...] = ()
+    lowest_prior_low: Decimal | None = None
+    final_low: Decimal | None = None
+    undercut_gap: Decimal | None = None  # >0 when final low breaches the prior floor
+    pivot_price: Decimal | None = None
+    pivot_date: str | None = None
+    last_close: Decimal | None = None
+    close_vs_pivot_pct: Decimal | None = None
+    close_vs_final_low_pct: Decimal | None = None
+    final_pullback: PullbackFacts | None = None
+    pivot_day: PivotDayFacts | None = None
+
+
+@dataclass(frozen=True)
+class StructuralGateVerdict:
+    disposition: StructuralDisposition  # 'ok' | 'forming' | 'invalid'
+    codes: tuple[str, ...] = ()
+    details: dict[str, Any] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.details is None:
+            object.__setattr__(self, "details", {})
+
+
+def _candle_by_date(candles: Sequence[CandleData]) -> dict[str, CandleData]:
+    return {candle.date: candle for candle in candles if candle.date is not None}
+
+
+def _dates_between(
+    dates: Sequence[str], *, after: str | None, through: str | None
+) -> list[str]:
+    if after is None or through is None:
+        return []
+    return [d for d in dates if after < d <= through]
+
+
+def _mean_decimal(values: Sequence[Decimal]) -> Decimal | None:
+    if not values:
+        return None
+    return sum(values, Decimal("0")) / Decimal(str(len(values)))
+
+
+def _window_mean_vol(
+    by_date: dict[str, CandleData],
+    dates: Sequence[str],
+) -> Decimal | None:
+    vols = [Decimal(str(by_date[d].volume)) for d in dates if d in by_date]
+    return _mean_decimal(vols)
+
+
+def _adv_before(
+    dates: Sequence[str],
+    by_date: dict[str, CandleData],
+    *,
+    before: str | None,
+    window: int = 20,
+) -> tuple[Decimal | None, bool]:
+    """Mean volume of the last `window` sessions strictly before `before`.
+
+    Returns (value, insufficient) where insufficient=True when fewer than 10
+    usable earlier sessions exist (gate then declines to fire on this metric).
+    """
+    if before is None:
+        return None, True
+    earlier = [d for d in dates if d < before]
+    if len(earlier) < 10:
+        return None, True
+    vols = [
+        Decimal(str(by_date[d].volume))
+        for d in earlier[-window:]
+        if d in by_date
+    ]
+    if len(vols) < 10:
+        return None, True
+    return _mean_decimal(vols), False
+
+
+def compute_structural_facts(
+    candles: Sequence[CandleData],
+    contractions: Sequence[VcpContractionWave],
+    *,
+    tick_size: Decimal = DEFAULT_TICK_SIZE,
+) -> StructuralFacts:
+    """Facts over the raw geometry. Uses only candles ending at the freeze's
+    as-of date; every baseline comes strictly from earlier sessions."""
+    dated = [c for c in candles if c.date is not None]
+    dates = [c.date for c in dated]  # ascending order as given
+    as_of = candles[-1].date if candles and candles[-1].date else None
+    by_date = _candle_by_date(candles)
+    atr14 = compute_atr14(candles)
+
+    raw = list(contractions)
+    lows: list[tuple[int, str, Decimal]] = []
+    for wave in raw:
+        if wave.low_date is None:
+            continue
+        lows.append((wave.index, wave.low_date, Decimal(str(wave.low_price))))
+    if not raw:
+        return StructuralFacts(
+            as_of_date=as_of,
+            tick_size=tick_size,
+            atr14=atr14,
+        )
+
+    first_high = raw[0].high_date
+    base_age = len(_dates_between(dates, after=first_high, through=as_of))
+    depths = tuple(Decimal(str(w.depth_pct)) for w in raw)
+
+    # Depth steps over waves that are not detector noise.
+    eligible: list[VcpContractionWave] = []
+    noise_idx: list[int] = []
+    for wave in raw:
+        if wave.depth_pct < NOISE_DEPTH_PCT:
+            noise_idx.append(wave.index)
+        else:
+            eligible.append(wave)
+    steps: list[DepthStep] = []
+    for prev, curr in zip(eligible, eligible[1:]):
+        ratio = None
+        if prev.depth_pct > 0:
+            ratio = Decimal(str(curr.depth_pct / prev.depth_pct))
+        steps.append(
+            DepthStep(
+                prev_index=prev.index,
+                curr_index=curr.index,
+                prev_depth=Decimal(str(prev.depth_pct)),
+                curr_depth=Decimal(str(curr.depth_pct)),
+                ratio=ratio,
+                diff_pp=Decimal(str(prev.depth_pct)) - Decimal(str(curr.depth_pct)),
+            )
+        )
+
+    prior_lows = lows[:-1]
+    lowest_prior = (
+        min((Decimal(str(p[2])) for p in prior_lows), default=None)
+        if prior_lows
+        else None
+    )
+    final_wave = raw[-1]
+    final_low = Decimal(str(final_wave.low_price)) if final_wave.low_date else None
+    undercut_gap = None
+    if lowest_prior is not None and final_low is not None:
+        undercut_gap = lowest_prior - final_low
+
+    pivot_price = floor_to_tick(final_wave.high_price, tick_size) if final_wave else None
+    pivot_date = final_wave.high_date if final_wave else None
+
+    last_close = (
+        Decimal(str(by_date[as_of].close)) if as_of and as_of in by_date else None
+    )
+    close_vs_pivot = close_vs_low = None
+    if last_close is not None and pivot_price and pivot_price > 0:
+        close_vs_pivot = (
+            (last_close - pivot_price) / pivot_price * Decimal("100")
+        )
+    if last_close is not None and final_low and final_low > 0:
+        close_vs_low = (
+            (last_close - final_low) / final_low * Decimal("100")
+        )
+
+    # Final pullback segment volume facts.
+    pullback = None
+    if (
+        final_wave
+        and final_wave.high_date
+        and final_wave.low_date
+        and len(raw) >= 1
+    ):
+        seg_dates = _dates_between(
+            dates, after=final_wave.high_date, through=final_wave.low_date
+        )
+        if seg_dates:
+            seg_mean = _window_mean_vol(by_date, seg_dates)
+            seg_vols = [Decimal(str(by_date[d].volume)) for d in seg_dates if d in by_date]
+            seg_max = max(seg_vols) if seg_vols else None
+            # Down day: close < previous close; previous session for the first
+            # segment day is the final high date's close (strictly earlier).
+            down_vols: list[Decimal] = []
+            prev_close: Decimal | None = None
+            prev_day = None
+            for d in dates:
+                if d == seg_dates[0]:
+                    break
+                prev_day = d
+            if prev_day is not None and prev_day in by_date:
+                prev_close = Decimal(str(by_date[prev_day].close))
+            for d in seg_dates:
+                if d not in by_date:
+                    continue
+                close = Decimal(str(by_date[d].close))
+                if prev_close is not None and close < prev_close:
+                    down_vols.append(Decimal(str(by_date[d].volume)))
+                prev_close = close
+            seg_max_down = max(down_vols) if down_vols else None
+
+            adv_seg, insufficient = _adv_before(
+                dates, by_date, before=seg_dates[0], window=20
+            )
+            prev_mean = None
+            if len(raw) >= 2 and raw[-2].high_date and raw[-2].low_date:
+                prev_dates = _dates_between(
+                    dates,
+                    after=raw[-2].high_date,
+                    through=raw[-2].low_date,
+                )
+                if prev_dates:
+                    prev_mean = _window_mean_vol(by_date, prev_dates)
+            ratio_mean_prev = None
+            if seg_mean is not None and prev_mean:
+                ratio_mean_prev = seg_mean / prev_mean
+            ratio_mean_adv = (
+                seg_mean / adv_seg if seg_mean is not None and adv_seg else None
+            )
+            ratio_max_down_adv = (
+                seg_max_down / adv_seg
+                if seg_max_down is not None and adv_seg
+                else None
+            )
+            pullback = PullbackFacts(
+                segment_start_date=seg_dates[0],
+                segment_end_date=seg_dates[-1],
+                segment_days=len(seg_dates),
+                down_days=len(down_vols),
+                segment_mean_vol=seg_mean,
+                segment_max_vol=seg_max,
+                segment_max_down_vol=seg_max_down,
+                prev_window_mean_vol=prev_mean,
+                adv20_before_segment=adv_seg,
+                seg_mean_vs_prev_ratio=ratio_mean_prev,
+                seg_mean_vs_adv_ratio=ratio_mean_adv,
+                seg_max_down_vs_adv_ratio=ratio_max_down_adv,
+                insufficient_baseline=insufficient,
+            )
+
+    # Pivot-day volume / climax / fade facts (final contraction high).
+    pivot_day_facts = None
+    if pivot_date and pivot_date in by_date:
+        pivot_c = by_date[pivot_date]
+        pivot_close = Decimal(str(pivot_c.close))
+        adv_pivot, _insufficient = _adv_before(
+            dates, by_date, before=pivot_date, window=20
+        )
+        pivot_vol = Decimal(str(pivot_c.volume))
+        vol_ratio = pivot_vol / adv_pivot if adv_pivot else None
+        span = Decimal(str(pivot_c.high)) - Decimal(str(pivot_c.low))
+        upper_wick_frac = None
+        if span > 0:
+            upper_wick_frac = (
+                Decimal(str(pivot_c.high)) - max(
+                    Decimal(str(pivot_c.open)), pivot_close
+                )
+            ) / span
+        later = _dates_between(dates, after=pivot_date, through=as_of)
+        later_closes = [
+            Decimal(str(by_date[d].close)) for d in later if d in by_date
+        ]
+        min_later = min(later_closes) if later_closes else None
+        fade_atr = None
+        if min_later is not None and atr14 > 0:
+            fade_atr = max(Decimal("0"), (pivot_close - min_later) / atr14)
+        pivot_day_facts = PivotDayFacts(
+            pivot_date=pivot_date,
+            pivot_vol=pivot_vol,
+            adv20_before_pivot=adv_pivot,
+            vol_ratio=vol_ratio,
+            upper_wick_frac=upper_wick_frac,
+            pivot_close=pivot_close,
+            min_later_close=min_later,
+            fade_atr=fade_atr,
+            later_sessions=len(later),
+        )
+
+    return StructuralFacts(
+        as_of_date=as_of,
+        tick_size=tick_size,
+        atr14=atr14,
+        raw_count=len(raw),
+        base_age_sessions=base_age,
+        depths=depths,
+        depth_steps=tuple(steps),
+        eligible_wave_indices=tuple(w.index for w in eligible),
+        noise_wave_indices=tuple(noise_idx),
+        lows=tuple(lows),
+        lowest_prior_low=lowest_prior,
+        final_low=final_low,
+        undercut_gap=undercut_gap,
+        pivot_price=pivot_price,
+        pivot_date=pivot_date,
+        last_close=last_close,
+        close_vs_pivot_pct=close_vs_pivot,
+        close_vs_final_low_pct=close_vs_low,
+        final_pullback=pullback,
+        pivot_day=pivot_day_facts,
+    )
+
+
+def evaluate_structural_gates(
+    facts: StructuralFacts,
+    *,
+    maturity_floor_sessions: int = MATURITY_FLOOR_SESSIONS,
+    undercut_tolerance_atr: Decimal = UNDERCUT_TOLERANCE_ATR,
+    tightening_ratio_max: Decimal = TIGHTENING_RATIO_MAX,
+    tightening_step_pp_min: Decimal = TIGHTENING_STEP_PP_MIN,
+    pullback_max_down_adv_ratio: Decimal = PULLBACK_MAX_DOWN_ADV_RATIO,
+    pullback_mean_prev_ratio: Decimal = PULLBACK_MEAN_PREV_RATIO,
+    pullback_min_adv_ratio: Decimal = PULLBACK_MIN_ADV_RATIO,
+    pivot_climax_vol_ratio: Decimal = PIVOT_CLIMAX_VOL_RATIO,
+    pivot_fade_atr: Decimal = PIVOT_FADE_ATR,
+) -> StructuralGateVerdict:
+    """Structural gates over RAW geometry. Invalid beats forming; forming
+    (never a permanent rejection) beats ok. Returns codes + evidence."""
+    codes: list[str] = []
+    details: dict[str, Any] = {
+        "policy_version": STRUCTURAL_GATE_POLICY_VERSION,
+        "base_age_sessions": facts.base_age_sessions,
+        "maturity_floor_sessions": maturity_floor_sessions,
+        "raw_count": facts.raw_count,
+    }
+
+    # 1. Undercut: latest raw structural low below the minimum earlier
+    #    contraction low by more than max(one tick, tolerance ATR) is a hard
+    #    breakdown (lower low).
+    if (
+        facts.undercut_gap is not None
+        and facts.undercut_gap > 0
+        and facts.atr14 > 0
+    ):
+        tolerance = max(facts.tick_size, facts.atr14 * undercut_tolerance_atr)
+        details["undercut_gap"] = str(facts.undercut_gap)
+        details["undercut_tolerance"] = str(tolerance)
+        if facts.undercut_gap > tolerance:
+            codes.append("structural_undercut_lower_low")
+
+    # 2. Tightening: every consecutive (non-noise) raw step must contract
+    #    materially: ratio <= max OR absolute step >= min percentage points.
+    failing_steps: list[dict[str, str]] = []
+    for step in facts.depth_steps:
+        ratio_ok = step.ratio is not None and step.ratio <= tightening_ratio_max
+        step_ok = step.diff_pp >= tightening_step_pp_min
+        if not (ratio_ok or step_ok):
+            failing_steps.append(
+                {
+                    "prev_index": step.prev_index,
+                    "curr_index": step.curr_index,
+                    "ratio": str(step.ratio) if step.ratio is not None else "n/a",
+                    "diff_pp": str(step.diff_pp),
+                }
+            )
+    if failing_steps:
+        codes.append("structural_flat_shelf_not_tightening")
+        details["failing_depth_steps"] = failing_steps
+        details["tightening_ratio_max"] = str(tightening_ratio_max)
+        details["tightening_step_pp_min"] = str(tightening_step_pp_min)
+
+    # 3. Final pullback volume: abnormal expansion in the last pullback is a
+    #    hard invalidation (supply). The pivot day itself is NOT part of the
+    #    segment; healthy institutional pivot volume alone never rejects.
+    pb = facts.final_pullback
+    if pb is not None:
+        details["pullback"] = {
+            "segment_days": pb.segment_days,
+            "down_days": pb.down_days,
+            "segment_mean_vs_prev_ratio": (
+                str(pb.seg_mean_vs_prev_ratio)
+                if pb.seg_mean_vs_prev_ratio is not None
+                else None
+            ),
+            "segment_mean_vs_adv_ratio": (
+                str(pb.seg_mean_vs_adv_ratio)
+                if pb.seg_mean_vs_adv_ratio is not None
+                else None
+            ),
+            "segment_max_down_vs_adv_ratio": (
+                str(pb.seg_max_down_vs_adv_ratio)
+                if pb.seg_max_down_vs_adv_ratio is not None
+                else None
+            ),
+            "insufficient_baseline": pb.insufficient_baseline,
+        }
+        if not pb.insufficient_baseline:
+            max_down = pb.seg_max_down_vs_adv_ratio
+            mean_prev = pb.seg_mean_vs_prev_ratio
+            mean_adv = pb.seg_mean_vs_adv_ratio
+            mean_fail = (
+                mean_prev is not None
+                and mean_adv is not None
+                and mean_prev > pullback_mean_prev_ratio
+                and mean_adv >= pullback_min_adv_ratio
+            )
+            if (max_down is not None and max_down > pullback_max_down_adv_ratio) or mean_fail:
+                codes.append("structural_final_pullback_distribution")
+
+    # 4. Climax-fade: pivot-day volume elevated AND failed retention (upper
+    #    rejection on the day or a later close materially below pivot close).
+    pd = facts.pivot_day
+    if pd is not None:
+        details["pivot_day"] = {
+            "vol_vs_adv_before_pivot": (
+                str(pd.vol_ratio) if pd.vol_ratio is not None else None
+            ),
+            "upper_wick_frac": (
+                str(pd.upper_wick_frac) if pd.upper_wick_frac is not None else None
+            ),
+            "fade_atr": str(pd.fade_atr) if pd.fade_atr is not None else None,
+            "later_sessions": pd.later_sessions,
+        }
+        climax = pd.vol_ratio is not None and pd.vol_ratio > pivot_climax_vol_ratio
+        wick = pd.upper_wick_frac is not None and pd.upper_wick_frac >= Decimal("0.5")
+        fade = pd.fade_atr is not None and pd.fade_atr >= pivot_fade_atr
+        if climax and (wick or fade):
+            codes.append("structural_pivot_climax_fade")
+
+    invalid = bool(codes)
+    details["gate_codes"] = list(codes)
+
+    forming_codes: list[str] = []
+    if not invalid:
+        if facts.raw_count < 2:
+            forming_codes.append("structural_single_contraction")
+        if (
+            facts.base_age_sessions >= 0
+            and facts.base_age_sessions < maturity_floor_sessions
+        ):
+            forming_codes.append("structural_base_immature")
+        details["forming_codes"] = list(forming_codes)
+        if forming_codes:
+            return StructuralGateVerdict(
+                disposition="forming",
+                codes=tuple(forming_codes),
+                details=details,
+            )
+    return StructuralGateVerdict(
+        disposition="invalid" if invalid else "ok",
+        codes=tuple(codes) if invalid else (),
+        details=details,
+    )
+
+
+def structural_facts_to_dict(facts: StructuralFacts) -> dict[str, Any]:
+    """JSON-safe audit payload (Decimals as strings). Used in attempt audit."""
+    return {
+        "as_of_date": facts.as_of_date,
+        "tick_size": str(facts.tick_size),
+        "atr14": str(facts.atr14),
+        "raw_count": facts.raw_count,
+        "base_age_sessions": facts.base_age_sessions,
+        "depths": [str(d) for d in facts.depths],
+        "depth_steps": [
+            {
+                "prev_index": s.prev_index,
+                "curr_index": s.curr_index,
+                "ratio": str(s.ratio) if s.ratio is not None else None,
+                "diff_pp": str(s.diff_pp),
+            }
+            for s in facts.depth_steps
+        ],
+        "lows": [
+            {"index": i, "low_date": d, "low_price": str(p)} for i, d, p in facts.lows
+        ],
+        "lowest_prior_low": (
+            str(facts.lowest_prior_low) if facts.lowest_prior_low is not None else None
+        ),
+        "final_low": str(facts.final_low) if facts.final_low is not None else None,
+        "undercut_gap": str(facts.undercut_gap) if facts.undercut_gap is not None else None,
+        "pivot_price": str(facts.pivot_price) if facts.pivot_price is not None else None,
+        "pivot_date": facts.pivot_date,
+        "last_close": str(facts.last_close) if facts.last_close is not None else None,
+        "close_vs_pivot_pct": (
+            str(facts.close_vs_pivot_pct)
+            if facts.close_vs_pivot_pct is not None
+            else None
+        ),
+        "close_vs_final_low_pct": (
+            str(facts.close_vs_final_low_pct)
+            if facts.close_vs_final_low_pct is not None
+            else None
+        ),
+        "final_pullback": (
+            {
+                "segment_start_date": facts.final_pullback.segment_start_date,
+                "segment_end_date": facts.final_pullback.segment_end_date,
+                "segment_days": facts.final_pullback.segment_days,
+                "down_days": facts.final_pullback.down_days,
+                "segment_mean_vol": (
+                    str(facts.final_pullback.segment_mean_vol)
+                    if facts.final_pullback.segment_mean_vol is not None
+                    else None
+                ),
+                "segment_max_down_vol": (
+                    str(facts.final_pullback.segment_max_down_vol)
+                    if facts.final_pullback.segment_max_down_vol is not None
+                    else None
+                ),
+                "adv20_before_segment": (
+                    str(facts.final_pullback.adv20_before_segment)
+                    if facts.final_pullback.adv20_before_segment is not None
+                    else None
+                ),
+                "prev_window_mean_vol": (
+                    str(facts.final_pullback.prev_window_mean_vol)
+                    if facts.final_pullback.prev_window_mean_vol is not None
+                    else None
+                ),
+                "seg_mean_vs_prev_ratio": (
+                    str(facts.final_pullback.seg_mean_vs_prev_ratio)
+                    if facts.final_pullback.seg_mean_vs_prev_ratio is not None
+                    else None
+                ),
+                "seg_mean_vs_adv_ratio": (
+                    str(facts.final_pullback.seg_mean_vs_adv_ratio)
+                    if facts.final_pullback.seg_mean_vs_adv_ratio is not None
+                    else None
+                ),
+                "seg_max_down_vs_adv_ratio": (
+                    str(facts.final_pullback.seg_max_down_vs_adv_ratio)
+                    if facts.final_pullback.seg_max_down_vs_adv_ratio is not None
+                    else None
+                ),
+                "insufficient_baseline": facts.final_pullback.insufficient_baseline,
+            }
+            if facts.final_pullback is not None
+            else None
+        ),
+        "pivot_day": (
+            {
+                "pivot_date": facts.pivot_day.pivot_date,
+                "vol_vs_adv_before_pivot": (
+                    str(facts.pivot_day.vol_ratio)
+                    if facts.pivot_day.vol_ratio is not None
+                    else None
+                ),
+                "upper_wick_frac": (
+                    str(facts.pivot_day.upper_wick_frac)
+                    if facts.pivot_day.upper_wick_frac is not None
+                    else None
+                ),
+                "pivot_close": (
+                    str(facts.pivot_day.pivot_close)
+                    if facts.pivot_day.pivot_close is not None
+                    else None
+                ),
+                "fade_atr": (
+                    str(facts.pivot_day.fade_atr)
+                    if facts.pivot_day.fade_atr is not None
+                    else None
+                ),
+                "later_sessions": facts.pivot_day.later_sessions,
+            }
+            if facts.pivot_day is not None
+            else None
+        ),
+    }

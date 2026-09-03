@@ -40,3 +40,7 @@ Thumbs.db
 # Expo / Mobile
 .expo/
 *.tsbuildinfo
+
+# P10 audit evaluation evidence (exported deployed data, label sheets, secrets)
+evidence/
+.git/v6_proposal_generator_probe.py

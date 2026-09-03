@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from app.domain.p10_geometry import CandleData, VcpContractionWave
-from app.schemas.proposals import GeminiVcpProposalOutput
+from app.schemas.proposals import GeminiBaseQuality, GeminiVcpProposalOutput
 from app.services.proposal_renderer import RenderedProposalCharts
 from app.services.proposal_generator import (
     GEOMETRY_VERSION,
@@ -35,6 +35,8 @@ def _ai_output(candidate_count: int = 2, **overrides) -> GeminiVcpProposalOutput
             "climax_or_gap_violation": "no",
             "stage2_context": "yes",
         },
+        "pattern_type": "vcp",
+        "primary_reason": "mature_vcp",
         "candidate_assessments": assessments,
         "extra_windows": [],
         "confidence": 72,
@@ -42,6 +44,17 @@ def _ai_output(candidate_count: int = 2, **overrides) -> GeminiVcpProposalOutput
         "evidence_summary": "Two nested contractions with volume dry-up into resistance.",
     }
     payload.update(overrides)
+    classification = payload["classification"]
+    if "pattern_type" not in overrides:
+        payload["pattern_type"] = (
+            "vcp" if classification in {"valid", "forming"} else "high_tight_shelf"
+        )
+    if "primary_reason" not in overrides:
+        payload["primary_reason"] = {
+            "valid": "mature_vcp",
+            "forming": "immature_base",
+            "not_vcp": "flat_or_high_tight_shelf",
+        }[classification]
     return GeminiVcpProposalOutput.model_validate(payload)
 
 
@@ -88,8 +101,8 @@ class TestProposalGenerator(unittest.TestCase):
                 high_date=c2_high.date,
                 high_price=Decimal("124.00"),
                 low_date=c2_low.date,
-                low_price=Decimal("116.00"),
-                depth_pct=Decimal("6.45"),
+                low_price=Decimal("115.00"),
+                depth_pct=Decimal("7.26"),
                 vol_adv20=Decimal("0.70"),
                 vol_adv50=Decimal("0.80"),
             ),
@@ -98,8 +111,8 @@ class TestProposalGenerator(unittest.TestCase):
                 high_date=c3_high.date,
                 high_price=Decimal("119.00"),
                 low_date=c3_low.date,
-                low_price=Decimal("110.00"),
-                depth_pct=Decimal("7.56"),
+                low_price=Decimal("114.00"),
+                depth_pct=Decimal("4.20"),
                 vol_adv20=Decimal("1.00"),
                 vol_adv50=Decimal("1.00"),
             ),
@@ -171,13 +184,13 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(locked["geometry"]["planned_entry"], str(locked["geometry"]["calculation_basis"]["entry_chase"]["planned_entry"]))
         self.assertEqual(len(locked["proposal_hash"]), 64)
         self.assertEqual(locked["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v6")
+        self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v7")
         self.assertEqual(locked["geometry_version"], GEOMETRY_VERSION)
         self.assertEqual(
             locked["entry_trigger_policy_version"],
             "balanced_breakout_v3",
         )
-        self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v5")
+        self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v6")
         self.assertEqual(len(locked["geometry"]["target_slots"]), 3)
 
     def test_proposal_generated_after_d1_deadline_starts_expired(self):
@@ -206,19 +219,24 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertNotIn("pivot_price", result.rejection_details)
 
     def test_generate_trade_proposal_rejects_stage2_no(self):
-        result = self._generate(
-            _ai_output(base_quality={
-                "price_action": "orderly",
-                "climax_or_gap_violation": "no",
-                "stage2_context": "no",
-            }),
+        # Schema v7 rejects contradictory `valid` payloads outright, so the
+        # generator defence is exercised by mutating a validated output the
+        # way no compliant provider packet can.
+        ai = _ai_output()
+        ai.base_quality = GeminiBaseQuality(
+            price_action="orderly",
+            climax_or_gap_violation="no",
+            stage2_context="no",
         )
+        result = self._generate(ai)
         self.assertFalse(result.accepted)
         self.assertEqual(result.rejection_code, "proposal_numeric_gate_failed")
         self.assertIn("stage2_context_no", result.rejection_details["failures"])
 
     def test_generate_trade_proposal_rejects_volume_not_really(self):
-        result = self._generate(_ai_output(volume_dry_up="not_really"))
+        ai = _ai_output()
+        ai.volume_dry_up = "not_really"
+        result = self._generate(ai)
         self.assertFalse(result.accepted)
         self.assertEqual(result.rejection_code, "proposal_numeric_gate_failed")
         self.assertIn("volume_dry_up_not_really", result.rejection_details["failures"])
@@ -352,6 +370,8 @@ class TestParseProposalOpenRouterResponse(unittest.TestCase):
                 "climax_or_gap_violation": "no",
                 "stage2_context": "yes",
             },
+            "pattern_type": "vcp",
+            "primary_reason": "mature_vcp",
             "candidate_assessments": [
                 {"index": 1, "action": "confirm", "note": "First pullback matches."},
                 {"index": 2, "action": "confirm", "note": "Final contraction matches."},

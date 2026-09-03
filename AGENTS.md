@@ -220,10 +220,21 @@ money-path workers into the API process.
   scanner's existing selected top 20 it freezes EOD OHLCV, runs Python
   swing detection on the same 126-session window the chart will show,
   renders a clean 126-session chart (plus a 252-session context chart for
-  humans only), sends Gemini the 126-session image and a short candidate
-  summary, then lets deterministic Python resolve survivors and build or
-  reject an immutable proposal. Forming (`classification=forming`) names
-  are persisted to `p10_forming_patterns` and rechecked after the new
+  humans only), computes StructuralFacts and structural gate dispositions
+  on the RAW geometry first (hard-invalid charts never reach the provider),
+  sends Gemini the 126-session image and the enriched candidate summary,
+  then lets deterministic Python resolve survivors and build or reject an
+  immutable proposal. Candidate dispositions are `proposal`, `forming`
+  (upserted to `p10_forming_patterns` when developing — including
+  `classification=valid` on a structurally immature base; never a permanent
+  rejection), `invalid` (structural breakdown, model-level `not_vcp`, or
+  numeric-gate failure — closes any watch as `broken_down`), `existing`
+  (identical immutable proposal already present; a no-op outcome excluded
+  from rejection counters and accuracy metrics), and `failed`
+  (provider/infrastructure; taxonomy separates `proposal_provider_timeout`,
+  `proposal_provider_upstream_error`, `proposal_provider_rate_limited`,
+  `proposal_invalid_provider_json`, and the retryable schema violation
+  `proposal_schema_inconsistent`). Forming names are rechecked after the new
   shortlist, at most 10 per batch. Every renderer, geometry, prompt,
   input, provider attempt, and policy version is audited. The worker
   evaluates candidates with a 90-second per-attempt timeout and at most one retry.
@@ -300,7 +311,11 @@ Nifty 500 → technical scan → existing selected top 20
 freeze 252 EOD OHLCV + Python swing detection on the 126-session window
         │
         ▼
-clean 126-session chart + short candidate summary (252 context is human-only)
+StructuralFacts on the RAW geometry (base age, low progression, right edge,
+final-pullback + pivot-day volume) → structural gate dispositions
+        │
+        ▼
+clean 126-session chart + enriched short candidate summary (252 context is human-only)
         │
         ▼
 Gemini qualitative audit (no broker/account/money context, no prices)
@@ -316,7 +331,11 @@ Python survivor resolution → prices/targets/template → numeric gates
 The proposal worker never places an order. Gemini output is one audited
 qualitative input; Python is authoritative for survivor windows, proposal
 validity, and every monetary rule. `classification=valid` is necessary but
-not sufficient — independent numeric gates may still produce a non-proposal.
+not sufficient — independent structural and numeric gates may still produce
+a forming watch or an audited non-proposal. Structural gates run on the raw
+Python geometry BEFORE inference (StructuralFacts), so Gemini confirm/merge/
+reject actions can never hide a lower low or rewrite the pullback-volume
+story; hard structural invalidation skips the provider call entirely.
 
 ### 5.1 Standardized proposal charts and geometry
 
@@ -336,6 +355,12 @@ not sufficient — independent numeric gates may still produce a non-proposal.
   depth, and volume vs ADV20/ADV50. Gemini receives that short text summary
   with the 126-session image and may confirm, merge, reject, or add extra
   date-window pointers. It may not rewrite the frozen OHLCV or emit prices.
+  The summary additionally carries StructuralFacts computed by Python from
+  the same freeze: base age in completed sessions, low progression and any
+  undercut, right-edge close position vs the final pivot and final low, and
+  final-pullback/pivot-day volume ratios. Facts are percentages, session
+  counts, and statuses only — never absolute prices — and Gemini must treat
+  them as authoritative rather than re-estimating them from pixels.
 - Missing/stale candles, failed survivor resolution, hash/render mismatch,
   invalid schema, provider failure, numeric-gate failure, or timeout produces
   an audited non-proposal state.
@@ -350,6 +375,11 @@ Gemini must return strict JSON (`additionalProperties: false`) containing only:
 - `volume_dry_up`: `clearly | somewhat | not_really`
 - `base_quality`: `price_action` (`orderly | choppy`),
   `climax_or_gap_violation` (`yes | no`), `stage2_context` (`yes | no`)
+- `pattern_type`: `vcp | high_tight_shelf | flat_base | other` (shape label)
+- `primary_reason`: one of `mature_vcp | immature_base |
+  lower_low_or_breakdown | not_progressively_tightening |
+  flat_or_high_tight_shelf | distribution_or_climax | not_stage2 |
+  choppy_or_other`
 - `candidate_assessments`: exactly one row per Python candidate (`index`,
   `action` `confirm | merge | reject`, optional note). `merge_with_index` is
   **required** when `action=merge` and forbidden otherwise. Merging into a
@@ -365,6 +395,17 @@ target-size, trailing, template, or a free `contraction_count`. Do not
 persist or display provider `reasoning_details`. Python derives `llm_count`
 from survivors after resolution; that derived count is the only LLM-side
 count used by disagreement and template scoring.
+
+**Consistency contract (schema-enforced, retryable):** `valid` is only
+coherent when the same packet also answers `pattern_type=vcp`,
+`primary_reason=mature_vcp`, `progressive_tightening=yes`,
+`stage2_context=yes`, `volume_dry_up != not_really`, and
+`climax_or_gap_violation=no`; `forming` requires `forming_state`; `not_vcp`
+never carries `primary_reason=mature_vcp` or `primary_reason=immature_base`
+(an immature-but-intact base must use forming, never a hard not_vcp). A
+contradictory packet is a
+retryable `proposal_schema_inconsistent` provider error (uses an attempt
+slot), never a proposal.
 
 Survivor resolution (authoritative, before any price):
 
@@ -416,6 +457,35 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
   - Persist which formula landed in which slot.
 - 52-week high is informational (`near_52w_high`, `fresh_high_breakout`,
   `level_to_watch`). It is never a rejection.
+- **Structural gates (policy `p10_structural_gates_v1`, carried by
+  `GEOMETRY_VERSION = p10_python_owned_levels_v6`)** run on the RAW Python
+  geometry before inference and are independent of Gemini survivor
+  resolution. Dispositions: `ok` (proceed), `forming` (watch — never a
+  permanent rejection), `invalid` (audited non-proposal; provider call
+  skipped). Rules with defaults:
+  - **Maturity**: fewer than 15 completed NSE sessions from the first raw
+    pullback high through as-of ⇒ `forming` (`structural_base_immature`).
+  - **Undercut**: latest raw structural low below the minimum earlier raw
+    contraction low by more than `max(one tick, 0.10×ATR14)` ⇒ invalid
+    (`structural_undercut_lower_low`); tolerance swept 0.05–0.20 ATR on
+    development data.
+  - **Tightening**: every consecutive non-noise raw step must satisfy
+    `current/previous ≤ 0.90` **or** `previous − current ≥ 0.75pp` ⇒
+    invalid (`structural_flat_shelf_not_tightening`); dips shallower than
+    the noise floor (1.25%) are excluded from step computation.
+  - **Final-pullback volume**: segment = sessions after the final raw high
+    through its low; down session = `close < previous close`. Invalid
+    (`structural_final_pullback_distribution`) when the max down-session
+    volume exceeds 1.75× the prior-20-day ADV, or the segment mean exceeds
+    1.10× the previous contraction-window mean while also ≥ 0.75× ADV.
+    The pivot day is never part of the segment. The legacy survivor
+    window-mean volume rule is log-only audit evidence now, not a gate.
+  - **Climax-fade**: pivot-day volume > 1.75× its prior ADV **and** failed
+    retention (upper-wick share ≥ 50% or later closes fading ≥ 1.0× ATR14)
+    ⇒ invalid (`structural_pivot_climax_fade`). Elevated pivot volume alone
+    never rejects (healthy institutional accumulation).
+  No structural rule may use a session after as-of; baselines use strictly
+  earlier sessions (unit-tested no-lookahead).
 - Independent numeric gates (any failure → audited non-proposal):
   - `classification = valid`
   - `llm_count` ≥ 2 (survivors, including extras, after merges)
@@ -423,7 +493,6 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
     allowed between consecutive survivors (from snapped data, not Gemini)
   - `stage2_context = yes`
   - `volume_dry_up` in `{clearly, somewhat}`
-  - last-survivor vol/ADV20 ≤ first-survivor vol/ADV20
 - Python selects the template from a versioned rules table
   (`p10_template_score_v1`). Gemini does not pick a template. Static
   template configs still map to maximum approved-risk shares:
@@ -487,12 +556,17 @@ proof. No template may create more than three entry legs.
 `classification=forming` never produces a `trade_proposals` row and never
 computes pivot, entry, stop, or targets. The proposal worker upserts
 `p10_forming_patterns` (`watching | promoted | broken_down | expired`) and
-does not write LTP `watchlists`.
+does not write LTP `watchlists`. Structural immaturity (base younger than
+the maturity floor, or a single raw pullback so far) routes into this watch
+even when Gemini says `valid` — the attempt is recorded `partial` with
+`proposal_structural_forming` and the pattern is rechecked on later EODs
+instead of being killed.
 
 - `promoted` — a later run produces `classification=valid` that passes
-  numeric gates and inserts a `trade_proposals` row.
+  structural and numeric gates and inserts a `trade_proposals` row.
 - `broken_down` — Gemini returns `forming_state=breaking_down` or
-  `classification=not_vcp`.
+  `classification=not_vcp`, or a structural gate hard-invalidates the
+  pattern (undercut, distribution, climax-fade, flat shelf).
 - `expired` — 10 completed NSE sessions have elapsed since
   `first_seen_as_of` without promotion, or the instrument is no longer in
   the Nifty 500 screened universe at that EOD. Expired rows are terminal;
@@ -1016,6 +1090,18 @@ the phase table above is authoritative going forward.
   25/25/25/25 apportionment, stop ratchets, daily-loss accounting, P9
   market/sector classification, and the consecutive-stop circuit breaker.
   Frozen proposal T1–T3 are unchanged by a chase fill.
+- Structural gates: pre-inference dispositions (`ok`/`forming`/`invalid`) on
+  RAW geometry; hard invalidation skips the provider call; forming is never
+  a permanent rejection and routes to the watch; no gate or baseline uses a
+  session after as-of (no-lookahead); the pivot day is never inside the
+  final-pullback segment; climax requires elevated volume AND failed
+  retention; flat-shelf step rule (ratio ≤ 0.90 or step ≥ 0.75pp) rejects
+  near-equal dips.
+- Schema consistency: contradictory `valid`/`forming`/`not_vcp` packets are
+  retryable `proposal_schema_inconsistent` errors; provider taxonomy mapping
+  (timeout/upstream/rate-limited/invalid-JSON); `existing` is a no-op
+  outcome excluded from rejected counts; run ledger categories derived from
+  attempt error types.
 - Forming watch: no `trade_proposals` row and no geometry prices; expiry at
   10 sessions or universe drop; batch cap of 10 rechecks.
 - Five-minute replay: first-15-minute exclusion, robust profile with strict

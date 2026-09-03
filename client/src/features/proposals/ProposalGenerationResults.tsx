@@ -62,7 +62,9 @@ export function ProposalGenerationResults({ automationRunId }: ProposalGeneratio
   const existingCount = data?.results.filter(
     (attempt) => attempt.error_type === "proposal_already_exists",
   ).length ?? 0
-  const rejectedCount = Math.max(0, (data?.proposals_rejected ?? 0) - existingCount)
+  // Server-side run counters already exclude `existing` outcomes (worker
+  // returns a genuine no-op outcome); existing rows are counted separately.
+  const rejectedCount = Math.max(0, data?.proposals_rejected ?? 0)
 
   return (
     <section className="mx-4 mt-3 overflow-hidden rounded-lg border border-border/70 bg-card/45 font-mono text-xs">

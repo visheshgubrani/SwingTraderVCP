@@ -22,16 +22,21 @@ from pydantic import ValidationError
 from app.config import settings
 from app.domain.p10_geometry import (
     CandleData,
+    StructuralFacts,
+    StructuralGateVerdict,
     SurvivingContraction,
     VcpContractionWave,
     compute_atr14,
+    compute_structural_facts,
     construct_python_owned_levels,
     DEFAULT_TICK_SIZE,
     derive_chart_geometry,
     depths_non_increasing,
+    evaluate_structural_gates,
     format_candidate_summary,
     ProposalGeometry,
     resolve_surviving_contractions,
+    structural_facts_to_dict,
 )
 from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
 from app.domain.p10_triggers import (
@@ -55,12 +60,49 @@ from app.services.proposal_renderer import RenderedProposalCharts
 
 logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
-PROMPT_VERSION = "p10_vcp_proposal_v6"
-SCHEMA_VERSION = "gemini_vcp_proposal_output_v6"
-GEOMETRY_VERSION = "p10_python_owned_levels_v5"
+PROMPT_VERSION = "p10_vcp_proposal_v7"
+SCHEMA_VERSION = "gemini_vcp_proposal_output_v7"
+GEOMETRY_VERSION = "p10_python_owned_levels_v6"
 ENTRY_TRIGGER_POLICY_VERSION = BALANCED_BREAKOUT_POLICY_V3
 PROPOSAL_INVALID_PROVIDER_JSON = "proposal_invalid_provider_json"
+PROPOSAL_STRUCTURAL_FORMING = "proposal_structural_forming"
+PROPOSAL_STRUCTURAL_INVALID = "proposal_structural_invalid"
+PROPOSAL_SCHEMA_INCONSISTENT = "proposal_schema_inconsistent"
+PROPOSAL_PROVIDER_TIMEOUT = "proposal_provider_timeout"
+PROPOSAL_PROVIDER_UPSTREAM_ERROR = "proposal_provider_upstream_error"
+PROPOSAL_PROVIDER_RATE_LIMITED = "proposal_provider_rate_limited"
 _PROVIDER_PAYLOAD_SNIPPET_LIMIT = 4000
+
+
+def _classify_provider_failure(
+    http_status: int | None,
+    error_code: Any | None,
+    error_message: str | None = None,
+) -> str:
+    """Split upstream failures into an actionable error taxonomy."""
+    code_s = str(error_code or "").lower()
+    msg_s = (error_message or "").lower()
+    if http_status == 429 or "429" in code_s or "rate" in code_s or "quota" in msg_s:
+        return PROPOSAL_PROVIDER_RATE_LIMITED
+    if (
+        http_status == 504
+        or "504" in code_s
+        or "timeout" in code_s
+        or "aborted" in code_s
+        or "deadline" in msg_s
+    ):
+        return PROPOSAL_PROVIDER_TIMEOUT
+    if (
+        (http_status is not None and http_status >= 500)
+        or "5" + "0" + "2" in code_s
+        or "5" + "0" + "3" in code_s
+        or "upstream" in code_s
+        or "origin" in code_s
+        or "unavailable" in msg_s
+        or "overloaded" in msg_s
+    ):
+        return PROPOSAL_PROVIDER_UPSTREAM_ERROR
+    return PROPOSAL_INVALID_PROVIDER_JSON
 
 
 class ProposalProviderError(RuntimeError):
@@ -81,38 +123,41 @@ class ProposalProviderError(RuntimeError):
         self.details = details or {}
 
 
-GEMINI_PROPOSAL_SYSTEM_PROMPT = """You are a technical analyst trained in Mark Minervini's Volatility Contraction Pattern (VCP) methodology.
+GEMINI_PROPOSAL_SYSTEM_PROMPT = """You are a strict technical analyst applying Mark Minervini's Volatility Contraction Pattern (VCP) methodology to Indian equities.
 
-You will be shown ONE standardized 126-session stock-chart image (log price, volume pane, EMA21 and SMA50/150/200) plus a short numbered list of Python swing-detector candidate contractions. Those candidates already have exact dates, percent depths, and volume-vs-average ratios computed from real OHLCV. Do not re-estimate those numbers from pixels.
+You audit ONE standardized 126-session stock chart (log price, volume pane, EMA21/SMA50/150/200) together with short deterministic text: a numbered list of Python swing-detector hypotheses and Python-computed structure facts. Every number in that text is computed from real OHLCV by Python — never re-estimate depths, dates, session counts, or volume ratios from pixels.
 
-Your job is to audit whether the visual pattern supports those candidates, and to add qualitative judgments an algorithm cannot make.
+The numbered candidates are algorithmic hypotheses, NOT proven contractions. Your job is the qualitative audit an algorithm cannot do: judge whether the visual pattern forms a completed, tradeable VCP and which hypotheses are real contractions.
 
-Audit checklist:
+1. Classification — disqualifier first. Check hard disqualifiers before anything else; ANY one of them means not_vcp (and primary_reason names it):
+   - latest pullback low undercuts the prior pullback floor (lower lows), or price closed through the final pullback low / the base is breaking down with closes sagging near the daily low;
+   - the final pullback printed expanding volume (distribution; see the final-pullback facts);
+   - the pivot day printed a volume climax that failed to hold (climax + fade facts);
+   - no Stage 2 uptrend context (the move is a downtrend bounce or the stock is below its key averages);
+   - price action is wide, choppy, or swinging in widening ranges.
+   Choose forming (forming_state=developing) when the structure is intact but immature: base younger than roughly 3 weeks (use the stated base-age session count; fewer than ~15 completed sessions is developing), only 1-2 pullbacks so far, price still mid-base below its pivot, or the right edge is still searching for a floor. Choose forming_state=breaking_down when a developing base is now undercutting or failing.
+   Choose valid ONLY when ALL of these hold: at least two visually genuine, discrete contractions; a multi-week base (use the stated session count); lows rising or equal (no undercut); each subsequent dip materially shallower than the previous one; volume dried up through the final pullback (no expanding pullback, no failed climax at the pivot); price coiling near the right edge at the final pivot.
+   valid is the exception, not the default. When borderline or ambiguous, choose forming.
 
-1. Classification
-   - valid: a completed VCP with the last contraction in place (pivot identifiable on the chart).
-   - forming: 1–2 pullbacks so far and the pattern still looks like it is developing (no real pivot yet) OR still tightening but incomplete.
-   - not_vcp: not a VCP (breakdown, distribution, chop, no Stage 2 context, widening swings).
+2. Pattern shape (pattern_type and primary_reason). A high-tight shelf or flat base (successive pullbacks of nearly identical depth, price oscillating between a flat ceiling and floor) is NOT a valid VCP here, regardless of how tradeable it may be in momentum terms. Name it pattern_type=high_tight_shelf or flat_base with primary_reason=flat_or_high_tight_shelf or not_progressively_tightening, and classify not_vcp or forming according to the rules above. A mature, textbook contraction sequence is pattern_type=vcp with primary_reason=mature_vcp and classification=valid.
 
-2. For each numbered Python candidate, return exactly one assessment:
-   - confirm: the visual pullback matches that candidate window.
-   - merge: two (or more) candidates are the same contraction; set merge_with_index to the sibling index.
-   - reject: that candidate is noise, not a real contraction.
+3. Candidate audit. For every numbered hypothesis return exactly one assessment row:
+   - confirm: a genuine discrete contraction pullback (separated from neighbours by roughly 3-5+ sessions and a visually meaningful depth);
+   - merge: two hypotheses describe the same contraction; merge_with_index names the sibling index;
+   - reject: the dip is noise — a micro-wiggle inside one larger pullback, a single-day flush, or not part of the base structure.
+   Do not rubber-stamp the list; shortlists contain noise by design.
 
-3. extra_windows: date ranges (YYYY-MM-DD) only, if you see a contraction Python missed. No prices.
+4. extra_windows: only add a real contraction you can see on the chart that the detector missed (date ranges only, no prices).
 
-4. Progressive tightening: yes only if each surviving contraction looks shallower than the last.
+5. Volume: read the volume pane AND the deterministic facts together. volume_dry_up=clearly only when pullback volume is visibly quiet against recent averages; somewhat when partially dried; not_really when the last pullback prints heavy volume.
 
-5. Volume dry-up: clearly / somewhat / not_really. Use the chart AND the volume ratios in the candidate list. Do not invent percentages.
+6. Consistency (mandatory): your answers must agree with each other. classification=valid is impossible when pattern_type is not vcp, primary_reason is not mature_vcp, progressive_tightening=no, volume_dry_up=not_really, stage2_context=no, or climax_or_gap_violation=yes. If the chart supports valid, every field must say so; otherwise classify forming/not_vcp instead of contradicting yourself.
 
-6. Base quality:
-   - price_action: orderly vs choppy
-   - climax_or_gap_violation: climactic volume spikes or gap days that violate the pattern
-   - stage2_context: sitting inside a prior uptrend, not a downtrend bounce
+7. Confidence calibration: report confidence 0-100 for how clearly the chart supports your classification. 85+ only for unambiguous textbook patterns; 50-70 for borderline calls; below 50 means you should be choosing forming or not_vcp. Confidence is a display field only.
 
-7. confidence: integer 0–100 for how clearly the chart supports your classification. This is a display field only.
+Evidence discipline: your evidence_summary and red_flags must be specific to this chart's right edge, contractions, and volume facts. Do not reuse stock phrases.
 
-Do NOT output a pivot, stop, target, entry, quantity, risk, template, or a free contraction_count. Python derives counts from your confirm/merge/reject/extra actions. Return only the strict JSON schema.
+Do NOT output a pivot, stop, target, entry, quantity, risk, template, absolute price level, or a free contraction_count — Python derives counts from your confirm/merge/reject/extra actions. Return only the strict JSON schema.
 """
 
 
@@ -142,6 +187,44 @@ def _rejected(
         rejection_message=message,
         rejection_details=details,
     )
+
+
+_STRUCTURAL_CODE_PHRASES = {
+    "structural_undercut_lower_low": "lower low: the latest pullback low undercuts the prior pullback floor",
+    "structural_flat_shelf_not_tightening": (
+        "pullbacks are not progressively shallower (flat / high-tight shelf shape)"
+    ),
+    "structural_final_pullback_distribution": (
+        "the final pullback printed expanding volume (distribution)"
+    ),
+    "structural_pivot_climax_fade": (
+        "the pivot day printed a volume climax that failed to hold"
+    ),
+    "structural_base_immature": "the base is immature (younger than the maturity floor)",
+    "structural_single_contraction": "only a single pullback has formed so far",
+}
+
+
+def structural_rejection_message(
+    facts: StructuralFacts, verdict: StructuralGateVerdict
+) -> str:
+    """Human-readable rejection reason built from deterministic gate codes."""
+    parts: list[str] = []
+    for code in verdict.codes:
+        parts.append(_STRUCTURAL_CODE_PHRASES.get(code, code.replace("_", " ")))
+    if not parts and verdict.disposition == "forming":
+        if facts.base_age_sessions < 15 and facts.base_age_sessions >= 0:
+            parts.append(
+                f"base has only {facts.base_age_sessions} completed sessions "
+                "(<15 maturity floor) — still developing"
+            )
+        if facts.raw_count < 2:
+            parts.append("only one raw pullback so far — still developing")
+    if verdict.disposition == "forming":
+        head = "Deterministic structure is still developing (forming): "
+    else:
+        head = "Deterministic structure is invalid (not a VCP): "
+    return head + "; ".join(parts) + "."
 
 
 
@@ -312,6 +395,8 @@ def generate_trade_proposal_from_analysis(
     holidays: Collection[dt.date] = (),
     generated_at: dt.datetime | None = None,
     python_candidates: Sequence[VcpContractionWave] | None = None,
+    structural_facts: StructuralFacts | None = None,
+    structural_verdict: StructuralGateVerdict | None = None,
 ) -> ProposalBuildResult:
     """Combine Gemini audit + frozen candles into an immutable proposal, or a gated non-proposal."""
     if ai_output.classification == "forming":
@@ -350,6 +435,33 @@ def generate_trade_proposal_from_analysis(
             "Python swing detection found no contraction candidates in the 126-session window.",
         )
 
+    facts = (
+        structural_facts
+        if structural_facts is not None
+        else compute_structural_facts(candles, candidates, tick_size=tick_size)
+    )
+    verdict = (
+        structural_verdict
+        if structural_verdict is not None
+        else evaluate_structural_gates(facts)
+    )
+    if verdict.disposition != "ok":
+        code = (
+            PROPOSAL_STRUCTURAL_FORMING
+            if verdict.disposition == "forming"
+            else PROPOSAL_STRUCTURAL_INVALID
+        )
+        return _rejected(
+            code,
+            structural_rejection_message(facts, verdict),
+            details={
+                "gate_disposition": verdict.disposition,
+                "gate_codes": list(verdict.codes),
+                "gate_details": verdict.details,
+                "structural_facts": structural_facts_to_dict(facts),
+            },
+        )
+
     resolution = resolve_surviving_contractions(
         candidates=candidates,
         assessments=ai_output.candidate_assessments,
@@ -374,8 +486,16 @@ def generate_trade_proposal_from_analysis(
         numeric_failures.append("volume_dry_up_not_really")
     first_vol = resolution.survivors[0].vol_adv20 if resolution.survivors else None
     last_vol = resolution.survivors[-1].vol_adv20 if resolution.survivors else None
-    if first_vol is not None and last_vol is not None and last_vol > first_vol:
-        numeric_failures.append("volume_ratio_not_drying")
+    survivor_volume_audit = {
+        "first_survivor_vol_adv20": (
+            str(first_vol) if first_vol is not None else None
+        ),
+        "last_survivor_vol_adv20": str(last_vol) if last_vol is not None else None,
+        "note": (
+            "Legacy window-mean volume-ratio rule removed from hard gates; "
+            "structural final-pullback gate owns distribution rejection."
+        ),
+    }
 
     if numeric_failures:
         return _rejected(
@@ -525,6 +645,9 @@ def generate_trade_proposal_from_analysis(
             "template_reason": score.reason,
             "calculation_basis": calc_basis,
             "tick_size": str(tick_size),
+            "structural_facts": structural_facts_to_dict(facts),
+            "structural_gate_details": verdict.details,
+            "survivor_volume_audit": survivor_volume_audit,
             **_serialize_rr_audit(geom),
         },
         "context_image_hash": rendered_charts.context_hash,
@@ -540,11 +663,15 @@ def _proposal_user_text(*, tick_size: Decimal, candidate_summary: str) -> str:
         "Audit the 126-session chart for a Volatility Contraction Pattern (VCP). "
         f"Instrument tick size is {tick_size} (for your orientation only — do not emit prices). "
         "IMAGE 1 is the 126-session window (log price, volume, EMA21/SMA50/150/200). "
-        "Python already detected these candidate contractions from real OHLCV:\n"
+        "Below are the numbered Python swing-detector hypotheses (algorithmic "
+        "hypotheses, not proven contractions) and the deterministic structure "
+        "facts computed from the same frozen OHLCV. Treat the facts as "
+        "authoritative; they cannot be argued with pixels.\n"
         f"{candidate_summary}\n"
         "Confirm, merge, or reject each numbered candidate. Add extra_windows only "
-        "for contractions the algorithm missed. Do not invent prices, stops, targets, "
-        "or a contraction_count. Return only the strict structured opinion."
+        "for contractions the algorithm missed. Return classification, pattern_type, "
+        "primary_reason and every other field from the strict schema. Do not invent "
+        "prices, stops, targets, or a contraction_count."
     )
 
 
@@ -715,6 +842,9 @@ async def call_gemini_vision_for_proposal(
                 err_code = data["error"].get("code", resp.status_code)
                 raise ProposalProviderError(
                     f"OpenRouter HTTP {resp.status_code} provider error: {err_msg} (code={err_code})",
+                    error_type=_classify_provider_failure(
+                        resp.status_code, err_code, err_msg
+                    ),
                     details={
                         "http_status": resp.status_code,
                         "error_code": err_code,
@@ -781,6 +911,7 @@ def _extract_proposal_json(
         err_code = choice["error"].get("code")
         raise ProposalProviderError(
             f"OpenRouter upstream provider error: {err_msg} (code={err_code})",
+            error_type=_classify_provider_failure(None, err_code, err_msg),
             details={"error_code": err_code, "provider_error": dict(choice["error"])},
         )
     if isinstance(choice, Mapping) and "classification" in choice and "message" not in choice:
@@ -811,6 +942,7 @@ def parse_proposal_openrouter_response(
             err_code = data["error"].get("code")
             raise ProposalProviderError(
                 f"OpenRouter upstream provider error: {err_msg} (code={err_code})",
+                error_type=_classify_provider_failure(None, err_code, err_msg),
                 details={
                     "error_code": err_code,
                     "provider_error": dict(data["error"]),
@@ -827,11 +959,19 @@ def parse_proposal_openrouter_response(
         return output, usage, cost, request_id
     except ProposalProviderError:
         raise
+    except ValidationError as exc:
+        raise ProposalProviderError(
+            f"Gemini output violates the schema or consistency contract: {exc}",
+            error_type=PROPOSAL_SCHEMA_INCONSISTENT,
+            details={
+                "payload_type": type(original).__name__,
+                "payload": _provider_payload_snippet(original),
+            },
+        ) from exc
     except (
         ValueError,
         TypeError,
         KeyError,
-        ValidationError,
         json.JSONDecodeError,
         AttributeError,
     ) as exc:

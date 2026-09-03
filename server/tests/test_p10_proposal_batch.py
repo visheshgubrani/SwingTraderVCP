@@ -1,6 +1,7 @@
 import datetime as dt
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -688,8 +689,39 @@ class TestProposalAutoArming(unittest.IsolatedAsyncioTestCase):
             rejection_details={"subreason": "chase_limit_exceeded"},
         )
 
+        from decimal import Decimal
+        from app.domain.p10_geometry import StructuralFacts, StructuralGateVerdict
+
+        neutral_facts = StructuralFacts(
+            as_of_date="2026-08-18",
+            tick_size=Decimal("0.05"),
+            atr14=Decimal("2.0"),
+            raw_count=2,
+            base_age_sessions=60,
+            depths=(Decimal("8.0"), Decimal("4.0")),
+            depth_steps=(),
+            eligible_wave_indices=(1, 2),
+            noise_wave_indices=(),
+            lows=((1, "2026-06-01", Decimal("90")), (2, "2026-07-01", Decimal("95"))),
+            lowest_prior_low=Decimal("90"),
+            final_low=Decimal("95"),
+            undercut_gap=Decimal("0"),
+            pivot_price=Decimal("100"),
+            pivot_date="2026-07-02",
+            last_close=Decimal("96"),
+            close_vs_pivot_pct=Decimal("-4.0"),
+            close_vs_final_low_pct=Decimal("1.0"),
+        )
         with (
             patch("app.workers.proposal_worker.async_session", session),
+            patch(
+                "app.workers.proposal_worker.compute_structural_facts",
+                return_value=neutral_facts,
+            ),
+            patch(
+                "app.workers.proposal_worker.evaluate_structural_gates",
+                return_value=StructuralGateVerdict(disposition="ok", codes=(), details={}),
+            ),
             patch("app.workers.proposal_worker.call_gemini_vision_for_proposal", new=AsyncMock(return_value=(ai_valid_output, {}, 0.01, "req-123"))),
             patch("app.workers.proposal_worker.generate_trade_proposal_from_analysis", return_value=rejected_build),
             patch("app.workers.proposal_worker.close_forming_watch", new=AsyncMock()) as mock_close_watch,
@@ -707,3 +739,234 @@ class TestProposalAutoArming(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_close_watch.await_args.kwargs["status"], "broken_down")
 
 
+
+
+class TestStructuralDispositions(unittest.IsolatedAsyncioTestCase):
+    """Worker lifecycle under the structural-first disposition model."""
+
+    def _session(self) -> Any:
+        now = dt.datetime.now(dt.timezone.utc)
+
+        class MockSession:
+            def __init__(self):
+                self.statements = []
+
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            async def execute(self, statement, params=None):
+                sql = str(statement)
+                self.statements.append((sql, params or {}))
+                if "SELECT open_price" in sql:
+                    return FakeResult(rows=[{
+                        "open_price": 100, "high_price": 105, "low_price": 95,
+                        "close_price": 102, "volume": 100000,
+                        "candle_date": dt.date(2026, 8, 18) - dt.timedelta(days=i),
+                    } for i in range(252)])
+                if "SELECT id, version, risk_per_trade_pct" in sql:
+                    return FakeResult(rows=[{
+                        "id": uuid4(), "version": 1, "risk_per_trade_pct": "0.01",
+                        "deployable_capital_override": "1000000",
+                    }])
+                if "SELECT stage FROM p10_rollout_state" in sql:
+                    return FakeResult(rows=[{"stage": "paper"}])
+                if "INSERT INTO proposal_attempts" in sql:
+                    return FakeResult(scalar=uuid4())
+                return FakeResult()
+
+            async def commit(self):
+                pass
+
+        return MockSession()
+
+    def _candidate(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            screening_result_id=uuid4(),
+            instrument_id=uuid4(),
+            symbol="NSE:ABB-EQ",
+            tick_size=0.05,
+            lot_size=1,
+            result_rank=1,
+            technical_score=85,
+            as_of_date=dt.date(2026, 8, 18),
+            scan_completed_at=dt.datetime.now(dt.timezone.utc),
+        )
+
+    def _neutral_facts(self):
+        from decimal import Decimal
+        from app.domain.p10_geometry import StructuralFacts
+
+        return StructuralFacts(
+            as_of_date="2026-08-18",
+            tick_size=Decimal("0.05"),
+            atr14=Decimal("2.0"),
+            raw_count=2,
+            base_age_sessions=60,
+            depths=(Decimal("8.0"), Decimal("4.0")),
+            lows=((1, "2026-06-01", Decimal("90")), (2, "2026-07-01", Decimal("95"))),
+            lowest_prior_low=Decimal("90"),
+            final_low=Decimal("95"),
+            undercut_gap=Decimal("0"),
+            pivot_price=Decimal("100"),
+            pivot_date="2026-07-02",
+        )
+
+    def _ai_output(self, classification: str = "valid") -> SimpleNamespace:
+        return SimpleNamespace(
+            classification=classification,
+            forming_state=None,
+            confidence=80,
+            volume_dry_up="clearly",
+            progressive_tightening="yes",
+            model_dump=lambda mode="json": {
+                "classification": classification,
+                "pattern_type": "vcp",
+                "primary_reason": "mature_vcp",
+            },
+        )
+
+    async def test_structural_forming_with_gemini_valid_routes_to_watch(self):
+        from decimal import Decimal
+        from app.domain.p10_geometry import StructuralGateVerdict
+
+        session = self._session()
+        verdict = StructuralGateVerdict(
+            disposition="forming",
+            codes=("structural_base_immature",),
+            details={"base_age_sessions": 12, "maturity_floor_sessions": 15},
+        )
+        with (
+            patch("app.workers.proposal_worker.async_session", session),
+            patch(
+                "app.workers.proposal_worker.compute_structural_facts",
+                return_value=self._neutral_facts(),
+            ),
+            patch(
+                "app.workers.proposal_worker.evaluate_structural_gates",
+                return_value=verdict,
+            ),
+            patch(
+                "app.workers.proposal_worker.call_gemini_vision_for_proposal",
+                new=AsyncMock(return_value=(self._ai_output(), {}, 0.01, "req-1")),
+            ),
+            patch(
+                "app.workers.proposal_worker.generate_trade_proposal_from_analysis",
+                new=AsyncMock(),
+            ) as mock_build,
+        ):
+            from app.workers.proposal_worker import process_proposal_candidate
+
+            outcome = await process_proposal_candidate(
+                automation_run_id=str(uuid4()),
+                candidate=self._candidate(),
+                as_of_date=dt.date(2026, 8, 18),
+                deadline=dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24),
+            )
+        self.assertEqual(outcome, "uncertain")
+        mock_build.assert_not_awaited()
+        inserts = [
+            sql for sql, _ in session.statements if "INSERT INTO p10_forming_patterns" in sql
+        ]
+        self.assertEqual(len(inserts), 1)
+        statuses = [
+            params.get("status") for sql, params in session.statements
+            if "UPDATE p10_forming_patterns" in sql
+        ]
+        self.assertNotIn("broken_down", statuses)
+
+    async def test_structural_invalid_skips_inference_and_closes_watch(self):
+        from app.domain.p10_geometry import StructuralGateVerdict
+
+        session = self._session()
+        verdict = StructuralGateVerdict(
+            disposition="invalid",
+            codes=("structural_undercut_lower_low",),
+            details={"undercut_gap": "5.45"},
+        )
+        with (
+            patch("app.workers.proposal_worker.async_session", session),
+            patch(
+                "app.workers.proposal_worker.compute_structural_facts",
+                return_value=self._neutral_facts(),
+            ),
+            patch(
+                "app.workers.proposal_worker.evaluate_structural_gates",
+                return_value=verdict,
+            ),
+            patch(
+                "app.workers.proposal_worker.call_gemini_vision_for_proposal",
+                new=AsyncMock(),
+            ) as mock_gemini,
+        ):
+            from app.workers.proposal_worker import process_proposal_candidate
+
+            outcome = await process_proposal_candidate(
+                automation_run_id=str(uuid4()),
+                candidate=self._candidate(),
+                as_of_date=dt.date(2026, 8, 18),
+                deadline=dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24),
+            )
+        self.assertEqual(outcome, "rejected")
+        mock_gemini.assert_not_awaited()
+        closes = [
+            params.get("status") for sql, params in session.statements
+            if "UPDATE p10_forming_patterns" in sql
+        ]
+        self.assertEqual(closes, ["broken_down"])
+
+    async def test_already_exists_returns_existing_noop_outcome(self):
+        from app.domain.p10_geometry import StructuralGateVerdict
+        from app.workers.proposal_worker import ProposalPersistenceResult
+        from app.services.proposal_generator import ProposalBuildResult
+
+        session = self._session()
+        proposal = {"symbol": "NSE:ABB-EQ"}
+        with (
+            patch("app.workers.proposal_worker.async_session", session),
+            patch(
+                "app.workers.proposal_worker.compute_structural_facts",
+                return_value=self._neutral_facts(),
+            ),
+            patch(
+                "app.workers.proposal_worker.evaluate_structural_gates",
+                return_value=StructuralGateVerdict(disposition="ok", codes=(), details={}),
+            ),
+            patch(
+                "app.workers.proposal_worker.call_gemini_vision_for_proposal",
+                new=AsyncMock(return_value=(self._ai_output(), {}, 0.01, "req-1")),
+            ),
+            patch(
+                "app.workers.proposal_worker.generate_trade_proposal_from_analysis",
+                return_value=ProposalBuildResult(proposal=proposal),
+            ),
+            patch(
+                "app.workers.proposal_worker._persist_proposal",
+                new=AsyncMock(
+                    return_value=ProposalPersistenceResult(
+                        proposal_id="existing-proposal-id",
+                        created=False,
+                        status="approved",
+                    )
+                ),
+            ),
+        ):
+            from app.workers.proposal_worker import process_proposal_candidate
+
+            outcome = await process_proposal_candidate(
+                automation_run_id=str(uuid4()),
+                candidate=self._candidate(),
+                as_of_date=dt.date(2026, 8, 18),
+                deadline=dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24),
+            )
+        self.assertEqual(outcome, "existing")
+        promoted = [
+            params.get("status") for sql, params in session.statements
+            if "UPDATE p10_forming_patterns" in sql
+        ]
+        self.assertEqual(promoted, ["promoted"])

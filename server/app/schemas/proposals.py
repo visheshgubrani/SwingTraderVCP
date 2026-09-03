@@ -19,6 +19,17 @@ YesNoType = Literal["yes", "no"]
 VolumeDryUpType = Literal["clearly", "somewhat", "not_really"]
 PriceActionType = Literal["orderly", "choppy"]
 CandidateActionType = Literal["confirm", "merge", "reject"]
+PatternType = Literal["vcp", "high_tight_shelf", "flat_base", "other"]
+PrimaryReasonType = Literal[
+    "mature_vcp",
+    "immature_base",
+    "lower_low_or_breakdown",
+    "not_progressively_tightening",
+    "flat_or_high_tight_shelf",
+    "distribution_or_climax",
+    "not_stage2",
+    "choppy_or_other",
+]
 DecisionType = Literal["approved", "rejected"]
 ProposalStatusType = Literal["pending_approval", "approved", "rejected", "expired_unapproved"]
 ProposalAttemptStatusType = Literal[
@@ -91,6 +102,8 @@ class GeminiVcpProposalOutput(BaseModel):
     progressive_tightening: YesNoType
     volume_dry_up: VolumeDryUpType
     base_quality: GeminiBaseQuality
+    pattern_type: PatternType
+    primary_reason: PrimaryReasonType
     candidate_assessments: list[GeminiCandidateAssessment] = Field(
         min_length=1,
         max_length=6,
@@ -103,11 +116,45 @@ class GeminiVcpProposalOutput(BaseModel):
     evidence_summary: str = Field(min_length=1, max_length=600)
 
     @model_validator(mode="after")
-    def validate_forming_state(self) -> "GeminiVcpProposalOutput":
+    def validate_consistency(self) -> "GeminiVcpProposalOutput":
+        """Schema-consistency contract for classification.
+
+        `valid` is only coherent when every supporting flag agrees; a
+        contradictory packet is treated as a retryable schema-inconsistent
+        provider output (never a proposal).
+        """
         if self.classification == "forming" and self.forming_state is None:
             raise ValueError("forming_state is required when classification=forming")
         if self.classification != "forming" and self.forming_state is not None:
             raise ValueError("forming_state is forbidden unless classification=forming")
+        if self.classification == "valid":
+            problems: list[str] = []
+            if self.pattern_type != "vcp":
+                problems.append(f"valid requires pattern_type='vcp', got {self.pattern_type!r}")
+            if self.primary_reason != "mature_vcp":
+                problems.append(
+                    f"valid requires primary_reason='mature_vcp', got {self.primary_reason!r}"
+                )
+            if self.progressive_tightening != "yes":
+                problems.append("valid requires progressive_tightening='yes'")
+            if self.base_quality.stage2_context != "yes":
+                problems.append("valid requires base_quality.stage2_context='yes'")
+            if self.volume_dry_up == "not_really":
+                problems.append("valid forbids volume_dry_up='not_really'")
+            if self.base_quality.climax_or_gap_violation == "yes":
+                problems.append("valid forbids base_quality.climax_or_gap_violation='yes'")
+            if problems:
+                raise ValueError("; ".join(problems))
+        else:
+            if self.classification == "not_vcp" and self.primary_reason == "mature_vcp":
+                raise ValueError("not_vcp cannot carry primary_reason='mature_vcp'")
+            if self.classification == "not_vcp" and self.primary_reason == "immature_base":
+                # An immature-but-intact base belongs in the forming watch;
+                # a hard not_vcp must name a real invalidation reason.
+                raise ValueError(
+                    "not_vcp cannot carry primary_reason='immature_base' "
+                    "(use forming/forming_state instead)"
+                )
         return self
 
 

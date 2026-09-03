@@ -86,10 +86,10 @@ def now() -> dt.datetime:
 
 def watchlist_row(
     *,
-    name: str = "Core",
-    description: str | None = "Default watchlist",
+    name: str = "Indices",
+    description: str | None = "Key market & sectoral indices",
     is_active: bool = True,
-    item_count: int = 0,
+    item_count: int = 19,
 ) -> dict:
     return {
         "id": uuid4(),
@@ -118,20 +118,22 @@ class WatchlistListTests(unittest.IsolatedAsyncioTestCase):
         db = make_db(
             Result(rows=[]),  # first listing: empty
             Result(rowcount=1),  # INSERT ... WHERE NOT EXISTS
-            Result(rows=[watchlist_row()]),  # listing after auto-create
+            Result(rows=[watchlist_row(item_count=0)]),  # listing after auto-create
+            Result(rowcount=19),  # seed indices
+            Result(rows=[watchlist_row(item_count=19)]),  # listing after seed
         )
         watchlists = await service.list_watchlists(db, auto_create_default=True)
 
         self.assertEqual(len(watchlists), 1)
         view = watchlists[0]
-        self.assertEqual(view.name, "Core")
-        self.assertEqual(view.description, "Default watchlist")
+        self.assertEqual(view.name, "Indices")
+        self.assertEqual(view.description, "Key market & sectoral indices")
         self.assertTrue(view.is_active)
-        self.assertEqual(view.item_count, 0)
+        self.assertEqual(view.item_count, 19)
         self.assertIn("INSERT INTO watchlists", sql_at(db, 1))
         insert_params = db.execute.await_args_list[1].args[1]
-        self.assertEqual(insert_params["name"], "Core")
-        self.assertEqual(insert_params["description"], "Default watchlist")
+        self.assertEqual(insert_params["name"], "Indices")
+        self.assertEqual(insert_params["description"], "Key market & sectoral indices")
 
     async def test_no_auto_create_when_watchlists_exist(self) -> None:
         db = make_db(Result(rows=[watchlist_row()]))
@@ -471,7 +473,9 @@ class GetWatchlistsRouterTests(unittest.IsolatedAsyncioTestCase):
         db = make_db(
             Result(rows=[]),
             Result(rowcount=1),
-            Result(rows=[watchlist_row()]),
+            Result(rows=[watchlist_row(item_count=0)]),
+            Result(rowcount=19),
+            Result(rows=[watchlist_row(item_count=19)]),
         )
         views = await get_watchlists(db)
         self.assertEqual(len(views), 1)

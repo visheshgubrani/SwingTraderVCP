@@ -342,7 +342,7 @@ export function ProposalDetailPage() {
                 </p>
                 {!approvalsAllowed && (
                   <p className="mt-1 text-[10px] text-amber-400">
-                    Shadow stage active: Review or reject only. Promote rollout stage to Paper before approving live trades.
+                    Review mode active: Review or reject only. Trade approval is currently disabled.
                   </p>
                 )}
               </div>

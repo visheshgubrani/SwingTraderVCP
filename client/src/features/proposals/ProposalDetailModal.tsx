@@ -247,7 +247,7 @@ export function ProposalDetailModal({ proposal, open, onOpenChange }: ProposalDe
               </div>
               {!approvalsAllowed && (
                 <p className="text-[10px] text-amber-400">
-                  Shadow stage: review or reject only. Promote to Paper before arming entries.
+                  Review mode: review or reject only. Trade approval is currently disabled.
                 </p>
               )}
             </div>

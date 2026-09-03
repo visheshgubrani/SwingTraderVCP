@@ -276,7 +276,18 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     }
     chart.subscribeCrosshairMove(handleCrosshairMove)
 
+    const resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (!entry || !chartRef.current) return
+      const { width, height } = entry.contentRect
+      if (width > 0 && height > 0) {
+        chartRef.current.resize(width, height)
+      }
+    })
+    resizeObserver.observe(chartContainerRef.current)
+
     return () => {
+      resizeObserver.disconnect()
       controller.unbind()
       drawingControllerRef.current = null
       chart.unsubscribeCrosshairMove(handleCrosshairMove)
@@ -330,7 +341,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         chart.timeScale().setVisibleLogicalRange(previousRange)
       } else {
         chart.timeScale().setVisibleLogicalRange({
-          from: Math.max(0, data.length - 150),
+          from: 0,
           to: data.length - 1 + INITIAL_RIGHT_SLOTS,
         })
       }
@@ -551,7 +562,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       return
     }
     chartRef.current.timeScale().setVisibleLogicalRange({
-      from: Math.max(0, dataRef.current.length - 150),
+      from: 0,
       to: dataRef.current.length - 1 + INITIAL_RIGHT_SLOTS,
     })
   }
@@ -596,7 +607,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     : null)
 
   return (
-    <div className="relative flex h-full flex-col bg-[#070b12] select-none font-mono">
+    <div className="relative flex h-full w-full flex-1 flex-col bg-[#070b12] select-none font-mono">
       {/* Top Header Bar */}
       <div className="z-10 flex h-10 shrink-0 items-center justify-between border-b border-[#263246] bg-[#101826] px-3 text-xs">
         <div className="flex items-center gap-3">
@@ -792,7 +803,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       {/* Main Canvas Container */}
       <div
         ref={chartContainerRef}
-        className="h-full min-h-[300px] w-full flex-1"
+        className="h-full min-h-0 w-full flex-1 relative"
       />
     </div>
   )

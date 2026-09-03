@@ -98,7 +98,7 @@ describe("DashboardOverview Operations Component", () => {
     expect(screen.getByText("1,25,000")).toBeInTheDocument()
 
     // Rollout Stage
-    expect(screen.getByText("P10 ROLLOUT")).toBeInTheDocument()
+    expect(screen.getByText("ROLLOUT STAGE")).toBeInTheDocument()
     expect(screen.getByText("paper")).toBeInTheDocument()
   })
 
@@ -113,7 +113,14 @@ describe("DashboardOverview Operations Component", () => {
       />
     )
 
-    expect(screen.getByText("P10 ROLLOUT")).toBeInTheDocument()
+    expect(screen.getByText("ROLLOUT STAGE")).toBeInTheDocument()
     expect(screen.getByText(/Cash ₹95,400/i)).toBeInTheDocument()
+  })
+
+  it("renders both Sync latest EOD and Backfill 2 Years & Repair buttons", () => {
+    renderWithProviders(<DashboardOverview tickWorkerStatus={null} />)
+
+    expect(screen.getByRole("button", { name: /Sync latest EOD data/i })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /Backfill 2 Years & Repair/i })).toBeInTheDocument()
   })
 })

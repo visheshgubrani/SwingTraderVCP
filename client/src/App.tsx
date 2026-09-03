@@ -6,7 +6,6 @@ import { createBrowserRouter, Outlet, RouterProvider, useNavigate, useSearchPara
 import { AppRail } from "@/components/layout/AppRail"
 import { StageNav } from "@/components/layout/StageNav"
 import { TerminalTopBar } from "@/components/layout/TerminalTopBar"
-import { TickerTape } from "@/components/layout/TickerTape"
 import { WatchlistSidebar } from "@/components/layout/WatchlistSidebar"
 import { ToastProvider } from "@/components/terminal/toast"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -26,7 +25,6 @@ import { PaperLedgerView } from "@/features/proposals/PaperLedgerView"
 import { ProposalAttemptDetailPage } from "@/features/proposals/ProposalAttemptDetailPage"
 import { ProposalDetailPage } from "@/features/proposals/ProposalDetailPage"
 import { ProposalInbox } from "@/features/proposals/ProposalInbox"
-import { RolloutBanner } from "@/features/proposals/RolloutBanner"
 import { ScannerPage } from "@/features/screener/ScannerPage"
 import { TradebookView } from "@/features/tradebook/TradebookView"
 import { useOrderIntents, usePositions } from "@/features/trade/api"
@@ -176,17 +174,15 @@ function AppShell() {
     <div className="app">
       <TradingAppProvider value={outletContext}>
         <TerminalTopBar />
-        <RolloutBanner />
         <AuthBanner />
-        <TickerTape />
         <div className="main max-[720px]:flex-col max-[720px]:overflow-y-auto">
           <AppRail />
           <WatchlistSidebar />
           <div className="stage max-[720px]:min-h-[640px]">
-            <StageNav positionsCount={positions.length} orderIntentsCount={orderIntents.length} />
-            <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+            <div className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
               <Outlet />
             </div>
+            <StageNav positionsCount={positions.length} orderIntentsCount={orderIntents.length} />
           </div>
         </div>
       </TradingAppProvider>

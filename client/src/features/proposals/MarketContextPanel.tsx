@@ -97,7 +97,7 @@ export function MarketContextPanel() {
         <Alert className="bg-background/40">
           <ActivityIcon aria-hidden="true" />
           <AlertTitle className="flex items-center gap-2">
-            P9 market context
+            Market context
             <Badge className={lightClass(context?.market_light ?? "unavailable")} variant="outline">
               {(context?.market_light ?? "unavailable").toUpperCase()}
             </Badge>
@@ -144,7 +144,7 @@ export function MarketContextPanel() {
           {context?.mode === "shadow" && (
             <div className="mt-2 grid gap-2 md:grid-cols-[1fr_0.7fr_1fr_auto]">
               <Input aria-label="Replay report SHA-256" className="h-7 text-[10px]" onChange={(event) => setReportHash(event.target.value.trim().toLowerCase())} placeholder="64-character replay report hash" value={reportHash} />
-              <Input aria-label="P9 policy approver" className="h-7 text-[10px]" onChange={(event) => setApprovedBy(event.target.value)} placeholder="Approved by" value={approvedBy} />
+              <Input aria-label="Policy approver" className="h-7 text-[10px]" onChange={(event) => setApprovedBy(event.target.value)} placeholder="Approved by" value={approvedBy} />
               <NativeSelect aria-label="Replay membership mode" className="h-7 text-[10px]" onChange={(event) => setMembershipMode(event.target.value as typeof membershipMode)} value={membershipMode}>
                 <NativeSelectOption value="point_in_time">Point-in-time membership</NativeSelectOption>
                 <NativeSelectOption value="current_membership_survivorship_biased">Current members (biased)</NativeSelectOption>

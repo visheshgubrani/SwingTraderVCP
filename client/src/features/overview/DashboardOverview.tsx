@@ -3,6 +3,7 @@ import {
   CalendarClockIcon,
   CheckCircle2Icon,
   DatabaseIcon,
+  HistoryIcon,
   LogInIcon,
   RefreshCwIcon,
   ScanSearchIcon,
@@ -86,7 +87,7 @@ export function DashboardOverview({
             Operations <span className="sub">data ops · sync · rollout · controls</span>
           </h2>
           <p className="vmeta">
-            Fyers auth · EOD sync · tick worker · P10 rollout · paper account
+            Fyers auth · EOD sync · tick worker · Rollout stage · Paper account
           </p>
         </div>
         <div className="vhead-right">
@@ -184,7 +185,7 @@ export function DashboardOverview({
 
       <section className="rounded-lg border bg-card p-4">
         <div className="mb-3 flex items-center justify-between">
-          <span className="text-muted-foreground">P10 ROLLOUT</span>
+          <span className="text-muted-foreground">ROLLOUT STAGE</span>
           <Badge variant="outline">{rollout.data?.stage?.replaceAll("_", " ") ?? "…"}</Badge>
         </div>
         <p className="text-muted-foreground">
@@ -308,7 +309,7 @@ export function DashboardOverview({
             </Alert>
           )}
 
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {syncing ? (
               <Button
                 disabled={cancelSync.isPending}
@@ -324,22 +325,41 @@ export function DashboardOverview({
                 Cancel sync
               </Button>
             ) : (
-              <Button
-                disabled={
-                  !authStatus.data?.healthy || triggerSync.isPending
-                }
-                onClick={() =>
-                  triggerSync.mutate({ backfillYears: 1 })
-                }
-                type="button"
-              >
-                {triggerSync.isPending ? (
-                  <Spinner data-icon="inline-start" />
-                ) : (
-                  <RefreshCwIcon data-icon="inline-start" />
-                )}
-                Sync latest EOD data
-              </Button>
+              <>
+                <Button
+                  disabled={
+                    !authStatus.data?.healthy || triggerSync.isPending
+                  }
+                  onClick={() =>
+                    triggerSync.mutate({ backfillYears: 2, repairHistory: false })
+                  }
+                  type="button"
+                >
+                  {triggerSync.isPending ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : (
+                    <RefreshCwIcon data-icon="inline-start" />
+                  )}
+                  Sync latest EOD data
+                </Button>
+                <Button
+                  disabled={
+                    !authStatus.data?.healthy || triggerSync.isPending
+                  }
+                  onClick={() =>
+                    triggerSync.mutate({ backfillYears: 2, repairHistory: true })
+                  }
+                  type="button"
+                  variant="outline"
+                >
+                  {triggerSync.isPending ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : (
+                    <HistoryIcon data-icon="inline-start" />
+                  )}
+                  Backfill 2 Years & Repair
+                </Button>
+              </>
             )}
           </div>
         </section>
@@ -349,7 +369,7 @@ export function DashboardOverview({
             <div>
               <h2 className="text-sm font-semibold">Operational status</h2>
               <p className="mt-1 text-muted-foreground">
-                Only status reported by implemented P0–P4 services is shown.
+                Only status reported by implemented core services is shown.
               </p>
             </div>
             <Badge variant="outline">

@@ -61,8 +61,8 @@ interface SyncTriggerResponse {
   message: string
 }
 
-interface SyncTriggerInput {
-  backfillYears: number
+export interface SyncTriggerInput {
+  backfillYears?: number
   repairHistory?: boolean
 }
 
@@ -150,7 +150,7 @@ export function useSyncStatus() {
 export function useTriggerSync() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ backfillYears, repairHistory = false }: SyncTriggerInput) =>
+    mutationFn: ({ backfillYears = 2, repairHistory = false }: SyncTriggerInput = {}) =>
       apiRequest<SyncTriggerResponse>("/historical/sync", {
         method: "POST",
         body: JSON.stringify({

@@ -438,7 +438,7 @@ export function ScannerPage() {
                           {row.vcp_vision ? "Review VCP" : "Analyze VCP"}
                         </button>
                         <button
-                          aria-label="Generate a P10 proposal for this stock"
+                          aria-label="Generate a proposal for this stock"
                           className="btn btn-line plan"
                           disabled={
                             !row.fundamental_selected ||
@@ -450,8 +450,8 @@ export function ScannerPage() {
                           }}
                           title={
                             row.fundamental_selected
-                              ? "Generate a P10 proposal for this stock only"
-                              : "Only the P10 shortlist (Top 20) can generate a proposal"
+                              ? "Generate a proposal for this stock only"
+                              : "Only the shortlist (Top 20) can generate a proposal"
                           }
                           type="button"
                         >

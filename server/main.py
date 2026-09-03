@@ -82,6 +82,13 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger(__name__).warning("Startup schema check failed: %s", exc)
 
+    # Ensure Nifty 500 universe is seeded if empty
+    try:
+        from app.services.instrument_importer import ensure_nifty500_universe_imported
+        await ensure_nifty500_universe_imported()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Startup universe check/import failed: %s", exc)
+
     yield
 
     # Shutdown

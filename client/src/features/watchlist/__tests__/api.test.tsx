@@ -26,7 +26,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 const WATCHLISTS = [
-  { id: "wl-1", name: "Core", description: null, is_active: true, item_count: 2, created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" },
+  { id: "wl-1", name: "Indices", description: null, is_active: true, item_count: 2, created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" },
 ]
 
 const ITEMS = [
@@ -57,7 +57,7 @@ describe("watchlist api hooks", () => {
     const wrapper = createWrapper()
     const { result: listResult } = renderHook(() => useWatchlists(), { wrapper })
     await waitFor(() => expect(listResult.current.isSuccess).toBe(true))
-    expect(listResult.current.data?.[0]?.name).toBe("Core")
+    expect(listResult.current.data?.[0]?.name).toBe("Indices")
 
     const { result: itemsResult } = renderHook(() => useWatchlistItems(), { wrapper })
     await waitFor(() => expect(itemsResult.current.isSuccess).toBe(true))

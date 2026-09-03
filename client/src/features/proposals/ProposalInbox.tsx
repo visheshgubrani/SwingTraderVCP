@@ -190,7 +190,7 @@ export function ProposalInbox() {
           <h2>
             Trade Proposals <span className="sub">screening → serial Gemini audit → human decision</span>
           </h2>
-          <p className="vmeta">Live P10 pipeline · batch runs on the latest succeeded EOD scan</p>
+          <p className="vmeta">Proposal pipeline · batch runs on the latest succeeded EOD scan</p>
         </div>
 
         {/* Action Controls & Supervisor Indicator */}
@@ -297,12 +297,12 @@ export function ProposalInbox() {
               className="text-[10px] text-muted-foreground hover:text-foreground gap-1"
             >
               <ChevronDownIcon className={`h-3 w-3 transition-transform ${showMarketContext ? "" : "-rotate-90"}`} />
-              {showMarketContext ? "Hide Market Context" : "P9 Market Context"}
+              {showMarketContext ? "Hide Market Context" : "Market Context"}
             </Button>
           </div>
         </div>
 
-        {/* Optional Collapsible P9 Context & Generation Ledger */}
+        {/* Optional Collapsible Market Context & Generation Ledger */}
         {showMarketContext && <MarketContextPanel />}
 
         {showGenerationLedger && (

@@ -20,8 +20,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.watchlists import WatchlistItemView, WatchlistView
 
-DEFAULT_WATCHLIST_NAME = "Core"
-DEFAULT_WATCHLIST_DESCRIPTION = "Default watchlist"
+DEFAULT_WATCHLIST_NAME = "Indices"
+DEFAULT_WATCHLIST_DESCRIPTION = "Key market & sectoral indices"
+
+DEFAULT_INDICES_FYERS_SYMBOLS: tuple[str, ...] = (
+    "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY500-INDEX",
+    "NSE:NIFTYMIDCAP150-INDEX",
+    "NSE:NIFTYBANK-INDEX",
+    "NSE:FINNIFTY-INDEX",
+    "NSE:NIFTYIT-INDEX",
+    "NSE:NIFTYAUTO-INDEX",
+    "NSE:NIFTYFMCG-INDEX",
+    "NSE:NIFTYMETAL-INDEX",
+    "NSE:NIFTYPHARMA-INDEX",
+    "NSE:NIFTYHEALTHCARE-INDEX",
+    "NSE:NIFTYENERGY-INDEX",
+    "NSE:NIFTYOILANDGAS-INDEX",
+    "NSE:NIFTYINFRA-INDEX",
+    "NSE:NIFTYREALTY-INDEX",
+    "NSE:NIFTYCONSRDURBL-INDEX",
+    "NSE:NIFTYCHEMICALS-INDEX",
+    "NSE:NIFTYMEDIA-INDEX",
+    "NSE:NIFTYSERVSECTOR-INDEX",
+)
 
 # Sentinel distinguishing "field absent" from an explicit ``None`` in PATCH.
 _UNSET = object()
@@ -158,6 +180,29 @@ async def _resolve_instrument(db: AsyncSession, symbol: str) -> UUID:
     raise InstrumentNotFoundError(f"Instrument not found: {symbol}")
 
 
+async def _seed_default_indices(db: AsyncSession, watchlist_id: UUID) -> None:
+    await db.execute(
+        text(
+            """
+            INSERT INTO watchlist_items (watchlist_id, instrument_id)
+            SELECT :watchlist_id, i.id
+            FROM instruments i
+            WHERE i.fyers_symbol = ANY(:symbols) AND i.active = true
+              AND NOT EXISTS (
+                  SELECT 1 FROM watchlist_items wi
+                  WHERE wi.watchlist_id = :watchlist_id
+                    AND wi.instrument_id = i.id
+                    AND wi.removed_at IS NULL
+              )
+            """
+        ),
+        {
+            "watchlist_id": watchlist_id,
+            "symbols": list(DEFAULT_INDICES_FYERS_SYMBOLS),
+        },
+    )
+
+
 async def list_watchlists(
     db: AsyncSession,
     *,
@@ -185,6 +230,26 @@ async def list_watchlists(
             # write (the unique name guard makes the second insert collide).
             await db.rollback()
         watchlists = await _select_all_watchlists(db)
+        if watchlists:
+            await _seed_default_indices(db, watchlists[0].id)
+            watchlists = await _select_all_watchlists(db)
+    elif watchlists and auto_create_default:
+        first = watchlists[0]
+        renamed = False
+        if first.name in ("Core", "core", "Default", "default", "Watchlist 1") and first.name != DEFAULT_WATCHLIST_NAME:
+            await db.execute(
+                text("UPDATE watchlists SET name = :name, description = :description WHERE id = :id"),
+                {
+                    "name": DEFAULT_WATCHLIST_NAME,
+                    "description": DEFAULT_WATCHLIST_DESCRIPTION,
+                    "id": first.id,
+                },
+            )
+            renamed = True
+        if first.name == DEFAULT_WATCHLIST_NAME or renamed:
+            if first.item_count < len(DEFAULT_INDICES_FYERS_SYMBOLS):
+                await _seed_default_indices(db, first.id)
+                watchlists = await _select_all_watchlists(db)
     return watchlists
 
 

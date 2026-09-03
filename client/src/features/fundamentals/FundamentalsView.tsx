@@ -670,7 +670,7 @@ export function FundamentalsView() {
         <div>
           <div>
             <h2>
-              Fundamentals <span className="sub">P7 fit · blind AI second opinion · human review</span>
+              Fundamentals <span className="sub">Fit score · blind AI second opinion · human review</span>
             </h2>
             <p className="vmeta">
               Python evaluates hard growth metrics · OpenRouter provides grounded second opinions
@@ -1021,7 +1021,7 @@ export function FundamentalsView() {
             </AlertDialogTitle>
             <AlertDialogDescription>
               {pendingControl === "processing"
-                ? "The active P7 pipeline will pause at the next stock boundary."
+                ? "The active pipeline will pause at the next stock boundary."
                 : "No new OpenRouter calls will be issued; deterministic Upstox scoring will continue."}
             </AlertDialogDescription>
           </AlertDialogHeader>

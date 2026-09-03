@@ -22,8 +22,6 @@ import { GlobalSearch } from "@/components/terminal/GlobalSearch"
 import { Spinner } from "@/components/ui/spinner"
 
 const STAGE_AVATAR: Record<string, string> = {
-  shadow: "SH",
-  paper: "P10",
   reduced_live: "RL",
   full_live: "LV",
 }
@@ -75,8 +73,6 @@ export function TerminalTopBar() {
     }
   }
 
-  const stageLabel = (stage ?? (execution.data ? undefined : "shadow"))?.toUpperCase()
-
   return (
     <header className="tb">
       {/* Brand */}
@@ -102,9 +98,9 @@ export function TerminalTopBar() {
 
         <span
           className="chip chip-acc"
-          title={`${stageLabel ?? "—"} · ${execution.data?.execution_mode ?? "paper"} account${paper.data ? " · paper cash ledger" : ""}`}
+          title={`${execution.data?.execution_mode === "live" ? "Live trading" : "Paper trading"} account${paper.data ? " · paper cash ledger" : ""}`}
         >
-          {stageLabel ?? "—"} · {execution.data?.execution_mode.toUpperCase() ?? "PAPER"}
+          {execution.data?.execution_mode?.toUpperCase() ?? "PAPER"}
           {paper.data ? (
             <span className="mono">{fmtAmount(paper.data.cash_available)}</span>
           ) : (
@@ -198,8 +194,8 @@ export function TerminalTopBar() {
           </svg>
         </button>
 
-        <span className="avatar" title={`${stageLabel ?? "—"} · ${execution.data?.execution_mode ?? "paper"} account`}>
-          {STAGE_AVATAR[stage ?? ""] ?? (stage ? stage.slice(0, 2).toUpperCase() : "OP")}
+        <span className="avatar" title={`${execution.data?.execution_mode === "live" ? "Live" : "Paper"} workstation`}>
+          {STAGE_AVATAR[stage ?? ""] ?? "TR"}
         </span>
       </div>
     </header>

@@ -51,10 +51,14 @@ export function useWatchlists(enabled = true) {
   })
 }
 
-/** Items of the active watchlist (falls back to the first list when none active). */
-export function useWatchlistItems(enabled = true) {
-  const lists = useWatchlists(enabled)
-  const activeId = lists.data?.find((list) => list.is_active)?.id ?? lists.data?.[0]?.id ?? null
+/** Items of the active watchlist (or a specified watchlistId). */
+export function useWatchlistItems(watchlistId?: string | null, enabled = true) {
+  const lists = useWatchlists(enabled && !watchlistId)
+  const activeId =
+    watchlistId ??
+    lists.data?.find((list) => list.is_active)?.id ??
+    lists.data?.[0]?.id ??
+    null
   return useQuery({
     queryKey: activeId ? watchlistKeys.items(activeId) : watchlistKeys.items("__none__"),
     queryFn: () => apiRequest<WatchlistItemView[]>(`/watchlists/${activeId}/items`),
@@ -112,6 +116,26 @@ export function useCreateWatchlist() {
       apiRequest<WatchlistSummary>("/watchlists", {
         method: "POST",
         body: JSON.stringify(body),
+      }),
+    onSuccess: () => invalidateWatchlists(queryClient),
+  })
+}
+
+export function useUpdateWatchlist() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...patch
+    }: {
+      id: string
+      name?: string
+      description?: string | null
+      is_active?: boolean
+    }) =>
+      apiRequest<WatchlistSummary>(`/watchlists/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
       }),
     onSuccess: () => invalidateWatchlists(queryClient),
   })

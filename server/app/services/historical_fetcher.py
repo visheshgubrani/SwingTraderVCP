@@ -291,7 +291,7 @@ def _token_is_expired(expires_at: datetime.datetime) -> bool:
 async def run_historical_sync(
     ctx: dict[str, Any],
     triggered_by: str = "scheduled",
-    backfill_years: int = 1,
+    backfill_years: int = 2,
     run_id: str | None = None,
     repair_history: bool = False,
 ) -> dict[str, Any]:
@@ -338,6 +338,12 @@ async def run_historical_sync(
             )
             await save_sync_status(redis, progress)
             return {"status": "authentication_required"}
+
+        try:
+            from app.services.instrument_importer import ensure_nifty500_universe_imported
+            await ensure_nifty500_universe_imported()
+        except Exception as exc:
+            logger.warning("Failed to auto-import Nifty 500 universe before sync: %s", exc)
 
         async with async_session() as session:
             instruments_result = await session.execute(

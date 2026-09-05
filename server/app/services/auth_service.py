@@ -108,6 +108,15 @@ async def _try_refresh_token(
     Returns {"access_token": ..., "refresh_token": ..., "expires_in": ...} on success,
     None on failure.
     """
+    pin = (settings.fyers_pin or "").strip()
+    if not pin:
+        logger.error("Cannot refresh Fyers token: FYERS_PIN is not configured.")
+        return None
+
+    if not settings.fyers_app_id or not settings.fyers_secret_key:
+        logger.error("Cannot refresh Fyers token: FYERS_APP_ID or FYERS_SECRET_KEY is not configured.")
+        return None
+
     app_id_hash = hashlib.sha256(
         f"{settings.fyers_app_id}:{settings.fyers_secret_key}".encode()
     ).hexdigest()
@@ -116,6 +125,7 @@ async def _try_refresh_token(
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
         "appIdHash": app_id_hash,
+        "pin": pin,
     }
 
     try:
@@ -132,7 +142,11 @@ async def _try_refresh_token(
         return None
 
     if data.get("s") != "ok":
-        logger.warning("Fyers refresh rejected: %s", data)
+        logger.warning(
+            "Fyers refresh rejected: %s (code=%s)",
+            data.get("message", "Unknown rejection"),
+            data.get("code"),
+        )
         return None
 
     return {
@@ -154,6 +168,16 @@ async def refresh_and_save(db: AsyncSession, redis) -> str | None:
         logger.error("No refresh token available for Fyers auth refresh")
         await _emit_system_event(
             db, "critical", "auth_refresh_failed", {"reason": "no_refresh_token"}
+        )
+        await db.commit()
+        await _set_auth_health(redis, False)
+        return None
+
+    pin = (settings.fyers_pin or "").strip()
+    if not pin:
+        logger.error("FYERS_PIN is not configured for token refresh")
+        await _emit_system_event(
+            db, "critical", "auth_refresh_failed", {"reason": "missing_fyers_pin"}
         )
         await db.commit()
         await _set_auth_health(redis, False)
@@ -271,12 +295,20 @@ async def get_valid_access_token(redis) -> str:
 async def get_auth_status_from_db(db: AsyncSession) -> dict:
     """
     Returns auth status for the API /auth/status endpoint.
-    Includes health flag, expiry, and last refresh event.
+    Includes health flag, expiry, and readiness indicators for auto-refresh.
     """
+    has_pin = bool((settings.fyers_pin or "").strip())
     token_data = await get_fyers_token(db)
     if not token_data:
-        return {"authenticated": False, "healthy": False, "reason": "no_token"}
+        return {
+            "authenticated": False,
+            "healthy": False,
+            "reason": "no_token",
+            "has_refresh_token": False,
+            "has_pin": has_pin,
+        }
 
+    has_refresh_token = bool(token_data.get("refresh_token"))
     now = datetime.datetime.now(datetime.timezone.utc)
     expires_at = token_data["expires_at"]
 
@@ -286,10 +318,14 @@ async def get_auth_status_from_db(db: AsyncSession) -> dict:
             "healthy": False,
             "reason": "expired",
             "expires_at": expires_at.isoformat(),
+            "has_refresh_token": has_refresh_token,
+            "has_pin": has_pin,
         }
 
     return {
         "authenticated": True,
         "healthy": True,
         "expires_at": expires_at.isoformat(),
+        "has_refresh_token": has_refresh_token,
+        "has_pin": has_pin,
     }

@@ -9,6 +9,8 @@ export interface AuthStatus {
   healthy: boolean
   reason?: "no_token" | "expired" | string
   expires_at?: string
+  has_refresh_token?: boolean
+  has_pin?: boolean
 }
 
 export interface AuthEvent {
@@ -90,3 +92,25 @@ export function useExchangeFyersCode() {
     },
   })
 }
+
+interface AuthRefreshResponse {
+  status: "ok"
+  message: string
+}
+
+export function useManualRefreshToken() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      apiRequest<AuthRefreshResponse>("/auth/refresh", {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: authKeys.status() }),
+        queryClient.invalidateQueries({ queryKey: authKeys.events() }),
+      ])
+    },
+  })
+}
+

@@ -87,6 +87,8 @@ class Settings(BaseSettings):
 
     fyers_app_id: str = ""
     fyers_secret_key: str = ""
+    # 4-digit Fyers PIN used for unattended token refresh via validate-refresh-token endpoint.
+    fyers_pin: str = ""
     # Dedicated symmetric encryption key for broker tokens in Postgres (SEC-005).
     # Required in production. Local/dev may fall back to fyers_secret_key.
     token_encryption_key: str = ""

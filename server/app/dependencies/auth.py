@@ -26,6 +26,33 @@ def _extract_session_id(request: Request) -> str | None:
     return request.cookies.get(settings.session_cookie_name)
 
 
+def enforce_csrf(request: Request, session: dict[str, Any]) -> None:
+    """Reject a mutating request whose CSRF header is missing or wrong (SEC-001).
+
+    Shared so endpoints that resolve their own session (for example the dual
+    session/direct Fyers callback) enforce exactly the same rule as
+    ``require_authenticated_user``.
+    """
+    if request.method.upper() not in MUTATING_METHODS:
+        return
+    csrf_header = (
+        request.headers.get("x-csrf-token")
+        or request.headers.get("X-CSRF-Token")
+        or ""
+    )
+    expected_csrf = session.get("csrf_token", "")
+    if not csrf_header or not expected_csrf:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing CSRF token",
+        )
+    if not secrets.compare_digest(csrf_header.encode("utf-8"), expected_csrf.encode("utf-8")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid CSRF token",
+        )
+
+
 async def require_authenticated_user(request: Request) -> dict[str, Any]:
     """
     Dependency that enforces a valid Redis-backed session (SEC-001)
@@ -47,24 +74,7 @@ async def require_authenticated_user(request: Request) -> dict[str, Any]:
             detail="Session expired or invalid",
         )
 
-    # CSRF check on mutating methods
-    if request.method.upper() in MUTATING_METHODS:
-        csrf_header = (
-            request.headers.get("x-csrf-token")
-            or request.headers.get("X-CSRF-Token")
-            or ""
-        )
-        expected_csrf = session.get("csrf_token", "")
-        if not csrf_header or not expected_csrf:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Missing CSRF token",
-            )
-        if not secrets.compare_digest(csrf_header.encode("utf-8"), expected_csrf.encode("utf-8")):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid CSRF token",
-            )
+    enforce_csrf(request, session)
 
     return session
 

@@ -24,6 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import async_session
 from app.security import get_fyers_token, save_fyers_token
+from app.services.auth_readiness import (
+    clamp_token_expiry,
+    effective_token_expiry,
+    seconds_until_session_cutoff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +36,14 @@ logger = logging.getLogger(__name__)
 _REDIS_TOKEN_KEY = "auth:fyers:access_token"
 _REDIS_EXPIRY_KEY = "auth:fyers:expires_at"
 _REDIS_HEALTH_KEY = "auth:fyers:healthy"
+_REDIS_REFRESH_ATTEMPT_KEY = "auth:fyers:refresh_attempt"
+_REDIS_EVENT_COOLDOWN_PREFIX = "auth:events:"
 
 # Buffer before expiry — refresh this many seconds early
 _EXPIRY_BUFFER_SECONDS = 300  # 5 minutes
 
-# Fyers refresh endpoint (not in SDK Config)
+# Fyers refresh endpoint (not in SDK Config). Refresh tokens no longer survive
+# SEBI's daily-2FA framework; this stays only as a cheap best-effort fallback.
 _FYERS_REFRESH_URL = "https://api-t1.fyers.in/api/v3/validate-refresh-token"
 
 
@@ -52,8 +60,32 @@ async def _emit_system_event(
     severity: str,
     event_type: str,
     payload: dict | None = None,
+    *,
+    redis=None,
+    cooldown_seconds: int | None = None,
 ) -> None:
-    """Insert a system_events row for auth issues. Caller controls commit."""
+    """Insert a system_events row for auth issues. Caller controls commit.
+
+    When ``redis`` is supplied the event is de-duplicated per type for
+    ``cooldown_seconds`` (default from settings). Without it a dead session
+    would emit a critical event on every worker poll — the tick worker retries
+    authentication every 5 seconds — burying real signals.
+    """
+    if redis is not None:
+        window = (
+            settings.auth_event_cooldown_seconds
+            if cooldown_seconds is None
+            else cooldown_seconds
+        )
+        if window > 0:
+            key = f"{_REDIS_EVENT_COOLDOWN_PREFIX}{event_type}"
+            try:
+                if not await redis.set(key, "1", ex=window, nx=True):
+                    logger.debug("Suppressed duplicate %s system event", event_type)
+                    return
+            except Exception as exc:  # never let dedup break auth reporting
+                logger.warning("Auth event dedup check failed: %s", exc)
+
     await session.execute(
         text("""
             INSERT INTO system_events (component, severity, event_type, payload)
@@ -68,9 +100,29 @@ async def _emit_system_event(
     await session.flush()
 
 
-async def _set_auth_health(redis, healthy: bool) -> None:
-    """Write health flag to Redis so any process can check instantly."""
-    await redis.set(_REDIS_HEALTH_KEY, "1" if healthy else "0", ex=3600)
+async def _set_auth_health(redis, healthy: bool, *, ttl_seconds: int | None = None) -> None:
+    """Write the health flag to Redis so any process can check instantly.
+
+    A healthy flag lives until the daily session cutoff (not a fixed hour):
+    otherwise a perfectly good token reports unhealthy an hour after login.
+    """
+    if ttl_seconds is None:
+        ttl_seconds = (
+            int(seconds_until_session_cutoff()) if healthy else 3600
+        )
+    await redis.set(_REDIS_HEALTH_KEY, "1" if healthy else "0", ex=max(int(ttl_seconds), 60))
+
+
+async def _refresh_attempt_allowed(redis) -> bool:
+    """Rate-limit broker refresh attempts so a dead session does not hammer Fyers."""
+    window = settings.auth_refresh_attempt_cooldown_seconds
+    if window <= 0:
+        return True
+    try:
+        return bool(await redis.set(_REDIS_REFRESH_ATTEMPT_KEY, "1", ex=window, nx=True))
+    except Exception as exc:
+        logger.warning("Refresh attempt cooldown check failed: %s", exc)
+        return True
 
 
 async def is_auth_healthy(redis) -> bool:
@@ -93,7 +145,11 @@ async def invalidate_fyers_token(redis) -> None:
                 """)
             )
             await _emit_system_event(
-                db, "warning", "auth_invalidated", {"reason": "token_rejected_by_fyers"}
+                db,
+                "warning",
+                "auth_invalidated",
+                {"reason": "token_rejected_by_fyers"},
+                redis=redis,
             )
             await db.commit()
     except Exception as e:
@@ -158,16 +214,27 @@ async def _try_refresh_token(
 
 async def refresh_and_save(db: AsyncSession, redis) -> str | None:
     """
-    Attempt to refresh the Fyers token. Returns new access_token on success,
-    None on failure. Emits system_events accordingly.
+    Best-effort legacy refresh via the Fyers refresh-token endpoint.
 
-    Commits the transaction once at the end (token save + system event).
+    Refresh tokens no longer survive SEBI's daily-2FA framework, so this is a
+    fallback only — the daily path is the auth guard (headless TOTP or a
+    Telegram one-tap login). Attempts are rate-limited so a dead session cannot
+    hammer the broker or spam system_events. Returns the new access token, or
+    None on failure. Emits system_events accordingly.
     """
+    if not await _refresh_attempt_allowed(redis):
+        logger.info("Skipping Fyers refresh attempt (cooldown active)")
+        return None
+
     token_data = await get_fyers_token(db)
     if not token_data or not token_data.get("refresh_token"):
         logger.error("No refresh token available for Fyers auth refresh")
         await _emit_system_event(
-            db, "critical", "auth_refresh_failed", {"reason": "no_refresh_token"}
+            db,
+            "critical",
+            "auth_refresh_failed",
+            {"reason": "no_refresh_token"},
+            redis=redis,
         )
         await db.commit()
         await _set_auth_health(redis, False)
@@ -177,7 +244,11 @@ async def refresh_and_save(db: AsyncSession, redis) -> str | None:
     if not pin:
         logger.error("FYERS_PIN is not configured for token refresh")
         await _emit_system_event(
-            db, "critical", "auth_refresh_failed", {"reason": "missing_fyers_pin"}
+            db,
+            "critical",
+            "auth_refresh_failed",
+            {"reason": "missing_fyers_pin"},
+            redis=redis,
         )
         await db.commit()
         await _set_auth_health(redis, False)
@@ -187,15 +258,18 @@ async def refresh_and_save(db: AsyncSession, redis) -> str | None:
     if not result:
         logger.error("Fyers token refresh failed")
         await _emit_system_event(
-            db, "critical", "auth_refresh_failed", {"reason": "refresh_rejected"}
+            db,
+            "critical",
+            "auth_refresh_failed",
+            {"reason": "refresh_rejected"},
+            redis=redis,
         )
         await db.commit()
         await _set_auth_health(redis, False)
         return None
 
-    expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
-        seconds=result["expires_in"]
-    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    expires_at = clamp_token_expiry(now, result["expires_in"])
 
     await persist_and_cache_fyers_token(
         db,
@@ -207,10 +281,14 @@ async def refresh_and_save(db: AsyncSession, redis) -> str | None:
     )
 
     await _emit_system_event(
-        db, "info", "auth_refresh_succeeded", {"expires_at": expires_at.isoformat()}
+        db,
+        "info",
+        "auth_refresh_succeeded",
+        {"expires_at": expires_at.isoformat(), "method": "refresh_token"},
+        redis=redis,
     )
     await db.commit()
-    logger.info("Fyers token refreshed, expires at %s", expires_at)
+    logger.info("Fyers token refreshed, session expires at %s", expires_at)
     return result["access_token"]
 
 
@@ -226,12 +304,27 @@ async def persist_and_cache_fyers_token(
     """
     Unified entrypoint to persist Fyers token to Postgres and sync Redis token caches (AUTH-002).
     Ensures Redis hot token, expiry cache, and auth health are updated synchronously.
+
+    ``expires_at`` is clamped to the daily Fyers session cutoff (06:30 IST):
+    Fyers retires every access token at that boundary regardless of the
+    ``expires_in`` it reports, and an optimistic stored expiry is what makes a
+    session look alive while every broker call fails.
     """
-    await save_fyers_token(db, access_token, refresh_token, expires_at)
-    ttl = max(int(expires_in) - _EXPIRY_BUFFER_SECONDS, 60)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    session_expires_at = min(
+        expires_at.astimezone(datetime.timezone.utc),
+        clamp_token_expiry(now, expires_in),
+    )
+
+    await save_fyers_token(db, access_token, refresh_token, session_expires_at)
+    ttl = max(int((session_expires_at - now).total_seconds()) - _EXPIRY_BUFFER_SECONDS, 60)
     await redis.set(_REDIS_TOKEN_KEY, access_token, ex=ttl)
-    await redis.set(_REDIS_EXPIRY_KEY, expires_at.isoformat(), ex=ttl)
-    await _set_auth_health(redis, True)
+    await redis.set(_REDIS_EXPIRY_KEY, session_expires_at.isoformat(), ex=ttl)
+    await _set_auth_health(
+        redis,
+        True,
+        ttl_seconds=max(int((session_expires_at - now).total_seconds()), 60),
+    )
 
 
 async def get_valid_access_token(redis) -> str:
@@ -240,7 +333,7 @@ async def get_valid_access_token(redis) -> str:
 
     1. Check Redis cache (fast path)
     2. On miss, read from DB, cache if still valid
-    3. If expired/near-expiry, attempt refresh
+    3. If expired/near-expiry, attempt the legacy refresh
     4. Raise AuthUnavailableError if nothing works
 
     Callers: historical_fetcher, tick_ingestion, order_gateway, execution_engine.
@@ -257,7 +350,11 @@ async def get_valid_access_token(redis) -> str:
 
         if not token_data:
             await _emit_system_event(
-                db, "critical", "auth_unavailable", {"reason": "no_token_in_db"}
+                db,
+                "critical",
+                "auth_unavailable",
+                {"reason": "no_token_in_db"},
+                redis=redis,
             )
             await db.commit()
             await _set_auth_health(redis, False)
@@ -265,17 +362,24 @@ async def get_valid_access_token(redis) -> str:
 
         expires_at = token_data["expires_at"]
         now = datetime.datetime.now(datetime.timezone.utc)
+        # The broker session also dies at the daily cutoff, so a token stored
+        # before this rule existed must not be trusted on expiry alone.
+        effective_expiry = effective_token_expiry(
+            expires_at, issued_at=token_data.get("refreshed_at")
+        ) or expires_at
 
-        # If expires within buffer, try refresh
-        if expires_at < now + datetime.timedelta(seconds=_EXPIRY_BUFFER_SECONDS):
+        if effective_expiry < now + datetime.timedelta(seconds=_EXPIRY_BUFFER_SECONDS):
             new_token = await refresh_and_save(db, redis)
             if new_token:
                 return new_token
-            # Refresh failed — but if old token hasn't actually expired yet, use it
+            # Refresh failed — but if the token has not actually expired yet, use it
             # (Fyers may still accept it for a short window)
-            if expires_at > now:
+            if effective_expiry > now:
                 logger.warning("Using near-expiry token as fallback")
-                ttl = max(int((expires_at - now).total_seconds()) - _EXPIRY_BUFFER_SECONDS, 30)
+                ttl = max(
+                    int((effective_expiry - now).total_seconds()) - _EXPIRY_BUFFER_SECONDS,
+                    30,
+                )
                 await redis.set(_REDIS_TOKEN_KEY, token_data["access_token"], ex=ttl)
                 return token_data["access_token"]
 
@@ -285,47 +389,39 @@ async def get_valid_access_token(redis) -> str:
             )
 
         # Token is valid — cache it
-        ttl = max(int((expires_at - now).total_seconds()) - _EXPIRY_BUFFER_SECONDS, 60)
+        ttl = max(
+            int((effective_expiry - now).total_seconds()) - _EXPIRY_BUFFER_SECONDS,
+            60,
+        )
         await redis.set(_REDIS_TOKEN_KEY, token_data["access_token"], ex=ttl)
-        await redis.set(_REDIS_EXPIRY_KEY, expires_at.isoformat(), ex=ttl)
-        await _set_auth_health(redis, True)
+        await redis.set(_REDIS_EXPIRY_KEY, effective_expiry.isoformat(), ex=ttl)
+        await _set_auth_health(redis, True, ttl_seconds=ttl)
         return token_data["access_token"]
 
 
-async def get_auth_status_from_db(db: AsyncSession) -> dict:
+async def get_auth_status_from_db(db: AsyncSession, redis=None) -> dict:
     """
     Returns auth status for the API /auth/status endpoint.
-    Includes health flag, expiry, and readiness indicators for auto-refresh.
+
+    Cutoff-aware: the reported expiry is the earlier of the stored value and
+    the daily 06:30 IST session boundary derived from issuance, so the UI stops
+    claiming "Connected" for a token the broker has already retired.
     """
-    has_pin = bool((settings.fyers_pin or "").strip())
-    token_data = await get_fyers_token(db)
-    if not token_data:
-        return {
-            "authenticated": False,
-            "healthy": False,
-            "reason": "no_token",
-            "has_refresh_token": False,
-            "has_pin": has_pin,
-        }
+    from app.services.auth_readiness import evaluate_auth_readiness
 
-    has_refresh_token = bool(token_data.get("refresh_token"))
-    now = datetime.datetime.now(datetime.timezone.utc)
-    expires_at = token_data["expires_at"]
-
-    if expires_at < now + datetime.timedelta(seconds=_EXPIRY_BUFFER_SECONDS):
-        return {
-            "authenticated": False,
-            "healthy": False,
-            "reason": "expired",
-            "expires_at": expires_at.isoformat(),
-            "has_refresh_token": has_refresh_token,
-            "has_pin": has_pin,
-        }
-
+    readiness = await evaluate_auth_readiness(db, redis, verify=False)
     return {
-        "authenticated": True,
-        "healthy": True,
-        "expires_at": expires_at.isoformat(),
-        "has_refresh_token": has_refresh_token,
-        "has_pin": has_pin,
+        "authenticated": readiness["authenticated"],
+        "healthy": readiness["healthy"],
+        "reason": readiness["reason"],
+        "expires_at": readiness.get("effective_expires_at") or readiness.get("expires_at"),
+        "session_cutoff_ist": readiness["session_cutoff_ist"],
+        "has_refresh_token": readiness["has_refresh_token"],
+        "has_pin": readiness["has_pin"],
+        "totp_configured": readiness["totp_configured"],
+        "headless_login_enabled": readiness["headless_login_enabled"],
+        "headless_login_configured": readiness["headless_login_configured"],
+        "telegram_configured": readiness["telegram_configured"],
+        "telegram_enabled": readiness["telegram_enabled"],
     }
+

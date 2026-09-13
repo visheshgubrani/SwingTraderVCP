@@ -11,6 +11,22 @@ export interface AuthStatus {
   expires_at?: string
   has_refresh_token?: boolean
   has_pin?: boolean
+  session_cutoff_ist?: string
+  totp_configured?: boolean
+  headless_login_enabled?: boolean
+  headless_login_configured?: boolean
+  telegram_configured?: boolean
+  telegram_enabled?: boolean
+}
+
+export interface AuthVerification {
+  authenticated: boolean
+  healthy: boolean
+  verified: boolean
+  reason?: string
+  identity?: string | null
+  expires_at?: string | null
+  session_cutoff_ist?: string
 }
 
 export interface AuthEvent {
@@ -105,6 +121,58 @@ export function useManualRefreshToken() {
       apiRequest<AuthRefreshResponse>("/auth/refresh", {
         method: "POST",
       }),
+    onSuccess: () => {
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: authKeys.status() }),
+        queryClient.invalidateQueries({ queryKey: authKeys.events() }),
+      ])
+    },
+  })
+}
+
+interface LoginLinkResponse {
+  status: "ok"
+  link_expires_in_minutes: number
+}
+
+/**
+ * Ask the backend to push a one-tap Fyers login link to Telegram. Useful when
+ * the working session expired and the phone is closer than the keyboard.
+ */
+export function useSendTelegramLoginLink() {
+  return useMutation({
+    mutationFn: () =>
+      apiRequest<LoginLinkResponse>("/auth/send-login-link", {
+        method: "POST",
+      }),
+  })
+}
+
+/** Live broker check on demand (one authenticated Fyers call). */
+export function useVerifyFyersSession() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      apiRequest<AuthVerification>("/auth/verify", { method: "POST" }),
+    onSuccess: () => {
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: authKeys.status() }),
+        queryClient.invalidateQueries({ queryKey: authKeys.events() }),
+      ])
+    },
+  })
+}
+
+interface TotpLoginResponse {
+  status: "ok"
+  expires_at?: string | null
+}
+
+/** Manually run the headless TOTP login (only when enabled server-side). */
+export function useRunTotpLogin() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiRequest<TotpLoginResponse>("/auth/totp-login", { method: "POST" }),
     onSuccess: () => {
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: authKeys.status() }),

@@ -105,7 +105,11 @@ class FyersTokenRefreshPinTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(new_token)
         mock_emit.assert_awaited_once_with(
-            mock_db, "critical", "auth_refresh_failed", {"reason": "missing_fyers_pin"}
+            mock_db,
+            "critical",
+            "auth_refresh_failed",
+            {"reason": "missing_fyers_pin"},
+            redis=mock_redis,
         )
         mock_set_health.assert_awaited_once_with(mock_redis, False)
         mock_db.commit.assert_awaited_once()
@@ -146,31 +150,89 @@ class FyersTokenRefreshPinTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_emit.await_args.args[2], "auth_refresh_succeeded")
 
     async def test_get_auth_status_reports_pin_and_refresh_token(self):
-        """Verify get_auth_status_from_db exposes has_refresh_token and has_pin indicators."""
-        mock_db = AsyncMock()
+        """Verify get_auth_status_from_db exposes readiness indicators for the UI."""
+        from app.services import auth_readiness as ar
 
-        # Case 1: No token
-        with (
-            patch.object(settings, "fyers_pin", "1234"),
-            patch("app.services.auth_service.get_fyers_token", new_callable=AsyncMock, return_value=None),
-        ):
-            status = await get_auth_status_from_db(mock_db)
+        mock_db = AsyncMock()
+        issued = datetime.datetime.now(datetime.timezone.utc)
+        stored = {
+            "expires_at": issued + datetime.timedelta(hours=24),
+            "refreshed_at": issued,
+            "updated_at": issued,
+            "has_refresh_token": True,
+        }
+
+        async def _readiness(stored_row):
+            with patch.object(ar, "read_stored_token", new=AsyncMock(return_value=stored_row)):
+                return await get_auth_status_from_db(mock_db)
+
+        with patch.object(settings, "fyers_pin", "1234"):
+            status = await _readiness(None)
             self.assertFalse(status["authenticated"])
             self.assertFalse(status["has_refresh_token"])
             self.assertTrue(status["has_pin"])
 
-        # Case 2: Valid token with refresh_token and PIN configured
-        future_expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=12)
-        with (
-            patch.object(settings, "fyers_pin", "1234"),
-            patch(
-                "app.services.auth_service.get_fyers_token",
-                new_callable=AsyncMock,
-                return_value={"access_token": "at", "refresh_token": "rt", "expires_at": future_expiry},
-            ),
-        ):
-            status = await get_auth_status_from_db(mock_db)
+            status = await _readiness(stored)
             self.assertTrue(status["authenticated"])
             self.assertTrue(status["healthy"])
             self.assertTrue(status["has_refresh_token"])
             self.assertTrue(status["has_pin"])
+            self.assertEqual(status["session_cutoff_ist"], settings.fyers_session_cutoff_ist)
+            # The stored 24h lifetime is reported clamped to the daily cutoff.
+            self.assertLess(
+                datetime.datetime.fromisoformat(status["expires_at"]),
+                issued + datetime.timedelta(hours=24),
+            )
+
+    async def test_refresh_attempts_are_rate_limited(self):
+        """A dead session must not hammer the broker or spam system events."""
+        from app.services import auth_service
+
+        mock_db = AsyncMock()
+        mock_redis = AsyncMock()
+        mock_redis.set = AsyncMock(return_value=None)  # cooldown key already present
+
+        with patch.object(settings, "fyers_pin", "1234"):
+            with patch(
+                "app.services.auth_service.get_fyers_token", new_callable=AsyncMock
+            ) as get_token:
+                result = await auth_service.refresh_and_save(mock_db, mock_redis)
+
+        self.assertIsNone(result)
+        get_token.assert_not_awaited()
+
+    async def test_persisted_expiry_is_clamped_to_the_session_cutoff(self):
+        """A 24h broker lifetime must never be stored past the 06:30 IST cutoff."""
+        from app.services import auth_readiness as ar
+        from app.services import auth_service
+
+        fixed = datetime.datetime(2026, 9, 15, 7, 20, tzinfo=datetime.timezone.utc)
+        expected = ar.clamp_token_expiry(fixed, 86400)
+        self.assertLess(
+            expected, fixed + datetime.timedelta(hours=24)
+        )  # sanity: the clamp actually bites
+
+        saved = {}
+
+        async def _save(db, access_token, refresh_token, expires_at):
+            saved["expires_at"] = expires_at
+
+        mock_redis = AsyncMock()
+        with (
+            patch("app.services.auth_service.save_fyers_token", new=_save),
+            patch("app.services.auth_service.clamp_token_expiry", return_value=expected),
+        ):
+            await auth_service.persist_and_cache_fyers_token(
+                AsyncMock(),
+                mock_redis,
+                access_token="AT",
+                refresh_token=None,
+                expires_at=fixed + datetime.timedelta(hours=24),
+                expires_in=86400,
+            )
+
+        self.assertEqual(saved["expires_at"], expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

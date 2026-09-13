@@ -122,6 +122,21 @@ SQL
 # 3) Fyers OAuth via personal client
 #    Open https://app.edurel.xyz → Login Fyers
 
+# 3b) Daily auth chain (Fyers retires every token at 06:30 IST and SEBI's
+#     April-2026 framework removed continuous refresh sessions).
+#     Run these probes on the VPS so login traffic shares the whitelisted
+#     static IP. Restart the worker afterwards so the guard cron is armed.
+"${COMPOSE[@]}" run --rm --no-deps -T api python scripts/fyers_auth_probe.py --dry-run
+"${COMPOSE[@]}" run --rm --no-deps -T api python scripts/fyers_auth_probe.py --verify
+"${COMPOSE[@]}" run --rm --no-deps -T api python scripts/fyers_auth_probe.py --telegram-test
+"${COMPOSE[@]}" up -d worker
+
+# Expected guard behaviour (IST, Mon-Fri):
+#   07:00-08:30  verify session → headless TOTP retry → Telegram ⚠️ + 1-tap link
+#   08:45        pre-market readiness digest, or 🚨 CRITICAL when still missing
+# Verify: docker logs -f swingtradervcp-worker-1 | grep -i "auth guard"
+#         curl -s http://127.0.0.1:8002/api/v1/auth/status   (session-authenticated)
+
 # 4) P9 replay requires 2018-present daily history for the three broad indices,
 # all 16 sector indices, and point-in-time Nifty 500 constituents when available.
 # A shorter normal sync is not sufficient for rollout sign-off.
@@ -210,6 +225,50 @@ Server `.env.prod` (already in [`.env.prod.example`](.env.prod.example)):
 - `FRONTEND_PUBLIC_URL=https://app.edurel.xyz`
 - `FYERS_REDIRECT_URI=https://app.edurel.xyz/callback`
 - `CORS_ORIGINS=["https://app.edurel.xyz"]`
+- `API_PUBLIC_BASE_URL=https://api.edurel.xyz` (used to build the one-tap login link)
+
+### Daily Fyers auth guard (required since the April-2026 SEBI framework)
+
+Fyers expires every access token at **06:30 IST daily** regardless of the
+`expires_in` it reports, and continuous refresh-token sessions no longer exist.
+The `worker` container runs `run_auth_guard` on IST morning slots:
+
+| Slot (Mon–Fri) | Behaviour |
+| --- | --- |
+| 07:00–08:30 (every 15 min) | verify the session with one live call → retry the headless TOTP login → else Telegram `⚠️` with a one-tap login link (one alert per 30 min) |
+| 08:45 | pre-market readiness digest, or `🚨 CRITICAL` when the session is still missing |
+
+One-time Telegram setup (free, ~2 minutes):
+
+1. Open Telegram → `@BotFather` → `/newbot` → copy the bot token.
+2. Send `/start` to your new bot, then read your chat id from
+   `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+3. Add to `.env.prod`:
+   `TELEGRAM_NOTIFICATIONS_ENABLED=true`, `TELEGRAM_BOT_TOKEN=…`,
+   `TELEGRAM_CHAT_ID=…`, then `up -d worker`.
+
+Zero-touch headless login (optional, opt-in):
+
+1. Fyers MyAccount → disable and re-enable External 2FA / TOTP to reveal the
+   base32 secret (store it in a password manager as well).
+2. Add `FYERS_USER_ID` (fy_id, default derived from `FYERS_APP_ID`),
+   `FYERS_PIN`, `FYERS_TOTP_KEY`, then set `AUTH_HEADLESS_LOGIN_ENABLED=true`.
+3. Validate first with `scripts/fyers_auth_probe.py --verify` and only then
+   enable the flag in `.env.prod`.
+
+Operational notes:
+
+- Run the guard on the VPS: order placement must originate from the registered
+  static IP, and the guard should share that IP.
+- The guard never persists a token whose `/profile` identity differs from
+  `FYERS_USER_ID`, so a leaked login link cannot redirect the session to
+  another Fyers account.
+- A missing session blocks **new** entry/add legs (`ensure_session_ready` in
+  the entry supervisor preflight). Exits, the position monitor, and
+  reconciliation keep their own auth handling.
+- Manual recovery from the workstation: `https://app.edurel.xyz` → the auth
+  banner → *Login to Fyers*, *Run TOTP login*, or *Send login link to
+  Telegram*.
 
 Client image bake-in (CI):
 

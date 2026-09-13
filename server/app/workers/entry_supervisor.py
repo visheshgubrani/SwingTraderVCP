@@ -58,6 +58,7 @@ from app.domain.p10_triggers import (
     evaluate_intraday_trigger,
 )
 from app.domain.journal_charges import FillLeg, estimate_cnc_charges
+from app.services.auth_readiness import ensure_session_ready
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.redis_pool import create_async_redis
 from app.redis_pubsub import consume_pubsub
@@ -564,6 +565,16 @@ async def _fresh_ltp(redis: aioredis.Redis, symbol: str) -> Decimal:
 
 
 async def _fetch_broker_preflight(redis: aioredis.Redis) -> BrokerPreflightSnapshot:
+    # A missing daily Fyers session must never arm a new entry/add leg
+    # (AGENTS.md §8). Live mode also confirms the session with one broker call,
+    # because Fyers retires tokens at the 06:30 IST cutoff even when the stored
+    # expiry still looks valid. Exits and the position monitor are unaffected:
+    # they keep their own authoritative AuthUnavailableError handling.
+    await ensure_session_ready(
+        redis,
+        context="Fyers session",
+        verify=settings.execution_mode == "live",
+    )
     if settings.execution_mode == "paper":
         async with async_session() as db:
             try:
@@ -720,6 +731,9 @@ def _entry_rejection_outcome(exc: BaseException) -> str:
             "fresh price",
             "fresh ltp",
             "snapshot",
+            "fyers session",
+            "authentication",
+            "not authenticated",
         )
     ):
         return "rejected_preflight"

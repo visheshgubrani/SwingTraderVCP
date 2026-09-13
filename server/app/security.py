@@ -50,6 +50,9 @@ async def save_fyers_token(
 async def get_fyers_token(session: AsyncSession) -> dict | None:
     """
     Decrypts and returns the active Fyers token if available.
+
+    ``refreshed_at`` is returned so callers can derive the daily 06:30 IST
+    session cutoff from the moment the token was issued.
     """
     query = text("""
         SELECT 
@@ -58,7 +61,8 @@ async def get_fyers_token(session: AsyncSession) -> dict | None:
                  THEN pgp_sym_decrypt(decode(refresh_token_encrypted, 'base64'), :key)
                  ELSE NULL 
             END as refresh_token,
-            expires_at
+            expires_at,
+            refreshed_at
         FROM broker_auth_tokens
         WHERE broker = 'fyers' AND token_scope = 'default'
     """)
@@ -68,6 +72,7 @@ async def get_fyers_token(session: AsyncSession) -> dict | None:
         return {
             "access_token": row.access_token,
             "refresh_token": row.refresh_token,
-            "expires_at": row.expires_at
+            "expires_at": row.expires_at,
+            "refreshed_at": row.refreshed_at,
         }
     return None

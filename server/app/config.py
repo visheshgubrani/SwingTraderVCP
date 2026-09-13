@@ -87,8 +87,20 @@ class Settings(BaseSettings):
 
     fyers_app_id: str = ""
     fyers_secret_key: str = ""
-    # 4-digit Fyers PIN used for unattended token refresh via validate-refresh-token endpoint.
+    # 4-digit Fyers trading PIN. Used by verify_pin_v2 in the headless login flow
+    # and by the legacy validate-refresh-token fallback.
     fyers_pin: str = ""
+    # Fyers fy_id (e.g. "XV12345"). Blank derives it from FYERS_APP_ID by
+    # stripping the "-<appType>" suffix. Used for verify_pin_v2 and for the
+    # post-login owner check that rejects a foreign account's auth code.
+    fyers_user_id: str = ""
+    # Base32 secret backing Fyers External 2FA (TOTP). Environment-only secret:
+    # never logged, never returned by an API response.
+    fyers_totp_key: str = ""
+    # Fyers kills every API session at this IST wall-clock time regardless of the
+    # expires_in the token endpoint reports (broker-confirmed: 06:30 IST).
+    # Stored token expiry is clamped to the next occurrence of this boundary.
+    fyers_session_cutoff_ist: str = "06:30"
     # Dedicated symmetric encryption key for broker tokens in Postgres (SEC-005).
     # Required in production. Local/dev may fall back to fyers_secret_key.
     token_encryption_key: str = ""
@@ -98,6 +110,33 @@ class Settings(BaseSettings):
         if self.token_encryption_key:
             return self.token_encryption_key
         return self.fyers_secret_key or "antigravity-dev-token-encryption-key"
+
+    @property
+    def resolved_fyers_user_id(self) -> str:
+        """Fyers fy_id — the login identity used by the headless TOTP flow."""
+        explicit = (self.fyers_user_id or "").strip()
+        if explicit:
+            return explicit
+        app_id = (self.fyers_app_id or "").strip()
+        if not app_id:
+            return ""
+        return app_id.split("-", 1)[0]
+
+    @property
+    def headless_login_configured(self) -> bool:
+        """True when every credential the headless TOTP flow needs is present."""
+        return bool(
+            self.resolved_fyers_user_id
+            and (self.fyers_pin or "").strip()
+            and (self.fyers_totp_key or "").strip()
+        )
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(
+            (self.telegram_bot_token or "").strip()
+            and (self.telegram_chat_id or "").strip()
+        )
 
     fyers_redirect_uri: str = "http://127.0.0.1:3000/callback"
     # Where the GET /auth/callback browser bounce should land after Fyers OAuth.
@@ -119,12 +158,40 @@ class Settings(BaseSettings):
     # after this grace period, avoiding false recovery during worker transitions.
     personal_scan_running_stale_seconds: int = Field(default=3600, ge=300, le=21600)
 
-    # Token refresh: run daily before market open (default 08:50 IST).
-    # Fyers access tokens expire ~midnight IST; refresh early so workers
-    # have a valid token by 09:15 market open.
+    # Daily broker-auth guard. Fyers access tokens now die every day at
+    # FYERS_SESSION_CUTOFF_IST (06:30 IST) and SEBI's April-2026 retail-algo
+    # framework removed continuous refresh-token sessions, so the guard runs on
+    # the IST slots below, re-authenticates via TOTP when possible, and alerts
+    # through Telegram when the session is still missing before market open.
     token_refresh_enabled: bool = True
+    # DEPRECATED: superseded by auth_guard_hours/auth_guard_minutes. Retained so
+    # existing deployments that set these keep parsing.
     token_refresh_hour: int = Field(default=8, ge=0, le=23)
     token_refresh_minute: int = Field(default=50, ge=0, le=59)
+    auth_guard_enabled: bool = True
+    auth_guard_hours: list[int] = Field(default_factory=lambda: [7, 8])
+    auth_guard_minutes: list[int] = Field(default_factory=lambda: [0, 15, 30, 45])
+    # Headless TOTP login is opt-in: it depends on broker web endpoints that can
+    # change without notice, so the Telegram tap path must always be available.
+    auth_headless_login_enabled: bool = False
+    auth_guard_max_headless_attempts: int = Field(default=3, ge=0, le=10)
+    auth_magic_link_ttl_minutes: int = Field(default=60, ge=5, le=240)
+    auth_magic_link_max_uses: int = Field(default=5, ge=1, le=20)
+    auth_notify_success: bool = True
+    auth_notify_cooldown_minutes: int = Field(default=30, ge=5, le=240)
+    # Cooldowns stop a dead session from spamming system_events / broker login.
+    auth_refresh_attempt_cooldown_seconds: int = Field(default=300, ge=0, le=3600)
+    auth_event_cooldown_seconds: int = Field(default=600, ge=0, le=3600)
+    auth_live_verify_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
+
+    # Outbound Telegram notifications (send-only; no inbound bot listener).
+    telegram_notifications_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_api_base_url: str = "https://api.telegram.org"
+    # Public base URL of this API (e.g. https://api.edurel.xyz). Required to build
+    # the one-tap login link; when blank the guard still alerts without a button.
+    api_public_base_url: str = ""
 
     # Reconciliation: compare DB vs Fyers during market hours (IST).
     reconciliation_enabled: bool = True
@@ -225,6 +292,42 @@ class Settings(BaseSettings):
             return v.replace("postgresql://", "postgresql+asyncpg://", 1)
         return v
 
+    @field_validator("fyers_session_cutoff_ist", mode="after")
+    @classmethod
+    def validate_session_cutoff(cls, v: str) -> str:
+        raw = (v or "").strip()
+        parts = raw.split(":")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            raise ValueError(
+                "FYERS_SESSION_CUTOFF_IST must be HH:MM in 24-hour IST form"
+            )
+        hour, minute = int(parts[0]), int(parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(
+                "FYERS_SESSION_CUTOFF_IST must be a valid 24-hour IST time"
+            )
+        return f"{hour:02d}:{minute:02d}"
+
+    @field_validator("auth_guard_hours", mode="after")
+    @classmethod
+    def validate_guard_hours(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("AUTH_GUARD_HOURS must contain at least one hour")
+        for hour in v:
+            if not 0 <= int(hour) <= 23:
+                raise ValueError("AUTH_GUARD_HOURS entries must be 0-23")
+        return sorted({int(hour) for hour in v})
+
+    @field_validator("auth_guard_minutes", mode="after")
+    @classmethod
+    def validate_guard_minutes(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("AUTH_GUARD_MINUTES must contain at least one minute")
+        for minute in v:
+            if not 0 <= int(minute) <= 59:
+                raise ValueError("AUTH_GUARD_MINUTES entries must be 0-59")
+        return sorted({int(minute) for minute in v})
+
     @model_validator(mode="after")
     def assemble_database_url_from_parts(self) -> Self:
         if self.vcp_vision_detail_sessions > self.vcp_vision_context_sessions:
@@ -268,6 +371,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "TOKEN_ENCRYPTION_KEY is required in production environment; "
                     "refusing to fall back to broker secret."
+                )
+            if self.telegram_notifications_enabled and not self.telegram_configured:
+                raise ValueError(
+                    "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when "
+                    "TELEGRAM_NOTIFICATIONS_ENABLED is true."
                 )
         else:
             if not self.app_password:

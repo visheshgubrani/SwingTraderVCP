@@ -103,7 +103,7 @@ describe("AuthBanner Broker Status Flow", () => {
 
   it("does not render when auth is healthy", () => {
     vi.spyOn(AuthApiModule, "useAuthStatus").mockReturnValue({
-      data: { healthy: true, reason: null },
+      data: { healthy: true, reason: null, session_cutoff_ist: "06:30" },
       isLoading: false,
       error: null,
     } as any)
@@ -120,10 +120,17 @@ describe("AuthBanner Broker Status Flow", () => {
     expect(container).toBeEmptyDOMElement()
   })
 
-  it("renders warning banner when Fyers token is expired", async () => {
+  it("renders warning banner when the Fyers session hit the daily cutoff", async () => {
     const mockMutate = vi.fn()
     vi.spyOn(AuthApiModule, "useAuthStatus").mockReturnValue({
-      data: { healthy: false, reason: "expired" },
+      data: {
+        healthy: false,
+        reason: "expired",
+        session_cutoff_ist: "06:30",
+        telegram_enabled: false,
+        headless_login_enabled: true,
+        headless_login_configured: true,
+      },
       isLoading: false,
       error: null,
     } as any)
@@ -139,7 +146,9 @@ describe("AuthBanner Broker Status Flow", () => {
     const { user } = renderWithProviders(<AuthBanner />)
 
     expect(screen.getByText(/Market data authentication required/i)).toBeInTheDocument()
-    expect(screen.getByText(/The Fyers token has expired/i)).toBeInTheDocument()
+    expect(
+      screen.getByText(/The Fyers session ended at the 06:30 IST daily cutoff/i),
+    ).toBeInTheDocument()
 
     const loginBtn = screen.getByRole("button", { name: /Login to Fyers/i })
     expect(loginBtn).toBeInTheDocument()

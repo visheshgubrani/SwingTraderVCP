@@ -58,6 +58,64 @@ def _args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _mask(value: str | None) -> str:
+    """Show that a secret exists without revealing it."""
+    raw = (value or "").strip()
+    if not raw:
+        return "unset"
+    return f"set ({len(raw)} chars, {raw[:2]}…)"
+
+
+def _headless_missing() -> list[str]:
+    """Exactly which variables the headless chain still needs."""
+    missing = []
+    if not settings.resolved_fyers_user_id:
+        missing.append("FYERS_USER_ID (or FYERS_APP_ID to derive it)")
+    if not (settings.fyers_pin or "").strip():
+        missing.append("FYERS_PIN")
+    if not (settings.fyers_totp_key or "").strip():
+        missing.append("FYERS_TOTP_KEY")
+    if not settings.fyers_app_id:
+        missing.append("FYERS_APP_ID")
+    if not settings.fyers_secret_key:
+        missing.append("FYERS_SECRET_KEY")
+    return missing
+
+
+def _config_report() -> None:
+    """One glance at what is and is not configured (never prints secrets)."""
+    app_id = (settings.fyers_app_id or "").strip()
+    user_id = settings.resolved_fyers_user_id
+    print("--- config ---")
+    print(f"FYERS_APP_ID          : {app_id or 'unset'}")
+    print(f"FYERS_SECRET_KEY      : {_mask(settings.fyers_secret_key)}")
+    print(
+        "FYERS_USER_ID         : "
+        f"{user_id or 'unset'}"
+        f"{' (derived from FYERS_APP_ID)' if user_id and not (settings.fyers_user_id or '').strip() else ''}"
+    )
+    print(f"FYERS_PIN             : {_mask(settings.fyers_pin)}")
+    print(f"FYERS_TOTP_KEY        : {_mask(settings.fyers_totp_key)}")
+    print(
+        "AUTH_HEADLESS_LOGIN_ENABLED : "
+        f"{settings.auth_headless_login_enabled}"
+    )
+    print(
+        "TELEGRAM_NOTIFICATIONS_ENABLED : "
+        f"{settings.telegram_notifications_enabled} "
+        f"(bot {_mask(settings.telegram_bot_token)}, chat {_mask(settings.telegram_chat_id)})"
+    )
+    print(f"API_PUBLIC_BASE_URL   : {settings.api_public_base_url or 'unset'}")
+    print(f"session cutoff (IST)  : {settings.fyers_session_cutoff_ist}")
+    print(f"next session cutoff   : {next_session_cutoff_ist().isoformat()}")
+    missing = _headless_missing()
+    print(
+        "headless readiness    : "
+        + ("ready" if not missing else "MISSING " + ", ".join(missing))
+    )
+    print("--- end config ---")
+
+
 def _shape(step: str, payload: dict) -> dict:
     """Response shape without any credential material."""
     data = payload.get("data")
@@ -76,11 +134,15 @@ async def _dry_run() -> int:
     user_id = settings.resolved_fyers_user_id
     pin = (settings.fyers_pin or "").strip()
     totp_key = (settings.fyers_totp_key or "").strip()
-    if not (user_id and pin and totp_key):
-        print("Missing FYERS_USER_ID / FYERS_PIN / FYERS_TOTP_KEY — cannot probe.")
-        return 2
-    if not (settings.fyers_app_id and settings.fyers_secret_key):
-        print("Missing FYERS_APP_ID / FYERS_SECRET_KEY — cannot probe.")
+    missing = _headless_missing()
+    if missing:
+        print(
+            "Cannot probe: still missing " + ", ".join(missing) + ".",
+        )
+        print(
+            "Set them in .env.prod (see .env.prod.example) and re-run. "
+            "No broker request was made."
+        )
         return 2
 
     try:
@@ -92,8 +154,6 @@ async def _dry_run() -> int:
         print(f"TOTP secret unusable: {exc}")
         return 2
 
-    print(f"session cutoff (IST): {settings.fyers_session_cutoff_ist}")
-    print(f"next cutoff: {next_session_cutoff_ist().isoformat()}")
     print(f"totp step remaining at generate time: {seconds_remaining():.1f}s (code length {len(otp)})")
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -165,8 +225,18 @@ async def _dry_run() -> int:
 async def _verify() -> int:
     from app.services.fyers_totp import attempt_headless_login
 
-    # The probe must work even with the opt-in flag still off.
+    missing = _headless_missing()
+    if missing:
+        print(
+            "Cannot verify: still missing " + ", ".join(missing) + ". "
+            "No broker request was made."
+        )
+        return 2
+
+    # The probe must run even while the opt-in flag is still off in .env.prod.
+    # This only affects this process; the deployed worker keeps its own setting.
     settings.auth_headless_login_enabled = True
+    print("note: AUTH_HEADLESS_LOGIN_ENABLED forced true for this probe process only")
     outcome = await attempt_headless_login()
     if not outcome.ok or not outcome.access_token:
         print(f"headless login failed: reason={outcome.reason} step={outcome.step} detail={outcome.detail}")
@@ -223,6 +293,7 @@ async def _main() -> int:
             return 2
         print(f"code length={len(code)} step_remaining={seconds_remaining():.1f}s")
         return 0
+    _config_report()
     if args.telegram_test:
         return await _telegram_test()
     if args.dry_run:

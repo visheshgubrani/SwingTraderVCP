@@ -9,7 +9,10 @@ Phase-0 validation before trusting the guard:
     # 2. Full login + one live authenticated call (prints no secrets)
     python scripts/fyers_auth_probe.py --verify
 
-    # 3. Can the owner be reached on Telegram?
+    # 3. What account does Fyers say the stored session belongs to?
+    python scripts/fyers_auth_probe.py --profile-now
+
+    # 4. Can the owner be reached on Telegram?
     python scripts/fyers_auth_probe.py --telegram-test
 
 The probe never writes a token to Postgres/Redis — the guard owns persistence —
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -33,6 +37,7 @@ from app.config import settings  # noqa: E402
 from app.domain.totp import TotpSecretError, generate_totp, seconds_remaining  # noqa: E402
 from app.services.auth_readiness import (  # noqa: E402
     next_session_cutoff_ist,
+    owner_identity_check,
     verify_fyers_session,
 )
 from app.services.fyers_totp import (  # noqa: E402
@@ -53,6 +58,7 @@ def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Run the login chain and report each step's status shape only.")
     parser.add_argument("--verify", action="store_true", help="Full headless login followed by a live /profile check.")
+    parser.add_argument("--profile-now", action="store_true", help="Report which Fyers account the stored session belongs to.")
     parser.add_argument("--telegram-test", action="store_true", help="Send a Telegram test message to TELEGRAM_CHAT_ID.")
     parser.add_argument("--otp-peek", action="store_true", help="Print the current TOTP code length/step timing (never the code).")
     return parser.parse_args()
@@ -266,6 +272,48 @@ async def _verify() -> int:
     return 0
 
 
+async def _profile_now() -> int:
+    """Report what Fyers says about the account behind the *stored* session.
+
+    Reveals exactly which identifier `/profile` returns so FYERS_USER_ID can be
+    pinned correctly. Never prints the token, and only prints identity values
+    (account ids, not secrets) plus the response's key names.
+    """
+    from app.database import async_session
+    from app.security import get_fyers_token
+
+    async with async_session() as db:
+        stored = await get_fyers_token(db)
+    if not stored or not stored.get("access_token"):
+        print("No Fyers token stored yet — complete one login first, then re-run.")
+        return 2
+
+    result = await verify_fyers_session(stored["access_token"])
+    verdict = owner_identity_check(settings.resolved_fyers_user_id, result.identities)
+    print(
+        json.dumps(
+            {
+                "session_ok": result.ok,
+                "error": result.error,
+                "code": result.code,
+                "expected_identity": settings.resolved_fyers_user_id,
+                "expected_is_explicit": settings.fyers_user_id_is_explicit,
+                "observed_identities": list(result.identities),
+                "profile_keys": list(result.profile_keys),
+                "owner_check": verdict,
+                "stored_expiry": str(stored.get("expires_at")),
+            },
+            indent=2,
+        )
+    )
+    if verdict != "match" and result.ok and result.identities:
+        print(
+            f"Hint: set FYERS_USER_ID={result.identities[0]} in .env.prod to pin this "
+            "account (strict owner enforcement then applies)."
+        )
+    return 0 if result.ok else 1
+
+
 async def _telegram_test() -> int:
     from app.services import telegram_service
 
@@ -294,6 +342,8 @@ async def _main() -> int:
         print(f"code length={len(code)} step_remaining={seconds_remaining():.1f}s")
         return 0
     _config_report()
+    if args.profile_now:
+        return await _profile_now()
     if args.telegram_test:
         return await _telegram_test()
     if args.dry_run:

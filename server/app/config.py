@@ -138,6 +138,17 @@ class Settings(BaseSettings):
             and (self.telegram_chat_id or "").strip()
         )
 
+    @property
+    def fyers_user_id_is_explicit(self) -> bool:
+        """True when FYERS_USER_ID was set by the operator.
+
+        An explicitly configured id is an operator assertion, so the owner check
+        enforces it strictly. A value merely derived from FYERS_APP_ID is a
+        guess: a disagreement there is reported as a configuration error instead
+        of locking the real owner out of their own account.
+        """
+        return bool((self.fyers_user_id or "").strip())
+
     fyers_redirect_uri: str = "http://127.0.0.1:3000/callback"
     # Where the GET /auth/callback browser bounce should land after Fyers OAuth.
     # Defaults to the personal Vite app; set to the public client URL on the VPS.

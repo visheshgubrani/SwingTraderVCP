@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -45,8 +46,47 @@ class VerifyResult:
 
     ok: bool
     identity: str | None = None
+    identities: tuple[str, ...] = ()
+    profile_keys: tuple[str, ...] = ()
     error: str | None = None
     code: int | None = None
+
+    @property
+    def all_identities(self) -> tuple[str, ...]:
+        """Every identity this result carries.
+
+        ``identity`` is the display value; ``identities`` is the full candidate
+        list. The owner check reads this union so a result populated with only
+        one of the two fields cannot silently degrade into "unverifiable".
+        """
+        values = list(self.identities)
+        if self.identity and self.identity not in values:
+            values.insert(0, self.identity)
+        return tuple(values)
+
+
+# Keys Fyers uses for the account identifier in a /profile payload. All are
+# collected (not just the first hit): the payload can carry a numeric internal
+# `id` alongside the alphanumeric `fy_id`, and treating that numeric id as "the"
+# identity produced false owner-mismatch rejections for the real owner.
+IDENTITY_KEYS = frozenset(
+    {
+        "fy_id",
+        "fyid",
+        "client_id",
+        "clientid",
+        "user_id",
+        "userid",
+        "login_id",
+        "loginid",
+        "id",
+    }
+)
+
+# Owner-identity check outcomes.
+OWNER_MATCH = "match"
+OWNER_MISMATCH = "mismatch"
+OWNER_UNVERIFIABLE = "unverifiable"
 
 
 def parse_session_cutoff(value: str | None = None) -> dt.time:
@@ -154,18 +194,65 @@ def is_nse_session(day: dt.date, *, holidays: frozenset[dt.date] | None = None) 
     return day not in holiday_set
 
 
-def _profile_identity(payload: dict[str, Any] | None) -> str | None:
-    """Best-effort Fyers account identity from a /profile response."""
+def profile_identities(payload: dict[str, Any] | None) -> tuple[str, ...]:
+    """Every plausible Fyers account identifier in a /profile response.
+
+    Order is preserved and de-duplicated. A payload without any identifier is
+    reported as an empty tuple, which the owner check treats as unverifiable
+    rather than as a mismatch.
+    """
+    candidates: list[str] = []
+
+    def collect(mapping: dict) -> None:
+        for key, value in mapping.items():
+            if not isinstance(value, str) or not value.strip():
+                continue
+            if str(key).strip().lower() in IDENTITY_KEYS:
+                candidates.append(value.strip())
+
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            collect(data)
+            for value in data.values():
+                # Some payloads nest the account block one level deeper.
+                if isinstance(value, dict):
+                    collect(value)
+        collect(payload)
+
+    return tuple(dict.fromkeys(candidates))
+
+
+def profile_keys(payload: dict[str, Any] | None) -> tuple[str, ...]:
+    """Top-level ``data`` keys only — diagnostics without any account values."""
     if not isinstance(payload, dict):
-        return None
+        return ()
     data = payload.get("data")
     if not isinstance(data, dict):
-        return None
-    for key in ("fy_id", "fyId", "client_id", "clientId", "id"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+        return ()
+    return tuple(str(key) for key in data.keys())
+
+
+def owner_identity_check(
+    expected: str | None,
+    identities: Sequence[str],
+) -> str:
+    """Classify the owner check as match, mismatch, or unverifiable.
+
+    A mismatch is only reported when the broker actually named an account and
+    none of those names equals the expected identity.
+    """
+    wanted = (expected or "").strip()
+    observed = [value.strip() for value in identities if value and value.strip()]
+    if not wanted or not observed:
+        return OWNER_UNVERIFIABLE
+    if wanted in observed:
+        return OWNER_MATCH
+    return OWNER_MISMATCH
+
+
+def _first_identity(identities: Sequence[str]) -> str | None:
+    return identities[0] if identities else None
 
 
 async def verify_fyers_session(
@@ -222,7 +309,13 @@ async def verify_fyers_session(
             code=code if code is not None else response.status_code,
         )
 
-    return VerifyResult(ok=True, identity=_profile_identity(payload))
+    identities = profile_identities(payload)
+    return VerifyResult(
+        ok=True,
+        identity=_first_identity(identities),
+        identities=identities,
+        profile_keys=profile_keys(payload),
+    )
 
 
 async def read_stored_token(session: AsyncSession) -> dict[str, Any] | None:

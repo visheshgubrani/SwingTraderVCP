@@ -938,11 +938,22 @@ or weaken the global kill switch.
   Telegram tap path, not into silence.
 - The Telegram one-tap link is a capability to *start* an OAuth login, never to
   mint a token: single-use state, TTL-bounded nonce, per-IP limits, and a
-  post-exchange ownership check (`/profile` identity must equal
-  `FYERS_USER_ID`) before anything is persisted. A foreign account's auth code
-  is rejected and audited. The dashboard flow keeps its session + CSRF
-  requirement; only direct states are exempt from the session, never from the
-  state checks.
+  post-exchange ownership check before anything is persisted. The dashboard
+  flow keeps its session + CSRF requirement; only direct states are exempt from
+  the session, never from the state checks.
+- **Owner-check policy:** `FYERS_USER_ID` is the account-identity assertion.
+  Set explicitly, a mismatch is enforced strictly (403 + critical event). When
+  it is merely *derived* from `FYERS_APP_ID`, that prefix is a guess — Fyers
+  `/profile` may name the account differently (for example a numeric `id`
+  alongside `fy_id`) — so a disagreement is recorded as
+  `auth_owner_check_mismatch_derived` (warning, carrying the broker's observed
+  ids and the profile key names) and the real owner is **not** locked out of
+  their own account. Pin the id with `scripts/fyers_auth_probe.py
+  --profile-now` after any login; never build a hard lockout on a guessed id.
+  A `/profile` payload that names no account id is `unverifiable`: warn, allow,
+  audit — that is a broker payload change, not a foreign login. Identity
+  extraction must read *every* candidate field, never the first key that
+  happens to exist.
 - The scheduler validates broker-auth readiness and alerts before the live
   window. It must not pretend unattended refresh can create a new session when
   Fyers requires daily operator 2FA. Order-API deployment must use the

@@ -122,6 +122,13 @@ SQL
 # 3) Fyers OAuth via personal client
 #    Open https://app.edurel.xyz → Login Fyers
 
+# 3a) Pin the account id (once, after the first login):
+#     prints the identifiers Fyers reports for the stored session. If the
+#     "observed_identities" value differs from the FYERS_APP_ID prefix, set
+#     FYERS_USER_ID to it in .env.prod — an explicit id is enforced strictly,
+#     while a blank/derived id can only be warned about.
+"${COMPOSE[@]}" run --rm --no-deps -T api python scripts/fyers_auth_probe.py --profile-now
+
 # 3b) Daily auth chain (Fyers retires every token at 06:30 IST and SEBI's
 #     April-2026 framework removed continuous refresh sessions).
 #     Run these probes on the VPS so login traffic shares the whitelisted

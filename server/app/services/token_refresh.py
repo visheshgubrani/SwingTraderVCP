@@ -32,11 +32,13 @@ from app.database import async_session
 from app.services import telegram_service
 from app.services.auth_readiness import (
     IST_TZ,
+    OWNER_MISMATCH,
     as_ist,
     clamp_token_expiry,
     evaluate_auth_readiness,
     is_nse_session,
     next_session_cutoff_ist,
+    owner_identity_check,
     verify_fyers_session,
 )
 from app.services.auth_service import (
@@ -314,15 +316,31 @@ async def _attempt_headless_login(db, redis, *, now: dt.datetime) -> dict[str, A
         }
 
     if (
-        expected_identity
-        and verification.identity
-        and verification.identity != expected_identity
+        owner_identity_check(expected_identity, verification.all_identities)
+        == OWNER_MISMATCH
     ):
+        # The headless flow logs in with FYERS_USER_ID itself, so a disagreement
+        # here means the configured id is not this account. Fail closed, but
+        # record exactly what the broker reported so the config can be fixed.
+        logger.warning(
+            "Headless login owner check failed: expected=%s observed=%s profile_keys=%s "
+            "(user_id_explicit=%s)",
+            expected_identity,
+            list(verification.all_identities),
+            list(verification.profile_keys),
+            settings.fyers_user_id_is_explicit,
+        )
         await _emit_system_event(
             db,
             "critical",
             "auth_login_owner_mismatch",
-            {"method": "headless_totp", "expected": expected_identity},
+            {
+                "method": "headless_totp",
+                "expected": expected_identity,
+                "observed": list(verification.all_identities),
+                "profile_keys": list(verification.profile_keys),
+                "user_id_explicit": settings.fyers_user_id_is_explicit,
+            },
             redis=redis,
             cooldown_seconds=0,
         )

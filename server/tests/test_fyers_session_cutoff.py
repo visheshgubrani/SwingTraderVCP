@@ -145,6 +145,33 @@ class VerifySessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.identity, "XV12345")
 
+    async def test_numeric_internal_id_alongside_fy_id_is_not_a_mismatch(self):
+        """Regression: a numeric `id` next to the real `fy_id` must not reject the owner."""
+        client = AsyncMock()
+        client.get.return_value = _FakeResponse(
+            {
+                "s": "ok",
+                "code": 200,
+                "data": {
+                    "fy_id": "CIPE17K3T2",
+                    "id": "116310605254586687947",
+                    "name": "Owner",
+                    "email_id": "owner@example.com",
+                    "PAN": "AAAAA0000A",
+                },
+            }
+        )
+        with patch.object(settings, "fyers_app_id", "CIPE17K3T2-100"):
+            result = await ar.verify_fyers_session("token", client=client)
+        self.assertTrue(result.ok)
+        self.assertIn("CIPE17K3T2", result.identities)
+        self.assertEqual(
+            ar.owner_identity_check("CIPE17K3T2", result.identities), ar.OWNER_MATCH
+        )
+        # Only key names are captured for diagnostics — never the values.
+        self.assertIn("email_id", result.profile_keys)
+        self.assertNotIn("owner@example.com", " ".join(result.profile_keys))
+
     async def test_rejected_response_is_reported_without_leaking_token(self):
         client = AsyncMock()
         client.get.return_value = _FakeResponse(
@@ -263,6 +290,82 @@ class EnsureSessionReadyTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             await ar.ensure_session_ready(AsyncMock())
+
+
+class ProfileIdentityTests(unittest.TestCase):
+    def test_collects_every_identifier_in_order(self):
+        payload = {
+            "s": "ok",
+            "data": {"fy_id": "CIPE17K3T2", "id": "116310605254586687947", "name": "Owner"},
+        }
+        self.assertEqual(
+            ar.profile_identities(payload),
+            ("CIPE17K3T2", "116310605254586687947"),
+        )
+
+    def test_numeric_only_payload_reports_the_numeric_id(self):
+        payload = {"s": "ok", "data": {"id": "116310605254586687947"}}
+        self.assertEqual(ar.profile_identities(payload), ("116310605254586687947",))
+
+    def test_nested_account_block_is_scanned(self):
+        payload = {"s": "ok", "data": {"account": {"client_id": "XA12345"}}}
+        self.assertEqual(ar.profile_identities(payload), ("XA12345",))
+
+    def test_blank_and_missing_values_are_ignored(self):
+        self.assertEqual(ar.profile_identities(None), ())
+        self.assertEqual(ar.profile_identities({}), ())
+        self.assertEqual(ar.profile_identities({"s": "ok", "data": {"fy_id": "  "}}), ())
+        self.assertEqual(
+            ar.profile_identities({"s": "ok", "data": {"name": "Owner"}}), ()
+        )
+
+    def test_owner_check_outcomes(self):
+        self.assertEqual(ar.owner_identity_check("A", ["A", "B"]), ar.OWNER_MATCH)
+        self.assertEqual(ar.owner_identity_check("A", ["B"]), ar.OWNER_MISMATCH)
+        self.assertEqual(ar.owner_identity_check("A", []), ar.OWNER_UNVERIFIABLE)
+        self.assertEqual(ar.owner_identity_check("", ["A"]), ar.OWNER_UNVERIFIABLE)
+        self.assertEqual(ar.owner_identity_check(None, ["A"]), ar.OWNER_UNVERIFIABLE)
+
+
+class VerifyResultUnionTests(unittest.TestCase):
+    """A result carrying only `identity` must not silently pass the owner check."""
+
+    def test_union_contains_both_fields(self):
+        result = ar.VerifyResult(ok=True, identity="A", identities=("B",))
+        self.assertEqual(result.all_identities, ("A", "B"))
+
+    def test_union_does_not_duplicate(self):
+        result = ar.VerifyResult(ok=True, identity="A", identities=("A", "B"))
+        self.assertEqual(result.all_identities, ("A", "B"))
+
+    def test_identity_only_result_still_mismatches(self):
+        result = ar.VerifyResult(ok=True, identity="ZZ99999")
+        self.assertEqual(
+            ar.owner_identity_check("XV12345", result.all_identities), ar.OWNER_MISMATCH
+        )
+
+    def test_empty_result_is_unverifiable(self):
+        result = ar.VerifyResult(ok=True)
+        self.assertEqual(result.all_identities, ())
+        self.assertEqual(
+            ar.owner_identity_check("XV12345", result.all_identities),
+            ar.OWNER_UNVERIFIABLE,
+        )
+
+
+class ExplicitUserIdTests(unittest.TestCase):
+    def test_derived_id_is_not_explicit(self):
+        with (
+            patch.object(settings, "fyers_app_id", "CIPE17K3T2-100"),
+            patch.object(settings, "fyers_user_id", ""),
+        ):
+            self.assertFalse(settings.fyers_user_id_is_explicit)
+            self.assertEqual(settings.resolved_fyers_user_id, "CIPE17K3T2")
+
+    def test_configured_id_is_explicit(self):
+        with patch.object(settings, "fyers_user_id", "XA12345"):
+            self.assertTrue(settings.fyers_user_id_is_explicit)
+            self.assertEqual(settings.resolved_fyers_user_id, "XA12345")
 
 
 class _FakeResponse:

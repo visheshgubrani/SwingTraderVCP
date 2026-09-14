@@ -277,5 +277,88 @@ class SessionCallbackTests(DirectLoginTests):
         self.assertEqual(response.status_code, 400)
 
 
+class OwnerCheckPolicyTests(DirectLoginTests):
+    """The reported failure: the real owner rejected because FYERS_APP_ID was
+    used as the account id while /profile reported a different identifier."""
+
+    async def _login(self, identities, *, verify_ok=True, profile_keys=("fy_id", "id")):
+        state = await create_oauth_state(
+            self.redis, session_id="", kind="direct", nonce="n1"
+        )
+        persist = AsyncMock()
+        with (
+            patch(
+                "app.routers.auth.exchange_authorization_code",
+                new=AsyncMock(
+                    return_value={"ok": True, "access_token": "AT", "expires_in": 86400}
+                ),
+            ),
+            patch(
+                "app.routers.auth.verify_fyers_session",
+                new=AsyncMock(
+                    return_value=VerifyResult(
+                        ok=verify_ok,
+                        identity=identities[0] if identities else None,
+                        identities=tuple(identities),
+                        profile_keys=tuple(profile_keys),
+                        error=None if verify_ok else "rejected",
+                    )
+                ),
+            ),
+            patch("app.routers.auth.persist_and_cache_fyers_token", new=persist),
+            patch("app.services.token_refresh.mark_session_authenticated", new=AsyncMock()),
+            patch(
+                "app.services.telegram_service.send_auth_success",
+                new=AsyncMock(return_value=True),
+            ),
+        ):
+            response = self.client.post(
+                "/api/v1/auth/callback", json={"code": "C", "state": state}
+            )
+        return response, persist
+
+    async def test_matching_fy_id_beside_a_numeric_id_logs_in(self):
+        """Both identifiers present and one matches → no false rejection."""
+        with (
+            patch.object(settings, "fyers_user_id", ""),
+            patch.object(settings, "fyers_app_id", "CIPE17K3T2-100"),
+        ):
+            response, persist = await self._login(
+                ["CIPE17K3T2", "116310605254586687947"]
+            )
+        self.assertEqual(response.status_code, 200)
+        persist.assert_awaited_once()
+
+    async def test_derived_id_mismatch_warns_but_does_not_lock_the_owner_out(self):
+        """FYERS_APP_ID is not the account id for every account: warn, allow, audit."""
+        with (
+            patch.object(settings, "fyers_user_id", ""),
+            patch.object(settings, "fyers_app_id", "CIPE17K3T2-100"),
+        ):
+            response, persist = await self._login(["116310605254586687947"])
+        self.assertEqual(response.status_code, 200)
+        persist.assert_awaited_once()
+        self.db.execute.assert_awaited()
+
+    async def test_explicit_id_mismatch_is_still_rejected(self):
+        with (
+            patch.object(settings, "fyers_user_id", "XA12345"),
+            patch.object(settings, "fyers_app_id", "CIPE17K3T2-100"),
+        ):
+            response, persist = await self._login(["116310605254586687947"])
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("FYERS_USER_ID", response.json()["detail"])
+        persist.assert_not_awaited()
+
+    async def test_unverifiable_profile_is_allowed_with_a_warning(self):
+        with (
+            patch.object(settings, "fyers_user_id", "XA12345"),
+            patch.object(settings, "fyers_app_id", "CIPE17K3T2-100"),
+        ):
+            response, persist = await self._login([], profile_keys=("name", "email_id"))
+        self.assertEqual(response.status_code, 200)
+        persist.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,8 +17,11 @@ from app.dependencies.auth import (
     require_authenticated_user,
 )
 from app.services.auth_readiness import (
+    OWNER_MISMATCH,
+    OWNER_UNVERIFIABLE,
     clamp_token_expiry,
     evaluate_auth_readiness,
+    owner_identity_check,
     verify_fyers_session,
 )
 from app.services.auth_service import (
@@ -224,9 +227,12 @@ async def _exchange_code_and_save(
 ) -> dict:
     """Exchange an already-validated broker auth code and persist the token.
 
-    Ownership is verified before anything is written: a public App ID lets any
-    Fyers account complete the authorization flow, so an auth code that belongs
-    to a different account must never replace the owner's session.
+    Ownership is checked before anything is written: an App ID can be completed
+    by any Fyers account, so a foreign account's auth code must not silently
+    replace the owner's session. The check is deliberately strict only for an
+    explicitly configured ``FYERS_USER_ID``; when the expected id is merely
+    derived from ``FYERS_APP_ID`` a disagreement is a configuration error and is
+    reported loudly instead of locking the real owner out of their own account.
     """
     if not settings.fyers_app_id or not settings.fyers_secret_key:
         raise HTTPException(
@@ -241,24 +247,79 @@ async def _exchange_code_and_save(
     access_token = exchange["access_token"]
     verification = await verify_fyers_session(access_token)
     expected_identity = settings.resolved_fyers_user_id
-    if (
-        expected_identity
-        and verification.identity
-        and verification.identity != expected_identity
-    ):
+    owner_state = owner_identity_check(
+        expected_identity, verification.all_identities
+    )
+
+    if owner_state == OWNER_MISMATCH:
+        details = {
+            "method": method,
+            "expected": expected_identity,
+            "observed": list(verification.all_identities),
+            "profile_keys": list(verification.profile_keys),
+            "user_id_explicit": settings.fyers_user_id_is_explicit,
+        }
+        if settings.fyers_user_id_is_explicit:
+            logger.warning(
+                "Fyers owner check rejected a login: expected=%s observed=%s profile_keys=%s",
+                expected_identity,
+                list(verification.all_identities),
+                list(verification.profile_keys),
+            )
+            await _emit_auth_event(
+                db,
+                "critical",
+                "auth_login_owner_mismatch",
+                details,
+                redis=redis,
+                cooldown_seconds=0,
+            )
+            await db.commit()
+            raise HTTPException(
+                status_code=403,
+                detail="This Fyers account is not the configured FYERS_USER_ID.",
+            )
+
+        # Derived expectation: FYERS_APP_ID is not the account id for every
+        # Fyers account, so this is a config error, not a foreign login. Record
+        # the observed values (an id, not a secret) so it can be pinned in one
+        # step, and let the owner back in.
+        logger.warning(
+            "Fyers owner check could not confirm the derived id: expected=%s (derived from "
+            "FYERS_APP_ID) observed=%s profile_keys=%s. Set FYERS_USER_ID to the broker-reported "
+            "account id to pin this account and enable strict enforcement.",
+            expected_identity,
+            list(verification.all_identities),
+            list(verification.profile_keys),
+        )
         await _emit_auth_event(
             db,
-            "critical",
-            "auth_login_owner_mismatch",
-            {"method": method, "expected": expected_identity},
+            "warning",
+            "auth_owner_check_mismatch_derived",
+            details,
             redis=redis,
             cooldown_seconds=0,
         )
         await db.commit()
-        raise HTTPException(
-            status_code=403,
-            detail="This Fyers account is not the configured owner account.",
+    elif owner_state == OWNER_UNVERIFIABLE and settings.fyers_user_id_is_explicit:
+        logger.warning(
+            "Fyers owner check could not verify FYERS_USER_ID: the profile response named no "
+            "account id (profile_keys=%s).",
+            list(verification.profile_keys),
         )
+        await _emit_auth_event(
+            db,
+            "warning",
+            "auth_owner_check_unverifiable",
+            {
+                "method": method,
+                "expected": expected_identity,
+                "profile_keys": list(verification.profile_keys),
+            },
+            redis=redis,
+        )
+        await db.commit()
+
     if not verification.ok:
         logger.warning(
             "Fyers code exchange succeeded but the session did not verify: %s",

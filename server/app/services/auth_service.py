@@ -7,21 +7,22 @@ Never read tokens directly from the DB or cache elsewhere.
 Responsibilities:
 - Read encrypted token from Postgres (via security.py)
 - Cache valid access token in Redis with TTL
-- Attempt refresh via Fyers refresh-token API when token nears expiry
+- Cap stored expiry at the next 06:30 Asia/Kolkata Fyers daily cutoff
 - Emit system_events on auth failure so workers pause and UI surfaces a banner
 - Provide is_auth_healthy() for kill-switch / pause logic
+
+Daily operator OAuth + 2FA is the only way to obtain a token. Do not call
+validate-refresh-token.
 """
 
 import datetime
-import hashlib
 import json
 import logging
+from zoneinfo import ZoneInfo
 
-import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.database import async_session
 from app.security import get_fyers_token, save_fyers_token
 
@@ -32,11 +33,13 @@ _REDIS_TOKEN_KEY = "auth:fyers:access_token"
 _REDIS_EXPIRY_KEY = "auth:fyers:expires_at"
 _REDIS_HEALTH_KEY = "auth:fyers:healthy"
 
-# Buffer before expiry — refresh this many seconds early
+# Treat a token as expired this many seconds early so workers fail closed
+# before the official Fyers cutoff rather than mid-request.
 _EXPIRY_BUFFER_SECONDS = 300  # 5 minutes
 
-# Fyers refresh endpoint (not in SDK Config)
-_FYERS_REFRESH_URL = "https://api-t1.fyers.in/api/v3/validate-refresh-token"
+_IST = ZoneInfo("Asia/Kolkata")
+_FYERS_DAILY_EXPIRY_HOUR = 6
+_FYERS_DAILY_EXPIRY_MINUTE = 30
 
 
 class AuthUnavailableError(Exception):
@@ -45,6 +48,55 @@ class AuthUnavailableError(Exception):
     def __init__(self, reason: str = "No valid token"):
         self.reason = reason
         super().__init__(reason)
+
+
+def fyers_access_token_expires_at(
+    *,
+    now: datetime.datetime | None = None,
+    expires_in: int | None = None,
+) -> datetime.datetime:
+    """Return the UTC expiry to persist for a newly issued Fyers access token.
+
+    Fyers v3 access tokens expire daily at 06:30 Asia/Kolkata. Cap at that
+    cutoff even when the API still reports a 86400s TTL. A shorter API TTL
+    still wins.
+    """
+    now_utc = now or datetime.datetime.now(datetime.timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=datetime.timezone.utc)
+
+    ist_now = now_utc.astimezone(_IST)
+    daily_ist = ist_now.replace(
+        hour=_FYERS_DAILY_EXPIRY_HOUR,
+        minute=_FYERS_DAILY_EXPIRY_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if ist_now >= daily_ist:
+        daily_ist = daily_ist + datetime.timedelta(days=1)
+    daily_utc = daily_ist.astimezone(datetime.timezone.utc)
+
+    if expires_in is None:
+        return daily_utc
+    api_expiry = now_utc + datetime.timedelta(seconds=int(expires_in))
+    return min(api_expiry, daily_utc)
+
+
+def _cache_ttl_seconds(
+    expires_at: datetime.datetime,
+    now: datetime.datetime | None = None,
+) -> int:
+    now_utc = now or datetime.datetime.now(datetime.timezone.utc)
+    remaining = (expires_at - now_utc).total_seconds() - _EXPIRY_BUFFER_SECONDS
+    return max(int(remaining), 60)
+
+
+def _token_is_fresh(
+    expires_at: datetime.datetime,
+    now: datetime.datetime | None = None,
+) -> bool:
+    now_utc = now or datetime.datetime.now(datetime.timezone.utc)
+    return expires_at >= now_utc + datetime.timedelta(seconds=_EXPIRY_BUFFER_SECONDS)
 
 
 async def _emit_system_event(
@@ -100,135 +152,23 @@ async def invalidate_fyers_token(redis) -> None:
         logger.error("Failed to invalidate Fyers token: %s", e)
 
 
-async def _try_refresh_token(
-    refresh_token: str,
-) -> dict | None:
-    """
-    Call Fyers refresh-token endpoint.
-    Returns {"access_token": ..., "refresh_token": ..., "expires_in": ...} on success,
-    None on failure.
-    """
-    pin = (settings.fyers_pin or "").strip()
-    if not pin:
-        logger.error("Cannot refresh Fyers token: FYERS_PIN is not configured.")
-        return None
-
-    if not settings.fyers_app_id or not settings.fyers_secret_key:
-        logger.error("Cannot refresh Fyers token: FYERS_APP_ID or FYERS_SECRET_KEY is not configured.")
-        return None
-
-    app_id_hash = hashlib.sha256(
-        f"{settings.fyers_app_id}:{settings.fyers_secret_key}".encode()
-    ).hexdigest()
-
-    payload = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "appIdHash": app_id_hash,
-        "pin": pin,
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(_FYERS_REFRESH_URL, json=payload)
-    except httpx.HTTPError as e:
-        logger.error("Fyers refresh HTTP error: %s", e)
-        return None
-
-    try:
-        data = resp.json()
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.error("Fyers returned non-JSON response (status %d): %s", resp.status_code, e)
-        return None
-
-    if data.get("s") != "ok":
-        logger.warning(
-            "Fyers refresh rejected: %s (code=%s)",
-            data.get("message", "Unknown rejection"),
-            data.get("code"),
-        )
-        return None
-
-    return {
-        "access_token": data.get("access_token"),
-        "refresh_token": data.get("refresh_token", refresh_token),
-        "expires_in": data.get("expires_in", 86400),
-    }
-
-
-async def refresh_and_save(db: AsyncSession, redis) -> str | None:
-    """
-    Attempt to refresh the Fyers token. Returns new access_token on success,
-    None on failure. Emits system_events accordingly.
-
-    Commits the transaction once at the end (token save + system event).
-    """
-    token_data = await get_fyers_token(db)
-    if not token_data or not token_data.get("refresh_token"):
-        logger.error("No refresh token available for Fyers auth refresh")
-        await _emit_system_event(
-            db, "critical", "auth_refresh_failed", {"reason": "no_refresh_token"}
-        )
-        await db.commit()
-        await _set_auth_health(redis, False)
-        return None
-
-    pin = (settings.fyers_pin or "").strip()
-    if not pin:
-        logger.error("FYERS_PIN is not configured for token refresh")
-        await _emit_system_event(
-            db, "critical", "auth_refresh_failed", {"reason": "missing_fyers_pin"}
-        )
-        await db.commit()
-        await _set_auth_health(redis, False)
-        return None
-
-    result = await _try_refresh_token(token_data["refresh_token"])
-    if not result:
-        logger.error("Fyers token refresh failed")
-        await _emit_system_event(
-            db, "critical", "auth_refresh_failed", {"reason": "refresh_rejected"}
-        )
-        await db.commit()
-        await _set_auth_health(redis, False)
-        return None
-
-    expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
-        seconds=result["expires_in"]
-    )
-
-    await persist_and_cache_fyers_token(
-        db,
-        redis,
-        access_token=result["access_token"],
-        refresh_token=result["refresh_token"],
-        expires_at=expires_at,
-        expires_in=result["expires_in"],
-    )
-
-    await _emit_system_event(
-        db, "info", "auth_refresh_succeeded", {"expires_at": expires_at.isoformat()}
-    )
-    await db.commit()
-    logger.info("Fyers token refreshed, expires at %s", expires_at)
-    return result["access_token"]
-
-
 async def persist_and_cache_fyers_token(
     db: AsyncSession,
     redis,
     *,
     access_token: str,
-    refresh_token: str | None,
     expires_at: datetime.datetime,
-    expires_in: int = 86400,
+    refresh_token: str | None = None,
 ) -> None:
     """
     Unified entrypoint to persist Fyers token to Postgres and sync Redis token caches (AUTH-002).
     Ensures Redis hot token, expiry cache, and auth health are updated synchronously.
+
+    refresh_token is unused after the April 2026 daily-2FA change; callers pass None
+    so the nullable DB column is cleared.
     """
     await save_fyers_token(db, access_token, refresh_token, expires_at)
-    ttl = max(int(expires_in) - _EXPIRY_BUFFER_SECONDS, 60)
+    ttl = _cache_ttl_seconds(expires_at)
     await redis.set(_REDIS_TOKEN_KEY, access_token, ex=ttl)
     await redis.set(_REDIS_EXPIRY_KEY, expires_at.isoformat(), ex=ttl)
     await _set_auth_health(redis, True)
@@ -239,8 +179,8 @@ async def get_valid_access_token(redis) -> str:
     THE single entry point for getting a Fyers access token.
 
     1. Check Redis cache (fast path)
-    2. On miss, read from DB, cache if still valid
-    3. If expired/near-expiry, attempt refresh
+    2. On miss, read from DB and cache if still valid
+    3. If expired/near-expiry, fail closed — daily 2FA re-login is required
     4. Raise AuthUnavailableError if nothing works
 
     Callers: historical_fetcher, tick_ingestion, order_gateway, execution_engine.
@@ -266,26 +206,17 @@ async def get_valid_access_token(redis) -> str:
         expires_at = token_data["expires_at"]
         now = datetime.datetime.now(datetime.timezone.utc)
 
-        # If expires within buffer, try refresh
-        if expires_at < now + datetime.timedelta(seconds=_EXPIRY_BUFFER_SECONDS):
-            new_token = await refresh_and_save(db, redis)
-            if new_token:
-                return new_token
-            # Refresh failed — but if old token hasn't actually expired yet, use it
-            # (Fyers may still accept it for a short window)
-            if expires_at > now:
-                logger.warning("Using near-expiry token as fallback")
-                ttl = max(int((expires_at - now).total_seconds()) - _EXPIRY_BUFFER_SECONDS, 30)
-                await redis.set(_REDIS_TOKEN_KEY, token_data["access_token"], ex=ttl)
-                return token_data["access_token"]
-
+        if not _token_is_fresh(expires_at, now):
+            await _emit_system_event(
+                db, "critical", "auth_unavailable", {"reason": "expired"}
+            )
+            await db.commit()
             await _set_auth_health(redis, False)
             raise AuthUnavailableError(
-                "Fyers token expired and refresh failed. Re-login required."
+                "Fyers token expired. Daily 2FA re-login is required."
             )
 
-        # Token is valid — cache it
-        ttl = max(int((expires_at - now).total_seconds()) - _EXPIRY_BUFFER_SECONDS, 60)
+        ttl = _cache_ttl_seconds(expires_at, now)
         await redis.set(_REDIS_TOKEN_KEY, token_data["access_token"], ex=ttl)
         await redis.set(_REDIS_EXPIRY_KEY, expires_at.isoformat(), ex=ttl)
         await _set_auth_health(redis, True)
@@ -295,37 +226,29 @@ async def get_valid_access_token(redis) -> str:
 async def get_auth_status_from_db(db: AsyncSession) -> dict:
     """
     Returns auth status for the API /auth/status endpoint.
-    Includes health flag, expiry, and readiness indicators for auto-refresh.
+    Includes health flag and expiry. There is no unattended refresh path.
     """
-    has_pin = bool((settings.fyers_pin or "").strip())
     token_data = await get_fyers_token(db)
     if not token_data:
         return {
             "authenticated": False,
             "healthy": False,
             "reason": "no_token",
-            "has_refresh_token": False,
-            "has_pin": has_pin,
         }
 
-    has_refresh_token = bool(token_data.get("refresh_token"))
     now = datetime.datetime.now(datetime.timezone.utc)
     expires_at = token_data["expires_at"]
 
-    if expires_at < now + datetime.timedelta(seconds=_EXPIRY_BUFFER_SECONDS):
+    if not _token_is_fresh(expires_at, now):
         return {
             "authenticated": False,
             "healthy": False,
             "reason": "expired",
             "expires_at": expires_at.isoformat(),
-            "has_refresh_token": has_refresh_token,
-            "has_pin": has_pin,
         }
 
     return {
         "authenticated": True,
         "healthy": True,
         "expires_at": expires_at.isoformat(),
-        "has_refresh_token": has_refresh_token,
-        "has_pin": has_pin,
     }

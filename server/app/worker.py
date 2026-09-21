@@ -13,7 +13,7 @@ from app.services.market_context import run_market_context
 from app.services.reconciliation import run_reconciliation
 from app.services.saas_scan import run_saas_global_standard_scan
 from app.services.screener import run_technical_scan
-from app.services.token_refresh import run_token_refresh
+from app.services.auth_reminder import run_auth_reminder
 from app.services.vcp_vision import run_vcp_vision_analysis
 from app.services.intraday_bar_reconciliation import reconcile_intraday_bars
 
@@ -32,7 +32,7 @@ class WorkerSettings:
         run_fundamental_pass,
         run_historical_sync,
         run_market_context,
-        run_token_refresh,
+        run_auth_reminder,
         run_reconciliation,
         run_journal_dispatcher,
         run_journal_ai_coach,
@@ -74,17 +74,17 @@ class WorkerSettings:
             )
         )
 
-    if settings.token_refresh_enabled:
+    if settings.auth_reminder_enabled:
         cron_jobs.append(
             cron(
-                run_token_refresh,
-                name="fyers_token_refresh",
+                run_auth_reminder,
+                name="fyers_auth_reminder",
                 weekday={0, 1, 2, 3, 4},
-                hour=settings.token_refresh_hour,
-                minute=settings.token_refresh_minute,
+                hour=settings.auth_reminder_hour,
+                minute=settings.auth_reminder_minute,
                 second=0,
                 timeout=60,
-                max_tries=2,
+                max_tries=1,
             )
         )
 

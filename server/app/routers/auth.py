@@ -1,7 +1,5 @@
-import datetime
 import json
 import logging
-import time
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,11 +9,10 @@ from arq.connections import ArqRedis
 from app.config import settings
 from app.database import get_db
 from app.dependencies.auth import _extract_session_id, require_authenticated_user
-from app.security import save_fyers_token
 from app.services.auth_service import (
+    fyers_access_token_expires_at,
     get_auth_status_from_db,
     persist_and_cache_fyers_token,
-    refresh_and_save,
 )
 from app.services.session_service import (
     check_login_rate_limit,
@@ -28,15 +25,17 @@ from app.services.session_service import (
     verify_and_consume_oauth_state,
     verify_app_password,
 )
+from app.services.telegram_notifier import (
+    TelegramConfigError,
+    TelegramSendError,
+    send_telegram_message,
+    telegram_configured,
+)
 from fyers_apiv3 import fyersModel
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-# Simple cooldown for manual refresh — 30 seconds between attempts
-_last_refresh_ts: float = 0.0
-_REFRESH_COOLDOWN_SECONDS = 30
 
 
 class LoginRequest(BaseModel):
@@ -222,25 +221,22 @@ async def _exchange_code_and_save(
         )
 
     access_token = response.get("access_token")
-    refresh_token = response.get("refresh_token")
 
     if not access_token:
         raise HTTPException(
             status_code=400, detail="No access token was returned by Fyers."
         )
 
-    expires_in = response.get("expires_in", 86400)
-    expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
-        seconds=expires_in
+    expires_in = response.get("expires_in")
+    expires_at = fyers_access_token_expires_at(
+        expires_in=int(expires_in) if expires_in is not None else None
     )
 
     await persist_and_cache_fyers_token(
         db,
         redis,
         access_token=access_token,
-        refresh_token=refresh_token,
         expires_at=expires_at,
-        expires_in=expires_in,
     )
 
     # Emit system event for auth success
@@ -254,11 +250,7 @@ async def _exchange_code_and_save(
     )
     await db.commit()
 
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "expires_at": expires_at,
-    }
+    return {"expires_at": expires_at}
 
 
 @router.post("/callback")
@@ -318,30 +310,22 @@ async def get_auth_events(
     ]
 
 
-@router.post("/refresh")
-async def manual_refresh(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
+@router.post("/telegram/test")
+async def test_telegram_alert(
     _user: dict = Depends(require_authenticated_user),
 ):
-    """Manual Fyers token refresh trigger for authenticated user."""
-    global _last_refresh_ts
-    now = time.monotonic()
-    elapsed = now - _last_refresh_ts
-    if elapsed < _REFRESH_COOLDOWN_SECONDS:
+    """Owner-only ping so Telegram can be verified without waiting for 07:00 IST."""
+    if not telegram_configured():
         raise HTTPException(
-            status_code=429,
-            detail=f"Refresh cooldown active. Try again in {int(_REFRESH_COOLDOWN_SECONDS - elapsed)}s.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set.",
         )
-    _last_refresh_ts = now
-
-    redis: ArqRedis = request.app.state.redis
     try:
-        new_token = await refresh_and_save(db, redis)
-    except Exception as e:
-        logger.error("Manual refresh error: %s", e)
-        raise HTTPException(status_code=500, detail="Token refresh failed")
-
-    if new_token:
-        return {"status": "ok", "message": "Token refreshed successfully"}
-    raise HTTPException(status_code=400, detail="Token refresh failed — re-login required")
+        await send_telegram_message("Telegram alerts are working.")
+    except (TelegramConfigError, TelegramSendError):
+        logger.exception("Telegram test send failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Telegram send failed.",
+        )
+    return {"status": "ok", "message": "Telegram test message sent"}

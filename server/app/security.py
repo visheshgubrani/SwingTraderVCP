@@ -10,9 +10,10 @@ async def save_fyers_token(
     expires_at: datetime.datetime
 ) -> None:
     """
-    Saves the Fyers access token and refresh token encrypted in the broker_auth_tokens table.
-    The encryption is performed database-side via pgcrypto's pgp_sym_encrypt function,
-    keyed by settings.token_encryption_passphrase (TOKEN_ENCRYPTION_KEY).
+    Saves the Fyers access token encrypted in broker_auth_tokens.
+    refresh_token is unused after the April 2026 daily-2FA change; callers pass None
+    so the nullable column is cleared. Encryption is pgcrypto pgp_sym_encrypt keyed
+    by settings.token_encryption_passphrase (TOKEN_ENCRYPTION_KEY).
     """
     query = text("""
         INSERT INTO broker_auth_tokens (

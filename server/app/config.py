@@ -87,8 +87,6 @@ class Settings(BaseSettings):
 
     fyers_app_id: str = ""
     fyers_secret_key: str = ""
-    # 4-digit Fyers PIN used for unattended token refresh via validate-refresh-token endpoint.
-    fyers_pin: str = ""
     # Dedicated symmetric encryption key for broker tokens in Postgres (SEC-005).
     # Required in production. Local/dev may fall back to fyers_secret_key.
     token_encryption_key: str = ""
@@ -119,12 +117,13 @@ class Settings(BaseSettings):
     # after this grace period, avoiding false recovery during worker transitions.
     personal_scan_running_stale_seconds: int = Field(default=3600, ge=300, le=21600)
 
-    # Token refresh: run daily before market open (default 08:50 IST).
-    # Fyers access tokens expire ~midnight IST; refresh early so workers
-    # have a valid token by 09:15 market open.
-    token_refresh_enabled: bool = True
-    token_refresh_hour: int = Field(default=8, ge=0, le=23)
-    token_refresh_minute: int = Field(default=50, ge=0, le=59)
+    # Weekday Telegram reminder after the 06:30 IST Fyers token cutoff.
+    # Daily operator 2FA is required; this job never refreshes a token.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    auth_reminder_enabled: bool = True
+    auth_reminder_hour: int = Field(default=7, ge=0, le=23)
+    auth_reminder_minute: int = Field(default=0, ge=0, le=59)
 
     # Reconciliation: compare DB vs Fyers during market hours (IST).
     reconciliation_enabled: bool = True

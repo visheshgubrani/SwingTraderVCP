@@ -108,6 +108,7 @@ Do not substitute these without an explicit instruction from the user.
 | Fundamentals         | Upstox Company Fundamentals API + official NSE corporate filings | Upstox remains primary; official NSE shareholding and integrated-filing XBRL are read-only risk enrichment for technical survivors only; never prices, sockets, or orders |
 | Fundamental LLM inference | OpenRouter (`openai/gpt-5.6-luna-pro`)      | Blind structured second opinion over normalized snapshots; Python's deterministic fit remains authoritative. No tools or money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
 | VCP vision inference | OpenRouter (`google/gemini-3.7-flash`)            | P10 proposal reader: serial audit of Python swing candidates over a standardized 126-session chart plus a short candidate summary (not a raw OHLCV table). Advisory screener VCP still sends frozen OHLCV. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
+| Owner alerts         | Telegram Bot API (`httpx`)                        | Weekday morning Fyers re-auth reminder only. Existing core `arq` worker; no new daemon, webhook, or Python package. Never send access tokens, auth codes, or secrets in chat |
 
 ### 2.1 Locked Fyers / trading product decisions
 
@@ -120,6 +121,7 @@ Do not substitute these without an explicit instruction from the user.
 | Order rate limit      | Internal ≤ **10 OPS** token bucket             | Align with Fyers; queue bursts inside the engine                      |
 | AI / LLM              | **Pattern audit only**                        | May return classification, qualitative flags, candidate confirm/merge/reject actions, extra date-window pointers, evidence, and a display-only confidence score; never prices, stops, targets, templates, quantity/risk/exposure/trailing arithmetic, confirmation, or execution. Confidence may feed the Python template scorer only; it must not approve, arm, rank, or execute |
 | P7 fundamental source | **Upstox primary + official NSE filings enrichment** | Consolidated Upstox statements by default; known NSE pledge/leverage risks transparently reduce only the deterministic fundamental score; neither source is used for trading |
+| Broker session        | **Daily OAuth + 2FA**                              | Access tokens expire at 06:30 IST. `validate-refresh-token` is discontinued (April 1, 2026). Scheduler sends a Telegram reminder; the operator logs in via the personal app. Never unattended refresh |
 
 **Explicit non-goals (v1 unless user reopens):**
 
@@ -132,6 +134,8 @@ Do not substitute these without an explicit instruction from the user.
 - Writing every raw tick to Postgres (sample/debug only if needed)
 - Upstox market quotes, WebSockets, portfolio APIs, or order APIs
 - Persisting or displaying model `reasoning_details`
+- Unattended `validate-refresh-token` sessions
+- Completing Fyers OAuth inside Telegram, or putting broker tokens / auth codes in chat
 
 ---
 
@@ -248,11 +252,11 @@ money-path workers into the API process.
   and allocation state before calling the execution engine and reconstructs
   nonterminal legs on restart.
 - **Scheduler (core arq cron)** — EOD candle sync, optional EOD screen,
-  deterministic P9 market-context computation, broker-auth readiness
-  validation/alerts, and reconciliation cadence. Personal processing is
-  ordered EOD sync → P9 context → personal scan; the independent SaaS scan
-  does not consume P9 selection or money-path policy.
-  Proposal jobs never share this worker's single execution slot.
+  deterministic P9 market-context computation, weekday Telegram
+  broker-auth reminder (not token refresh), and reconciliation cadence.
+  Personal processing is ordered EOD sync → P9 context → personal scan;
+  the independent SaaS scan does not consume P9 selection or money-path
+  policy. Proposal jobs never share this worker's single execution slot.
 - **Reconciliation job** — compares DB orders/positions/fills to Fyers.
   Manual trades placed in the Fyers app are detected and imported/flagged —
   never fought blindly.
@@ -289,6 +293,8 @@ without updating this file.
 | Proposal worker              | frozen charts, vision attempts, immutable trade proposals, `p10_forming_patterns` |
 | Entry supervisor             | triggers, legs, risk snapshots, allocation ledger; calls execution engine |
 | Reconcile / scheduler        | job_runs, reconciliation_*, broker-auth readiness, system_events |
+| Auth reminder (arq)          | `job_runs` + `system_events`; outbound Telegram `sendMessage` only |
+| Auth service                 | `broker_auth_tokens` + Redis access-token cache; daily OAuth only — never `validate-refresh-token` |
 | Journal processor (arq)      | journal_entries, journal_fill_outbox, market_regime_snapshots     |
 | Journal router (API)         | journal review fields, actual_charges, chart artifact uploads   |
 | Journal AI coach (arq)       | journal_ai_runs (read-only analysis, no money path)             |
@@ -917,13 +923,19 @@ or weaken the global kill switch.
 
 ## 8. Auth / token lifecycle
 
-- Fyers tokens are stored encrypted in Postgres (never in frontend or logs).
+- Fyers tokens are stored encrypted in Postgres (never in frontend, logs, or
+  Telegram). Daily operator OAuth + 2FA is the only way to obtain an access
+  token. Persist `expires_at` as the next 06:30 Asia/Kolkata (or sooner if
+  Fyers returns a shorter TTL). Do not call `validate-refresh-token`.
 - All Fyers clients (historical REST, funds/broker reads, tick WS, execution,
   order gateway) must obtain tokens through one shared “valid access token”
-  path.
-- The scheduler validates broker-auth readiness and alerts before the live
-  window. It must not pretend unattended refresh can create a new session when
-  Fyers requires daily operator 2FA. Order-API deployment must use the
+  path. An expired token fails closed with `AuthUnavailableError`; there is
+  no lazy refresh.
+- The scheduler sends a weekday Telegram reminder after 06:30 IST when the
+  current token is not healthy. It must not pretend unattended refresh can
+  create a new session. The operator completes login in the personal app
+  (`GET /auth/url` → Fyers 2FA → `POST /auth/callback`). Telegram never
+  carries tokens, auth codes, or secrets. Order-API deployment must use the
   registered static public IP required by the current Fyers retail-algo rules.
 - Missing current-session auth or a static-IP/readiness failure blocks new
   entry/add orders and emits a critical event/banner. Existing positions remain
@@ -1035,7 +1047,7 @@ Do not reorder phases without asking. Status tags: `[done]`, `[next]`,
 | 1 | Fyers historical data fetch (auth, candle retrieval) | `[done]` |
 | 2 | Screening/scanner technical filter on top of (1) | `[done]` |
 | 3 | Shortlist storage + manual review surface (frontend) | `[partial]` — results table + chart workspace (sample data); real candle endpoint added |
-| **P0** | Shared valid-token path + scheduled refresh/readiness + auth failure signaling | `[done]` — P10 must adapt readiness to current static-IP/daily-2FA requirements |
+| **P0** | Shared valid-token path + weekday Telegram re-auth reminder + auth failure signaling | `[done]` — daily 2FA OAuth; no refresh-token sessions; static-IP still required for order APIs |
 | **P1** | Chart workspace on shortlist (daily candles from DB; no live required) | `[done]` — candle API endpoint live; chart component + workspace layout complete |
 | **P2** | Tick ingestion worker + Redis LTP + backend→frontend WS overlay | `[done]` — tick_worker.py, ws.py router, useMarketWS hook, live LTP price line on chart |
 | **P3** | Trade instruction API + confirm UI + execution engine in paper/log mode | `[done]` — draft/review/confirm API + UI, idempotent paper intents, pending positions, and kill switch control |

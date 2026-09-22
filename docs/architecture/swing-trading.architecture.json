@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Swing trading system",
+    "locale": "en",
+    "output": "swing-trading.architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/visheshgubrani/SwingTraderVCP",
+      "revision": "9b28ac19871a009669cda0ef66c0c3f4cf914f1f"
+    },
+    "views": [
+      {
+        "id": "startup-scan",
+        "label": "Startup and scan",
+        "focus": ["spa", "api", "redis", "core", "postgres", "fyers"],
+        "note": "FastAPI and core arq start on Postgres and Redis. Weekday cron pulls Fyers EOD candles, then runs the technical scan."
+      },
+      {
+        "id": "fundamentals",
+        "label": "Fundamentals and proposals",
+        "focus": ["core", "redis", "proposal", "models", "postgres"],
+        "note": "P7 scores technical survivors. The proposal worker audits the 126-session chart with Gemini and stores an immutable plan."
+      },
+      {
+        "id": "entries",
+        "label": "Approval and entries",
+        "focus": ["spa", "api", "postgres", "ticks", "redis", "entry", "fyers"],
+        "note": "The app records approve or reject. Entry supervisor reads 5m bars from Redis; execution engine places the CNC order."
+      },
+      {
+        "id": "exits",
+        "label": "Exits and fills",
+        "focus": ["ticks", "redis", "monitor", "gateway", "fyers", "postgres"],
+        "note": "Position monitor exits from Redis LTP. Order gateway persists Fyers fills and never decides when to trade."
+      },
+      {
+        "id": "workers",
+        "label": "Worker processes",
+        "focus": ["redis", "core", "proposal", "ticks", "entry", "monitor", "gateway"],
+        "note": "Redis fans out jobs and live data. Tick ingestion owns the market socket. Order gateway owns the order socket."
+      }
+    ]
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [28, 32],
+    "cols": 6,
+    "gapX": 72,
+    "gapY": 56,
+    "cellW": 156,
+    "cellH": 64
+  },
+  "components": [
+    {
+      "id": "spa",
+      "type": "frontend",
+      "label": "Personal app",
+      "sublabel": "Vite + React",
+      "brand": "react",
+      "row": 0,
+      "col": 0,
+      "sources": [
+        { "path": "client/src/main.tsx", "line": 6, "label": "SPA mount" },
+        { "path": "docker-compose.prod.yml", "line": 251, "label": "client service" }
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI",
+      "sublabel": "REST + browser WS",
+      "brand": "fastapi",
+      "row": 0,
+      "col": 1,
+      "sources": [
+        { "path": "server/main.py", "line": 104, "label": "API app" },
+        { "path": "docker-compose.prod.yml", "line": 72, "label": "api service" }
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "system of record",
+      "brand": "postgresql",
+      "row": 1,
+      "col": 1,
+      "sources": [
+        { "path": "docker-compose.prod.yml", "line": 15, "label": "postgres service" }
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "messagebus",
+      "label": "Redis",
+      "sublabel": "arq queue + LTP",
+      "brand": "redis",
+      "row": 0,
+      "col": 2,
+      "sources": [
+        { "path": "docker-compose.prod.yml", "line": 39, "label": "redis service" }
+      ]
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "Core arq worker",
+      "sublabel": "EOD, scan, P7, P9",
+      "row": 0,
+      "col": 3,
+      "sources": [
+        { "path": "server/run_worker.py", "line": 18, "label": "arq startup" },
+        { "path": "server/app/worker.py", "line": 25, "end_line": 42, "label": "job registry" },
+        { "path": "docker-compose.prod.yml", "line": 107, "label": "worker service" }
+      ]
+    },
+    {
+      "id": "proposal",
+      "type": "backend",
+      "label": "Proposal worker",
+      "sublabel": "immutable plans",
+      "row": 1,
+      "col": 2,
+      "sources": [
+        { "path": "server/app/workers/proposal_worker.py", "line": 1533, "end_line": 1546, "label": "proposal arq" },
+        { "path": "docker-compose.prod.yml", "line": 136, "label": "proposal-worker" }
+      ]
+    },
+    {
+      "id": "models",
+      "type": "external",
+      "label": "OpenRouter",
+      "sublabel": "Gemini vision",
+      "row": 2,
+      "col": 2
+    },
+    {
+      "id": "ticks",
+      "type": "backend",
+      "label": "Tick ingestion",
+      "sublabel": "Fyers market WS",
+      "row": 0,
+      "col": 4,
+      "sources": [
+        { "path": "server/app/workers/tick_worker.py", "line": 427, "label": "market socket" },
+        { "path": "docker-compose.prod.yml", "line": 159, "label": "tick-worker" }
+      ]
+    },
+    {
+      "id": "entry",
+      "type": "backend",
+      "label": "Entry supervisor",
+      "sublabel": "5m trigger + sizing",
+      "row": 1,
+      "col": 3,
+      "sources": [
+        { "path": "server/app/workers/entry_supervisor.py", "line": 2772, "label": "entry loop" },
+        { "path": "server/app/services/execution_engine.py", "line": 82, "label": "order REST" },
+        { "path": "docker-compose.prod.yml", "line": 182, "label": "entry-supervisor" }
+      ]
+    },
+    {
+      "id": "fyers",
+      "type": "external",
+      "label": "Fyers",
+      "sublabel": "market data + CNC",
+      "row": 1,
+      "col": 4
+    },
+    {
+      "id": "monitor",
+      "type": "backend",
+      "label": "Position monitor",
+      "sublabel": "SL, targets, trail",
+      "row": 1,
+      "col": 5,
+      "sources": [
+        { "path": "server/app/workers/position_monitor.py", "line": 334, "label": "exit loop" },
+        { "path": "docker-compose.prod.yml", "line": 205, "label": "position-monitor" }
+      ]
+    },
+    {
+      "id": "gateway",
+      "type": "backend",
+      "label": "Order gateway",
+      "sublabel": "Fyers order WS",
+      "row": 2,
+      "col": 4,
+      "sources": [
+        { "path": "server/app/workers/order_gateway.py", "line": 48, "label": "order socket" },
+        { "path": "docker-compose.prod.yml", "line": 228, "label": "order-gateway" }
+      ]
+    }
+  ],
+  "connections": [
+    { "id": "spa-api", "from": "spa", "to": "api", "label": "REST + browser WS", "variant": "emphasis" },
+    { "id": "api-redis", "from": "api", "to": "redis", "label": "enqueue jobs", "variant": "dashed" },
+    { "id": "api-postgres", "from": "api", "to": "postgres", "label": "approve or reject", "variant": "emphasis", "labelDy": 20 },
+    { "id": "redis-core", "from": "redis", "to": "core", "label": "arq cron", "variant": "emphasis" },
+    { "id": "redis-proposal", "from": "redis", "to": "proposal", "label": "proposal queue", "variant": "emphasis", "labelDy": 20 },
+    { "id": "proposal-models", "from": "proposal", "to": "models", "label": "Gemini chart audit", "labelDy": 20 },
+    { "id": "ticks-fyers", "from": "ticks", "to": "fyers", "label": "market WebSocket", "labelDy": 20 },
+    { "id": "entry-fyers", "from": "entry", "to": "fyers", "label": "async entry order", "variant": "emphasis" },
+    { "id": "monitor-fyers", "from": "monitor", "to": "fyers", "label": "async exit order", "variant": "emphasis" },
+    { "id": "gateway-fyers", "from": "gateway", "to": "fyers", "label": "order WebSocket", "labelDy": -20 }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Startup",
+      "items": [
+        "Compose starts Postgres, Redis, FastAPI, then the workers",
+        "Core arq pulls Fyers EOD candles, then runs the scan, P7, and P9 into Postgres",
+        "A weekday Telegram reminder fires when the Fyers session is not healthy"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Research to plan",
+      "items": [
+        "P7 reads Upstox, then asks OpenRouter for a blind second opinion",
+        "The proposal queue sends the top 20 to a concurrency-1 worker",
+        "Gemini audits the chart; Python writes the immutable plan to Postgres"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Entries and exits",
+      "items": [
+        "Live entry waits for an unexpired human approval of that exact plan",
+        "Tick ingestion publishes LTP and 5m bars; entry and the monitor read Redis",
+        "Execution engine is the only Fyers order REST caller, for entries and exits"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Boundaries",
+      "items": [
+        "Tick ingestion alone holds the Fyers market WebSocket",
+        "Order gateway alone holds the order WebSocket and writes fills to Postgres",
+        "Kill switch blocks new automated orders; the Swyingify scan never places them"
+      ]
+    }
+  ]
+}

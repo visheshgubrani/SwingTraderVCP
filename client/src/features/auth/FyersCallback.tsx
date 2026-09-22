@@ -48,7 +48,18 @@ export function FyersCallback() {
       setLocalError("The Fyers callback did not include an authorization code.")
       return
     }
-    if (!expectedState || !returnedState || expectedState !== returnedState) {
+    if (!returnedState) {
+      setStatus("error")
+      setLocalError(
+        "The Fyers callback did not include the authentication state.",
+      )
+      return
+    }
+    // A stored state means this browser started the login from the dashboard,
+    // so a mismatch is a real error. No stored state means this is the
+    // one-tap Telegram link opened on another device: the server validates the
+    // direct-login state and the account ownership before saving anything.
+    if (expectedState && expectedState !== returnedState) {
       clearStoredFyersAuthState()
       setStatus("error")
       setLocalError(
@@ -63,7 +74,7 @@ export function FyersCallback() {
         onSuccess: () => {
           window.history.replaceState({}, "", "/callback")
           setStatus("success")
-          window.setTimeout(() => window.location.replace("/"), 1_000)
+          window.setTimeout(() => window.location.replace("/"), 1_500)
         },
         onError: () => setStatus("error"),
       },

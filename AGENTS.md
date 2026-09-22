@@ -929,6 +929,7 @@ or weaken the global kill switch.
   Fyers returns a shorter TTL). Do not call `validate-refresh-token`.
 - All Fyers clients (historical REST, funds/broker reads, tick WS, execution,
   order gateway) must obtain tokens through one shared “valid access token”
+<<<<<<< HEAD
   path. An expired token fails closed with `AuthUnavailableError`; there is
   no lazy refresh.
 - The scheduler sends a weekday Telegram reminder after 06:30 IST when the
@@ -937,12 +938,63 @@ or weaken the global kill switch.
   (`GET /auth/url` → Fyers 2FA → `POST /auth/callback`). Telegram never
   carries tokens, auth codes, or secrets. Order-API deployment must use the
   registered static public IP required by the current Fyers retail-algo rules.
+=======
+  path.
+- **Daily 2FA is broker-mandated (SEBI retail-algo framework, April 2026).**
+  Continuous refresh-token sessions no longer exist, and Fyers retires every
+  access token at **06:30 IST daily regardless of the `expires_in` it reports**.
+  The shared path therefore clamps stored expiry (and the Redis hot-token TTL
+  and auth-health flag) to the next occurrence of
+  `FYERS_SESSION_CUTOFF_IST`, and treats a session as live only after one cheap
+  authenticated broker call. Never trust a stored expiry on its own.
+- The scheduled **auth guard** (`run_auth_guard`, IST morning slots on trading
+  weekdays) keeps the session alive: it verifies, retries the opt-in headless
+  TOTP login (`AUTH_HEADLESS_LOGIN_ENABLED`, needs the owner's own
+  `FYERS_USER_ID`/`FYERS_PIN`/`FYERS_TOTP_KEY`), and otherwise alerts the owner
+  on Telegram with a one-tap official-OAuth login link, escalating to CRITICAL
+  at the last pre-market slot. Headless login uses undocumented broker web
+  endpoints, so it is never the only path and its failure must degrade into the
+  Telegram tap path, not into silence.
+- The Telegram one-tap link is a capability to *start* an OAuth login, never to
+  mint a token: single-use state, TTL-bounded nonce, per-IP limits, and a
+  post-exchange ownership check before anything is persisted. The dashboard
+  flow keeps its session + CSRF requirement; only direct states are exempt from
+  the session, never from the state checks.
+- **Owner-check policy:** `FYERS_USER_ID` is the account-identity assertion.
+  Set explicitly, a mismatch is enforced strictly (403 + critical event). When
+  it is merely *derived* from `FYERS_APP_ID`, that prefix is a guess — Fyers
+  `/profile` may name the account differently (for example a numeric `id`
+  alongside `fy_id`) — so a disagreement is recorded as
+  `auth_owner_check_mismatch_derived` (warning, carrying the broker's observed
+  ids and the profile key names) and the real owner is **not** locked out of
+  their own account. Pin the id with `scripts/fyers_auth_probe.py
+  --profile-now` after any login; never build a hard lockout on a guessed id.
+  A `/profile` payload that names no account id is `unverifiable`: warn, allow,
+  audit — that is a broker payload change, not a foreign login. Identity
+  extraction must read *every* candidate field, never the first key that
+  happens to exist.
+- The scheduler validates broker-auth readiness and alerts before the live
+  window. It must not pretend unattended refresh can create a new session when
+  Fyers requires daily operator 2FA. Order-API deployment must use the
+  registered static public IP required by the current Fyers retail-algo rules,
+  and the auth guard must run on that same host so login and order traffic share
+  the whitelisted IP.
+- Duplicate auth noise is a defect: refresh attempts, system events, and
+  Telegram alerts are cooldown-bounded so a dead session cannot bury real
+  signals (the tick worker retries authentication every 5 seconds).
+>>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
 - Missing current-session auth or a static-IP/readiness failure blocks new
-  entry/add orders and emits a critical event/banner. Existing positions remain
+  entry/add orders (`ensure_session_ready` in the entry supervisor's broker
+  preflight) and emits a critical event/banner. Existing positions remain
   visible; any inability to enforce exits must be shown as a money-path
-  emergency, never hidden behind retries.
+  emergency, never hidden behind retries. Exits, the position monitor, and
+  reconciliation keep their own authoritative `AuthUnavailableError` handling
+  and are never silently blocked by the readiness gate.
 - On auth failure: pause money-path components, emit `system_events`, surface
   UI banner. Do not silently retry orders with a bad token.
+- Auth secrets (`FYERS_PIN`, `FYERS_TOTP_KEY`, `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_CHAT_ID`) are environment-only. Never log them, never return them
+  from an API response, and never store them in Postgres or Redis payloads.
 - The Upstox Analytics Token is a separate read-only environment secret used
   only by P7. It is never sent to the frontend or stored in fundamentals
   snapshots. Upstox auth failure marks annotations failed but does not pause

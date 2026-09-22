@@ -250,6 +250,7 @@ class HistoricalSyncScheduleTests(unittest.TestCase):
         self.assertEqual(sync_job.hour, 18)
         self.assertEqual(sync_job.minute, 30)
 
+<<<<<<< HEAD
     def test_auth_reminder_runs_weekdays_at_0700_ist(self) -> None:
         reminder_jobs = [j for j in WorkerSettings.cron_jobs if j.name == "fyers_auth_reminder"]
         self.assertEqual(len(reminder_jobs), 1, "Expected exactly one fyers_auth_reminder cron job")
@@ -259,6 +260,17 @@ class HistoricalSyncScheduleTests(unittest.TestCase):
         self.assertEqual(reminder_job.hour, 7)
         self.assertEqual(reminder_job.minute, 0)
         self.assertEqual(reminder_job.max_tries, 1)
+=======
+    def test_auth_guard_runs_weekday_morning_slots(self) -> None:
+        """Fyers tokens die at 06:30 IST daily, so the guard runs after that."""
+        guard_jobs = [j for j in WorkerSettings.cron_jobs if j.name == "fyers_auth_guard"]
+        self.assertEqual(len(guard_jobs), 1, "Expected exactly one fyers_auth_guard cron job")
+        guard_job = guard_jobs[0]
+
+        self.assertEqual(guard_job.weekday, {0, 1, 2, 3, 4})
+        self.assertEqual(sorted(guard_job.hour), [7, 8])
+        self.assertEqual(sorted(guard_job.minute), [0, 15, 30, 45])
+>>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
 
 
 if __name__ == "__main__":

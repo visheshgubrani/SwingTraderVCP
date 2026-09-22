@@ -124,10 +124,18 @@ class PaperPreflightIsolationTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=snapshot),
             ),
             patch("app.workers.entry_supervisor.FyersBrokerReadClient") as fyers,
+            patch(
+                "app.workers.entry_supervisor.ensure_session_ready",
+                new=AsyncMock(),
+            ) as auth_gate,
         ):
             result = await _fetch_broker_preflight(redis)
         self.assertIs(result, snapshot)
         fyers.assert_not_called()
+        # A missing daily Fyers session blocks new paper entries too, but paper
+        # never pays for a live broker round trip per attempt.
+        auth_gate.assert_awaited_once()
+        self.assertFalse(auth_gate.await_args.kwargs["verify"])
 
 
 class BrokerStateVerifyTests(unittest.IsolatedAsyncioTestCase):

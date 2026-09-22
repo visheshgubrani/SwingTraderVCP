@@ -25,6 +25,23 @@ env:
   VITE_WS_URL: wss://api.edurel.xyz/ws
 
 jobs:
+  guard:
+    name: Reject unresolved merge conflicts
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # A merge committed with markers still builds a valid Python image — the
+      # API only fails at import — so image builds alone cannot catch this.
+      - name: Fail on conflict markers
+        run: |
+          if git grep -nI -E '^(<<<<<<<|=======|>>>>>>>)( |$)' -- . ; then
+            echo "::error::Unresolved merge conflict markers committed"
+            exit 1
+          fi
+          echo "No conflict markers found."
+
   build:
     name: Build arm64 images
     runs-on: ubuntu-24.04-arm
@@ -86,7 +103,7 @@ jobs:
 
   deploy:
     name: Deploy to VPS
-    needs: build
+    needs: [build, guard]
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'workflow_dispatch' && inputs.deploy)

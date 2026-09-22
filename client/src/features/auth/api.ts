@@ -9,8 +9,6 @@ export interface AuthStatus {
   healthy: boolean
   reason?: "no_token" | "expired" | string
   expires_at?: string
-<<<<<<< HEAD
-=======
   has_refresh_token?: boolean
   has_pin?: boolean
   session_cutoff_ist?: string
@@ -29,7 +27,6 @@ export interface AuthVerification {
   identity?: string | null
   expires_at?: string | null
   session_cutoff_ist?: string
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
 }
 
 export interface AuthEvent {
@@ -111,8 +108,6 @@ export function useExchangeFyersCode() {
     },
   })
 }
-<<<<<<< HEAD
-=======
 
 interface AuthRefreshResponse {
   status: "ok"
@@ -187,4 +182,3 @@ export function useRunTotpLogin() {
   })
 }
 
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6

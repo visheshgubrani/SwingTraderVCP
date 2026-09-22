@@ -87,8 +87,6 @@ class Settings(BaseSettings):
 
     fyers_app_id: str = ""
     fyers_secret_key: str = ""
-<<<<<<< HEAD
-=======
     # 4-digit Fyers trading PIN. Used by verify_pin_v2 in the headless login flow
     # and by the legacy validate-refresh-token fallback.
     fyers_pin: str = ""
@@ -103,7 +101,6 @@ class Settings(BaseSettings):
     # expires_in the token endpoint reports (broker-confirmed: 06:30 IST).
     # Stored token expiry is clamped to the next occurrence of this boundary.
     fyers_session_cutoff_ist: str = "06:30"
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
     # Dedicated symmetric encryption key for broker tokens in Postgres (SEC-005).
     # Required in production. Local/dev may fall back to fyers_secret_key.
     token_encryption_key: str = ""
@@ -172,15 +169,6 @@ class Settings(BaseSettings):
     # after this grace period, avoiding false recovery during worker transitions.
     personal_scan_running_stale_seconds: int = Field(default=3600, ge=300, le=21600)
 
-<<<<<<< HEAD
-    # Weekday Telegram reminder after the 06:30 IST Fyers token cutoff.
-    # Daily operator 2FA is required; this job never refreshes a token.
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
-    auth_reminder_enabled: bool = True
-    auth_reminder_hour: int = Field(default=7, ge=0, le=23)
-    auth_reminder_minute: int = Field(default=0, ge=0, le=59)
-=======
     # Daily broker-auth guard. Fyers access tokens now die every day at
     # FYERS_SESSION_CUTOFF_IST (06:30 IST) and SEBI's April-2026 retail-algo
     # framework removed continuous refresh-token sessions, so the guard runs on
@@ -215,7 +203,6 @@ class Settings(BaseSettings):
     # Public base URL of this API (e.g. https://api.edurel.xyz). Required to build
     # the one-tap login link; when blank the guard still alerts without a button.
     api_public_base_url: str = ""
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
 
     # Reconciliation: compare DB vs Fyers during market hours (IST).
     reconciliation_enabled: bool = True

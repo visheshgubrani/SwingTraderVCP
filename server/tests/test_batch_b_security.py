@@ -161,11 +161,13 @@ class BatchBSecurityTests(unittest.IsolatedAsyncioTestCase):
                 db,
                 redis,
                 access_token="test-access-token-123",
+                refresh_token="test-refresh-token-456",
                 expires_at=expires_at,
+                expires_in=3600,
             )
 
             mock_save_db.assert_awaited_once_with(
-                db, "test-access-token-123", None, expires_at
+                db, "test-access-token-123", "test-refresh-token-456", expires_at
             )
             # Verify Redis token, expiry, and health keys set
             self.assertTrue(redis.set.await_count >= 3)

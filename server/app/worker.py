@@ -13,11 +13,7 @@ from app.services.market_context import run_market_context
 from app.services.reconciliation import run_reconciliation
 from app.services.saas_scan import run_saas_global_standard_scan
 from app.services.screener import run_technical_scan
-<<<<<<< HEAD
-from app.services.auth_reminder import run_auth_reminder
-=======
 from app.services.token_refresh import run_auth_guard
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
 from app.services.vcp_vision import run_vcp_vision_analysis
 from app.services.intraday_bar_reconciliation import reconcile_intraday_bars
 
@@ -36,11 +32,7 @@ class WorkerSettings:
         run_fundamental_pass,
         run_historical_sync,
         run_market_context,
-<<<<<<< HEAD
-        run_auth_reminder,
-=======
         run_auth_guard,
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
         run_reconciliation,
         run_journal_dispatcher,
         run_journal_ai_coach,
@@ -82,18 +74,6 @@ class WorkerSettings:
             )
         )
 
-<<<<<<< HEAD
-    if settings.auth_reminder_enabled:
-        cron_jobs.append(
-            cron(
-                run_auth_reminder,
-                name="fyers_auth_reminder",
-                weekday={0, 1, 2, 3, 4},
-                hour=settings.auth_reminder_hour,
-                minute=settings.auth_reminder_minute,
-                second=0,
-                timeout=60,
-=======
     if settings.token_refresh_enabled and settings.auth_guard_enabled:
         # Daily broker-auth guard. Fyers retires every access token at 06:30 IST
         # and SEBI's daily-2FA framework removed continuous refresh sessions, so
@@ -109,7 +89,6 @@ class WorkerSettings:
                 minute=settings.auth_guard_minutes,
                 second=0,
                 timeout=180,
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
                 max_tries=1,
             )
         )

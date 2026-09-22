@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-import { AlertTriangleIcon, LogInIcon } from "lucide-react"
-=======
 import {
   AlertTriangleIcon,
   LogInIcon,
@@ -8,7 +5,6 @@ import {
   SendIcon,
   ShieldCheckIcon,
 } from "lucide-react"
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
 
 import {
   Alert,
@@ -19,12 +15,9 @@ import { Button } from "@/components/ui/button"
 import {
   useAuthEvents,
   useAuthStatus,
-<<<<<<< HEAD
-=======
   useManualRefreshToken,
   useRunTotpLogin,
   useSendTelegramLoginLink,
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
   useStartFyersLogin,
   useVerifyFyersSession,
 } from "@/features/auth/api"
@@ -33,13 +26,10 @@ export function AuthBanner() {
   const authStatus = useAuthStatus()
   const authEvents = useAuthEvents(authStatus.data?.healthy === false)
   const startLogin = useStartFyersLogin()
-<<<<<<< HEAD
-=======
   const manualRefresh = useManualRefreshToken()
   const sendLoginLink = useSendTelegramLoginLink()
   const verifySession = useVerifyFyersSession()
   const totpLogin = useRunTotpLogin()
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
   const callbackError = new URLSearchParams(window.location.search).get("error")
 
   if (
@@ -55,8 +45,6 @@ export function AuthBanner() {
       event.severity === "error" ||
       event.severity === "warning",
   )
-<<<<<<< HEAD
-=======
   const canRefresh = Boolean(
     authStatus.data?.has_refresh_token && authStatus.data?.has_pin
   )
@@ -66,7 +54,6 @@ export function AuthBanner() {
       authStatus.data?.headless_login_configured
   )
   const cutoff = authStatus.data?.session_cutoff_ist
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
 
   const reason =
     callbackError
@@ -74,11 +61,7 @@ export function AuthBanner() {
       : authStatus.error instanceof Error
       ? authStatus.error.message
       : authStatus.data?.reason === "expired"
-<<<<<<< HEAD
-        ? "The Fyers token has expired. Complete today's 2FA login."
-=======
         ? `The Fyers session ended at the ${cutoff ?? "06:30"} IST daily cutoff.`
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
         : authStatus.data?.reason === "no_token"
           ? "Fyers has not been connected yet."
           : latestFailure
@@ -89,11 +72,6 @@ export function AuthBanner() {
     <Alert className="rounded-none border-x-0 border-t-0" variant="destructive">
       <AlertTriangleIcon aria-hidden="true" />
       <AlertTitle>Market data authentication required</AlertTitle>
-<<<<<<< HEAD
-      <AlertDescription className="flex items-center justify-between gap-4">
-        <span>{reason} Sync, scanner refresh, and broker workers may be paused.</span>
-        <div className="flex items-center gap-2">
-=======
       <AlertDescription className="flex flex-col gap-3">
         <span>
           {reason} New entries stay blocked until the session is restored;
@@ -138,7 +116,6 @@ export function AuthBanner() {
               Refresh Session
             </Button>
           )}
->>>>>>> f1f1cdc3073b72303a7116119ce10747872a1ff6
           <Button
             disabled={verifySession.isPending}
             onClick={() => verifySession.mutate()}

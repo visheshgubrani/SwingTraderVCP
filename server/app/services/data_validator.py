@@ -1,13 +1,19 @@
-import asyncio
 import datetime
 import json
-from typing import Dict, Any, List, Optional, Set
-from sqlalchemy import text
+from typing import Any, Dict, List, Optional, Set
+
 from app.config import settings
 from app.database import async_session
 from app.redis_pool import create_async_redis
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
+from app.services.fyers_history import (
+    HistoryCancelled,
+    HistoryUnavailable,
+    fetch_history,
+)
 from fyers_apiv3 import fyersModel
+from sqlalchemy import text
+
 
 class ValidationProgress:
     def __init__(self):
@@ -61,6 +67,20 @@ class ValidationProgress:
 validation_progress = ValidationProgress()
 
 async def run_data_validation(years: int = 2, redis: Any = None):
+    created_redis = redis is None
+    try:
+        if created_redis:
+            try:
+                redis = await create_async_redis()
+            except Exception:
+                redis = None
+        await _run_data_validation(years, redis)
+    finally:
+        if created_redis and redis is not None:
+            await redis.aclose()
+
+
+async def _run_data_validation(years: int = 2, redis: Any = None):
     """
     Background validation task for market candle data in the PostgreSQL DB.
     """
@@ -77,22 +97,11 @@ async def run_data_validation(years: int = 2, redis: Any = None):
     
     # 1. Fetch symbols from DB
     access_token = None
-    created_redis = False
-    if redis is None:
-        try:
-            redis = await create_async_redis()
-            created_redis = True
-        except Exception:
-            redis = None
-
     if redis is not None:
         try:
             access_token = await get_valid_access_token(redis)
         except AuthUnavailableError:
             access_token = None
-        finally:
-            if created_redis:
-                await redis.aclose()
 
     async with async_session() as session:
         
@@ -227,6 +236,13 @@ async def run_data_validation(years: int = 2, redis: Any = None):
                 chk["status"] = "MISSING_DATA"
                 chk["details"] = f"Could not find candles for {prev_date} and/or {ex_date}."
 
+        probe_restriction = None
+        unknown_probes = []
+
+        async def heartbeat():
+            if not validation_progress.is_running:
+                raise HistoryCancelled("Validation interrupted.")
+
         for idx, inst in enumerate(instruments, start=1):
             if not validation_progress.is_running:
                 validation_progress.log("Validation interrupted.")
@@ -279,20 +295,31 @@ async def run_data_validation(years: int = 2, redis: Any = None):
                     
                     try:
                         # Fyers API call to probe historical data
-                        response = await fyers.history(data=data)
+                        if probe_restriction:
+                            raise HistoryUnavailable(probe_restriction)
+                        response = await fetch_history(redis, fyers, data, heartbeat=heartbeat)
                         if response.get("s") == "ok" and response.get("candles"):
                             # Fyers returns candles for this period! It means we have a silent gap in our DB
                             validation_progress.log(f"Silent gap probe: {inst.symbol} has {len(response['candles'])} candles on Fyers before its first local candle ({first_candle_date}). Flagging as silent gap.")
-                        else:
+                        elif response.get("s") == "no_data" or (
+                            response.get("s") == "ok" and not response.get("candles")
+                        ):
                             # Fyers returns no data. This stock was indeed listed recently
                             is_recent_listing = True
                             expected_start_date = first_candle_date
+                        else:
+                            raise RuntimeError(str(response.get("message") or "History probe failed"))
+                    except HistoryCancelled:
+                        break
+                    except HistoryUnavailable as e:
+                        probe_restriction = str(e)
+                        unknown_probes.append(inst.symbol)
+                        validation_progress.add_error(inst.symbol, f"Listing probe unknown: {e}")
                     except Exception as e:
+                        unknown_probes.append(inst.symbol)
                         validation_progress.add_error(inst.symbol, f"Listing probe failed: {str(e)}")
                         # Default to target start date to be conservative
                     
-                    # Throttle Fyers API requests during validation (0.15s)
-                    await asyncio.sleep(0.15)
                 else:
                     # No Fyers API, assume recent listing but log it
                     is_recent_listing = True
@@ -337,6 +364,7 @@ async def run_data_validation(years: int = 2, redis: Any = None):
         report = {
             "validation_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "years_checked": years,
+            "unknown_listing_probes": unknown_probes,
             "total_instruments_checked": len(instruments),
             "ref_trading_days_count": len(ref_trading_days),
             "coverage_check": {

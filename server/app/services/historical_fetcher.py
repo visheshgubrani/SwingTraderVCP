@@ -1,14 +1,9 @@
-import asyncio
 import datetime
 import json
 import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from zoneinfo import ZoneInfo
-
-from arq.connections import ArqRedis
-from fyers_apiv3 import fyersModel
-from sqlalchemy import text
 
 from app.config import settings
 from app.database import async_session
@@ -18,8 +13,16 @@ from app.services.distributed_lease import (
     release_distributed_lease,
     renew_distributed_lease,
 )
+from app.services.fyers_history import (
+    HistoryCancelled,
+    HistoryUnavailable,
+    fetch_history,
+)
 from app.services.scan_readiness import load_scan_readiness
 from app.services.screening_config import TechnicalScreeningConfig
+from arq.connections import ArqRedis
+from fyers_apiv3 import fyersModel
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,9 @@ EOD_AVAILABLE_AFTER = datetime.time(hour=18, minute=0)
 
 @dataclass
 class SyncProgress:
+    wait_reason: str | None = None
+    retry_at: str | None = None
+    failure_reason: str | None = None
     run_id: str = ""
     state: str = "idle"
     triggered_by: str | None = None
@@ -71,6 +77,7 @@ class SyncProgress:
         self.log(f"ERROR ({symbol}): {error_message}")
 
     def finish(self, state: str, message: str) -> None:
+        self.wait_reason = None
         self.state = state
         self.is_running = False
         self.completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -152,6 +159,16 @@ def build_date_chunks(
         chunks.append((current_start, current_end))
         current_start = current_end + datetime.timedelta(days=1)
     return chunks
+
+
+def ordered_date_chunks(
+    start_date: datetime.date,
+    end_date: datetime.date,
+    *,
+    newest_first: bool = False,
+) -> list[tuple[datetime.date, datetime.date]]:
+    chunks = build_date_chunks(start_date, end_date)
+    return list(reversed(chunks)) if newest_first else chunks
 
 
 def next_sync_date(
@@ -340,7 +357,9 @@ async def run_historical_sync(
             return {"status": "authentication_required"}
 
         try:
-            from app.services.instrument_importer import ensure_nifty500_universe_imported
+            from app.services.instrument_importer import (
+                ensure_nifty500_universe_imported,
+            )
             await ensure_nifty500_universe_imported()
         except Exception as exc:
             logger.warning("Failed to auto-import Nifty 500 universe before sync: %s", exc)
@@ -417,6 +436,21 @@ async def run_historical_sync(
             """
         )
 
+        async def heartbeat() -> None:
+            if await redis.get(SYNC_CANCEL_KEY):
+                raise HistoryCancelled("Sync cancelled by the user.")
+            if not await renew_distributed_lease(
+                redis, SYNC_LOCK_KEY, lock_owner, SYNC_LOCK_SECONDS
+            ):
+                raise HistoryUnavailable("Lost EOD sync lease or Redis connection.")
+
+        async def on_wait(reason: str | None, retry_at: str | None) -> None:
+            progress.wait_reason = reason
+            progress.retry_at = retry_at
+            if reason == "rate_limit":
+                progress.log(f"Fyers rate limit: waiting until {retry_at} for one recovery request.")
+            await save_sync_status(redis, progress)
+
         for index, instrument in enumerate(instruments, start=1):
             if await redis.get(SYNC_CANCEL_KEY):
                 progress.finish("cancelled", "Sync cancelled by the user.")
@@ -451,9 +485,8 @@ async def run_historical_sync(
                     instrument.earliest_candle_date is not None
                     and range_end < instrument.earliest_candle_date
                 ]
-                for chunk_start, chunk_end in build_date_chunks(
-                    range_start,
-                    range_end,
+                for chunk_start, chunk_end in ordered_date_chunks(
+                    range_start, range_end, newest_first=is_prefix,
                 )
             ]
             range_summary = ", ".join(
@@ -472,7 +505,9 @@ async def run_historical_sync(
                     "cont_flag": "1",
                 }
                 try:
-                    response = await fyers.history(data=payload)
+                    response = await fetch_history(
+                        redis, fyers, payload, heartbeat=heartbeat, on_wait=on_wait
+                    )
                     if response.get("s") != "ok":
                         if is_prefix and history_response_has_no_data(response):
                             progress.log(
@@ -512,16 +547,20 @@ async def run_historical_sync(
                                 await session.execute(upsert_query, candle_rows)
                                 await session.commit()
                             symbol_candles += len(candle_rows)
+                            progress.candles_upserted += len(candle_rows)
+                except (HistoryUnavailable, HistoryCancelled):
+                    raise
                 except Exception as exc:
                     symbol_failed = True
                     progress.add_error(
                         instrument.symbol,
                         f"{type(exc).__name__}: {exc}",
                     )
+                # Do not save a later chunk across a failed gap: a future run
+                # resumes from persisted contiguous prefix/suffix coverage.
+                if symbol_failed:
+                    break
 
-                await asyncio.sleep(0.35)
-
-            progress.candles_upserted += symbol_candles
             if not symbol_failed:
                 progress.successful_symbols += 1
             progress.log(f"{instrument.symbol}: saved {symbol_candles} new EOD candles.")
@@ -575,6 +614,16 @@ async def run_historical_sync(
             "personal_scan_run_id": progress.personal_scan_run_id,
             "scanner_ready": scan_ready,
         }
+    except HistoryCancelled as exc:
+        progress.finish("cancelled", str(exc))
+        await save_sync_status(redis, progress)
+        return {"status": "cancelled"}
+    except HistoryUnavailable as exc:
+        progress.failure_reason = str(exc)
+        progress.retry_at = exc.retry_at
+        progress.finish("failed", str(exc))
+        await save_sync_status(redis, progress)
+        return {"status": "failed", "failure_reason": str(exc)}
     except Exception as exc:
         logger.exception("Historical EOD sync failed")
         progress.finish("failed", f"Sync failed: {exc}")

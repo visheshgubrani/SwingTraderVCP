@@ -1,7 +1,7 @@
 from zoneinfo import ZoneInfo
 from typing import Any
 
-from arq import cron
+from arq import cron, func
 
 from app.config import settings
 from app.redis_pool import redis_settings_from_config, tune_arq_redis_pool
@@ -30,7 +30,7 @@ class WorkerSettings:
     functions = [
         run_technical_scan,
         run_fundamental_pass,
-        run_historical_sync,
+        func(run_historical_sync, timeout=7200),
         run_market_context,
         run_auth_guard,
         run_reconciliation,
@@ -55,7 +55,7 @@ class WorkerSettings:
                 hour=settings.eod_sync_hour,
                 minute=settings.eod_sync_minute,
                 second=0,
-                timeout=60 * 60,
+                timeout=7200,
                 max_tries=1,
             )
         )

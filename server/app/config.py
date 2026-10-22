@@ -158,6 +158,9 @@ class Settings(BaseSettings):
     fyers_log_path: str = "/tmp"
 
     scheduler_timezone: str = "Asia/Kolkata"
+    # Standard plan: leave headroom below the broker 50/minute cap.
+    fyers_data_requests_per_minute: int = Field(default=45, ge=1, le=45)
+    fyers_data_requests_per_day: int = Field(default=5000, ge=1, le=5000)
     eod_sync_enabled: bool = True
     eod_sync_hour: int = Field(default=18, ge=0, le=23)
     eod_sync_minute: int = Field(default=30, ge=0, le=59)

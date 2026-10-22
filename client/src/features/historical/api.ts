@@ -14,6 +14,9 @@ export type SyncState =
   | "authentication_required"
 
 export interface SyncStatus {
+  wait_reason?: "rate_limit" | "request_pacing" | null
+  retry_at?: string | null
+  failure_reason?: string | null
   run_id: string
   state: SyncState
   triggered_by: string | null
@@ -100,7 +103,7 @@ export function isSyncActive(status?: SyncStatus) {
 }
 
 export function canScanAfterSync(status?: SyncStatus) {
-  if (!status) return false
+  if (!status || status.failure_reason) return false
   if (!status.data_current || !status.scanner_ready) return false
   if (status.state === "succeeded") return true
   if (status.state !== "partial" || status.total_symbols <= 0) return false

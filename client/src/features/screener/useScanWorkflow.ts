@@ -243,6 +243,17 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
     if (state.phase !== "syncing" || !state.syncRunId || !current) return
     if (current.run_id !== state.syncRunId) return
 
+    if (current.state === "running" && current.wait_reason === "rate_limit") {
+      setState((previous) => ({
+        ...previous,
+        message: `Fyers rate limit: EOD sync will retry${current.retry_at ? ` after ${new Date(current.retry_at).toLocaleTimeString()}` : " shortly"}.`,
+      }))
+      return
+    }
+    if (current.state === "running" && !current.wait_reason) {
+      setState((previous) => ({ ...previous, message: "Syncing EOD candles…" }))
+    }
+
     if (canScanAfterSync(current)) {
       const syncWarning =
         current.state === "partial"
@@ -299,7 +310,9 @@ export function useScanWorkflow(authStatus?: AuthStatus) {
         phase: "failed",
         syncWarning: null,
         message:
-          !current.scanner_ready
+          current.failure_reason
+            ? `${current.failure_reason}${current.retry_at ? ` Retry after ${new Date(current.retry_at).toLocaleString()}.` : ""}`
+            : !current.scanner_ready
             ? `The scanner needs ${current.required_scoreable_instruments} stocks with at least ${current.minimum_history_days} sessions, but only ${current.scoreable_instruments} are ready.`
             : current.state === "partial"
             ? `The EOD sync completed for only ${current.successful_symbols}/${current.total_symbols} symbols, so the scanner was not started.`

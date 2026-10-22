@@ -1191,7 +1191,7 @@ class FundamentalPassOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("leverage", scorecard["red_flags"])
 
     def test_worker_registers_p7_job(self) -> None:
-        names = [function.__name__ for function in WorkerSettings.functions]
+        names = [getattr(function, "name", None) or function.__name__ for function in WorkerSettings.functions]
         self.assertIn("run_fundamental_pass", names)
 
     async def test_run_fundamental_pass_tolerates_extra_kwargs(self) -> None:

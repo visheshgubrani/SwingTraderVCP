@@ -296,3 +296,25 @@ Ops API:
 - `GET /system/reconciliation/runs`: recent reconciliation runs.
 - `GET /system/reconciliation/runs/{id}/items`: discrepancies for a run.
 - `POST /system/reconciliation/run`: enqueue a manual reconciliation job.
+
+## Fyers Standard history limits
+
+Every History API request (daily EOD sync, validation probes, and intraday
+reconciliation) uses a shared atomic Redis budget: `FYERS_DATA_REQUESTS_PER_MINUTE=45`
+(evenly spaced) and `FYERS_DATA_REQUESTS_PER_DAY=5000` over a rolling 24 hours.
+These settings may be reduced for accounts used by other applications. External
+applications cannot be counted by our limiter. A 500-symbol daily update takes
+about 11–12 minutes plus network/database time; initial backfills take longer.
+EOD jobs have a two-hour timeout, including scheduled and manually queued jobs.
+
+Codes `429`, `-429`, and `-360` trigger a shared 65-second cooldown followed by
+one recovery probe. Other callers wait for that probe. A second restriction,
+or an explicit daily-limit/block response, suspends history requests for 24
+hours. An abandoned recovery probe also blocks further attempts after its lease
+expires. Quota exhaustion and Redis failures stop calls and surface an error.
+Do not delete budget keys to retry a restricted account. Redis state should be
+persisted: clearing Redis loses local accounting, and the broker still enforces
+its own limits. Successful candle chunks remain in Postgres; rerunning sync
+resumes missing coverage, with historical prefixes fetched newest-first.
+`/historical/status` reports `wait_reason`, `retry_at`, and `failure_reason`;
+blocked syncs do not queue either product's downstream EOD scan chain.

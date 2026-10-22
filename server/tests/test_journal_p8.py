@@ -188,7 +188,7 @@ class JournalCoachSchemaTests(unittest.TestCase):
 
 class WorkerRegistrationTests(unittest.TestCase):
     def test_journal_jobs_registered(self):
-        names = {fn.__name__ for fn in WorkerSettings.functions}
+        names = {getattr(fn, "name", None) or fn.__name__ for fn in WorkerSettings.functions}
         self.assertIn("run_journal_dispatcher", names)
         self.assertIn("run_journal_ai_coach", names)
 

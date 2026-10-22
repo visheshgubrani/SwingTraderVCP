@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import json
 import logging
@@ -12,15 +11,14 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from arq.connections import ArqRedis
-from fyers_apiv3 import fyersModel
-from sqlalchemy import text
-
 from app.config import settings
 from app.database import async_session
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.services.bar_aggregator import REDIS_CHANNEL_5M_BARS
-
+from app.services.fyers_history import HistoryUnavailable, fetch_history
+from arq.connections import ArqRedis
+from fyers_apiv3 import fyersModel
+from sqlalchemy import text
 
 logger = logging.getLogger("intraday_bar_reconciliation")
 IST_TZ = ZoneInfo("Asia/Kolkata")
@@ -132,169 +130,178 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
     now_ist = dt.datetime.now(IST_TZ)
     verified = 0
     failures = 0
-    for item in symbols:
-        # Profiles need the rolling prior-session sample on every refresh.
-        # A short current-session reconciliation range cannot rebuild them.
-        start = now_ist.date() - dt.timedelta(days=50)
-        payload = {
-            "symbol": item["symbol"],
-            "resolution": "5",
-            "date_format": "1",
-            "range_from": start.isoformat(),
-            "range_to": now_ist.date().isoformat(),
-            "cont_flag": "1",
-        }
-        try:
-            response = await fyers.history(data=payload)
-            if response.get("s") != "ok" or not isinstance(response.get("candles"), list):
-                raise RuntimeError(str(response.get("message") or "Fyers history failed"))
-            candles = response["candles"]
-            cumulative_by_date: dict[dt.date, int] = defaultdict(int)
-            rows: list[dict[str, Any]] = []
-            for candle in candles:
-                if len(candle) < 6:
-                    continue
-                timestamp = dt.datetime.fromtimestamp(
-                    int(candle[0]), tz=dt.timezone.utc
-                ).astimezone(IST_TZ)
-                if timestamp + dt.timedelta(minutes=5) > now_ist:
-                    continue
-                volume = int(candle[5])
-                cumulative_by_date[timestamp.date()] += volume
-                rows.append(
-                    {
-                        "instrument_id": item["instrument_id"],
-                        "symbol": item["symbol"],
-                        "bar_time": timestamp,
-                        "open": Decimal(str(candle[1])),
-                        "high": Decimal(str(candle[2])),
-                        "low": Decimal(str(candle[3])),
-                        "close": Decimal(str(candle[4])),
-                        "volume": volume,
-                        "cumulative": cumulative_by_date[timestamp.date()],
-                        "raw": json.dumps(candle),
+    try:
+        for item in symbols:
+            # Profiles need the rolling prior-session sample on every refresh.
+            # A short current-session reconciliation range cannot rebuild them.
+            start = now_ist.date() - dt.timedelta(days=50)
+            payload = {
+                "symbol": item["symbol"],
+                "resolution": "5",
+                "date_format": "1",
+                "range_from": start.isoformat(),
+                "range_to": now_ist.date().isoformat(),
+                "cont_flag": "1",
+            }
+            try:
+                response = await fetch_history(redis, fyers, payload)
+                if response.get("s") != "ok" or not isinstance(response.get("candles"), list):
+                    raise RuntimeError(str(response.get("message") or "Fyers history failed"))
+                candles = response["candles"]
+                cumulative_by_date: dict[dt.date, int] = defaultdict(int)
+                rows: list[dict[str, Any]] = []
+                for candle in candles:
+                    if len(candle) < 6:
+                        continue
+                    timestamp = dt.datetime.fromtimestamp(
+                        int(candle[0]), tz=dt.timezone.utc
+                    ).astimezone(IST_TZ)
+                    if timestamp + dt.timedelta(minutes=5) > now_ist:
+                        continue
+                    volume = int(candle[5])
+                    cumulative_by_date[timestamp.date()] += volume
+                    rows.append(
+                        {
+                            "instrument_id": item["instrument_id"],
+                            "symbol": item["symbol"],
+                            "bar_time": timestamp,
+                            "open": Decimal(str(candle[1])),
+                            "high": Decimal(str(candle[2])),
+                            "low": Decimal(str(candle[3])),
+                            "close": Decimal(str(candle[4])),
+                            "volume": volume,
+                            "cumulative": cumulative_by_date[timestamp.date()],
+                            "raw": json.dumps(candle),
+                        }
+                    )
+                async with async_session() as session:
+                    previously_unverified = {
+                        row.bar_time
+                        for row in (
+                            await session.execute(
+                                text(
+                                    """
+                                    SELECT bar_time FROM five_minute_bars
+                                    WHERE symbol = :symbol
+                                      AND reconciliation_status <> 'verified'
+                                    """
+                                ),
+                                {"symbol": item["symbol"]},
+                            )
+                        ).all()
                     }
-                )
-            async with async_session() as session:
-                previously_unverified = {
-                    row.bar_time
-                    for row in (
+                    if rows:
                         await session.execute(
                             text(
                                 """
-                                SELECT bar_time FROM five_minute_bars
-                                WHERE symbol = :symbol
-                                  AND reconciliation_status <> 'verified'
+                                INSERT INTO five_minute_bars (
+                                    symbol, bar_time, open, high, low, close, volume,
+                                    cumulative_volume, reconciliation_status,
+                                    reconciled_at, reconciliation_details
+                                ) VALUES (
+                                    :symbol, :bar_time, :open, :high, :low, :close,
+                                    :volume, :cumulative, 'verified', now(),
+                                    jsonb_build_object('source', 'fyers_history')
+                                )
+                                ON CONFLICT (symbol, bar_time) DO UPDATE SET
+                                    open = EXCLUDED.open, high = EXCLUDED.high,
+                                    low = EXCLUDED.low, close = EXCLUDED.close,
+                                    volume = EXCLUDED.volume,
+                                    cumulative_volume = EXCLUDED.cumulative_volume,
+                                    reconciliation_status = 'verified',
+                                    reconciled_at = now(),
+                                    reconciliation_details = EXCLUDED.reconciliation_details
                                 """
                             ),
-                            {"symbol": item["symbol"]},
+                            rows,
                         )
-                    ).all()
-                }
-                if rows:
-                    await session.execute(
-                        text(
-                            """
-                            INSERT INTO five_minute_bars (
-                                symbol, bar_time, open, high, low, close, volume,
-                                cumulative_volume, reconciliation_status,
-                                reconciled_at, reconciliation_details
-                            ) VALUES (
-                                :symbol, :bar_time, :open, :high, :low, :close,
-                                :volume, :cumulative, 'verified', now(),
-                                jsonb_build_object('source', 'fyers_history')
-                            )
-                            ON CONFLICT (symbol, bar_time) DO UPDATE SET
-                                open = EXCLUDED.open, high = EXCLUDED.high,
-                                low = EXCLUDED.low, close = EXCLUDED.close,
-                                volume = EXCLUDED.volume,
-                                cumulative_volume = EXCLUDED.cumulative_volume,
-                                reconciliation_status = 'verified',
-                                reconciled_at = now(),
-                                reconciliation_details = EXCLUDED.reconciliation_details
-                            """
-                        ),
-                        rows,
+                        await session.execute(
+                            text(
+                                """
+                                INSERT INTO market_candles (
+                                    instrument_id, timeframe, candle_start, open_price,
+                                    high_price, low_price, close_price, volume, source,
+                                    raw_payload
+                                ) VALUES (
+                                    :instrument_id, '5m', :bar_time, :open, :high,
+                                    :low, :close, :volume, 'fyers_reconciled',
+                                    CAST(:raw AS jsonb)
+                                )
+                                ON CONFLICT (instrument_id, timeframe, candle_start)
+                                DO UPDATE SET open_price = EXCLUDED.open_price,
+                                    high_price = EXCLUDED.high_price,
+                                    low_price = EXCLUDED.low_price,
+                                    close_price = EXCLUDED.close_price,
+                                    volume = EXCLUDED.volume, fetched_at = now(),
+                                    source = EXCLUDED.source, raw_payload = EXCLUDED.raw_payload
+                                """
+                            ),
+                            rows,
+                        )
+                    profile = build_volume_profile(
+                        candles,
+                        evaluation_session_date=now_ist.date(),
                     )
-                    await session.execute(
-                        text(
-                            """
-                            INSERT INTO market_candles (
-                                instrument_id, timeframe, candle_start, open_price,
-                                high_price, low_price, close_price, volume, source,
-                                raw_payload
-                            ) VALUES (
-                                :instrument_id, '5m', :bar_time, :open, :high,
-                                :low, :close, :volume, 'fyers_reconciled',
-                                CAST(:raw AS jsonb)
-                            )
-                            ON CONFLICT (instrument_id, timeframe, candle_start)
-                            DO UPDATE SET open_price = EXCLUDED.open_price,
-                                high_price = EXCLUDED.high_price,
-                                low_price = EXCLUDED.low_price,
-                                close_price = EXCLUDED.close_price,
-                                volume = EXCLUDED.volume, fetched_at = now(),
-                                source = EXCLUDED.source, raw_payload = EXCLUDED.raw_payload
-                            """
-                        ),
-                        rows,
-                    )
-                profile = build_volume_profile(
-                    candles,
-                    evaluation_session_date=now_ist.date(),
-                )
-                if profile is not None:
-                    as_of_date, adv20, points, sessions_used = profile
-                    await session.execute(
-                        text(
-                            """
-                            INSERT INTO volume_profiles (
-                                symbol, as_of_date, adv20_robust, bucket_medians,
-                                sessions_used
-                            ) VALUES (
-                                :symbol, :as_of_date, :adv20,
-                                CAST(:points AS jsonb), :sessions_used
-                            )
-                            ON CONFLICT (symbol, as_of_date) DO UPDATE SET
-                                adv20_robust = EXCLUDED.adv20_robust,
-                                bucket_medians = EXCLUDED.bucket_medians,
-                                sessions_used = EXCLUDED.sessions_used
-                            """
-                        ),
-                        {
-                            "symbol": item["symbol"],
-                            "as_of_date": as_of_date,
-                            "adv20": adv20,
-                            "points": json.dumps(points),
-                            "sessions_used": sessions_used,
-                        },
-                    )
-                await session.commit()
-
-            # Republish only current-session bars that just became authoritative.
-            for row in rows:
-                if (
-                    row["bar_time"] in previously_unverified
-                    and row["bar_time"].date() == now_ist.date()
-                ):
-                    await redis.publish(
-                        REDIS_CHANNEL_5M_BARS,
-                        json.dumps(
+                    if profile is not None:
+                        as_of_date, adv20, points, sessions_used = profile
+                        await session.execute(
+                            text(
+                                """
+                                INSERT INTO volume_profiles (
+                                    symbol, as_of_date, adv20_robust, bucket_medians,
+                                    sessions_used
+                                ) VALUES (
+                                    :symbol, :as_of_date, :adv20,
+                                    CAST(:points AS jsonb), :sessions_used
+                                )
+                                ON CONFLICT (symbol, as_of_date) DO UPDATE SET
+                                    adv20_robust = EXCLUDED.adv20_robust,
+                                    bucket_medians = EXCLUDED.bucket_medians,
+                                    sessions_used = EXCLUDED.sessions_used
+                                """
+                            ),
                             {
-                                "symbol": row["symbol"],
-                                "bar_time": row["bar_time"].isoformat(),
-                                "open": float(row["open"]),
-                                "high": float(row["high"]),
-                                "low": float(row["low"]),
-                                "close": float(row["close"]),
-                                "volume": row["volume"],
-                                "cumulative_volume": row["cumulative"],
-                            }
-                        ),
-                    )
-                    verified += 1
+                                "symbol": item["symbol"],
+                                "as_of_date": as_of_date,
+                                "adv20": adv20,
+                                "points": json.dumps(points),
+                                "sessions_used": sessions_used,
+                            },
+                        )
+                    await session.commit()
+
+                # Republish only current-session bars that just became authoritative.
+                for row in rows:
+                    if (
+                        row["bar_time"] in previously_unverified
+                        and row["bar_time"].date() == now_ist.date()
+                    ):
+                        await redis.publish(
+                            REDIS_CHANNEL_5M_BARS,
+                            json.dumps(
+                                {
+                                    "symbol": row["symbol"],
+                                    "bar_time": row["bar_time"].isoformat(),
+                                    "open": float(row["open"]),
+                                    "high": float(row["high"]),
+                                    "low": float(row["low"]),
+                                    "close": float(row["close"]),
+                                    "volume": row["volume"],
+                                    "cumulative_volume": row["cumulative"],
+                                }
+                            ),
+                        )
+                        verified += 1
+            except HistoryUnavailable as exc:
+                logger.error("5-minute reconciliation paused: %s", exc)
+                return {"status": "failed", "verified": verified, "failures": failures + 1,
+                        "failure_reason": str(exc), "retry_at": exc.retry_at}
+            except Exception:
+                failures += 1
+                logger.exception("5-minute reconciliation failed for %s", item["symbol"])
+    finally:
+        try:
+            await fyers.close()
         except Exception:
-            failures += 1
-            logger.exception("5-minute reconciliation failed for %s", item["symbol"])
-        await asyncio.sleep(0.05)
+            logger.warning("Failed to close history client", exc_info=True)
     return {"status": "completed", "verified": verified, "failures": failures}

@@ -83,7 +83,9 @@ class IntradayBarReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 ],
             }
         )
+        fyers.close = AsyncMock()
         redis = AsyncMock()
+        redis.eval.side_effect = [[0, 0], 1]
 
         with (
             patch(

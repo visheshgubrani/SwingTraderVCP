@@ -229,6 +229,20 @@ class Settings(BaseSettings):
     p7_fundamental_pass_enabled: bool = False
     upstox_analytics_token: str = ""
     upstox_fundamentals_base_url: str = "https://api.upstox.com/v2"
+    # Market data (EOD/5m history + LTP) may come from Upstox's read-only
+    # Analytics Token instead of Fyers, so paper mode needs no daily Fyers
+    # 2FA. Orders, funds, and the order WS are always Fyers.
+    market_data_provider: Literal["fyers", "upstox"] = "fyers"
+    upstox_api_base_url: str = "https://api.upstox.com"
+    upstox_http_timeout_seconds: float = Field(default=10.0, ge=1.0, le=12.0)
+    # Upstox standard limits: 50/s, 500/min, 2000/30min (account-wide). The
+    # bulk (history) and realtime (LTP poll) budgets together stay below 2000.
+    upstox_bulk_requests_per_minute: int = Field(default=400, ge=1, le=450)
+    upstox_bulk_requests_per_30min: int = Field(default=900, ge=1, le=1000)
+    upstox_ltp_poll_seconds: float = Field(default=2.0, ge=1.8, le=10.0)
+    upstox_poll_start_ist: str = "09:00"
+    upstox_poll_end_ist: str = "15:35"
+    upstox_analytics_token_expires_on: str | None = None
     nse_fundamental_risk_enabled: bool = True
     nse_corporate_filings_base_url: str = "https://www.nseindia.com"
     openrouter_api_key: str = ""
@@ -290,9 +304,9 @@ class Settings(BaseSettings):
     proposal_automation_enabled: bool = False
     proposal_queue_name: str = "arq:queue:p10-proposals"
     proposal_batch_budget_minutes: int = Field(default=45, ge=5, le=120)
-    # Testing default is 10. Restore the locked production top-20 with
-    # PROPOSAL_BATCH_LIMIT=20. Hard-capped at 20 in the worker/queue.
-    proposal_batch_limit: int = Field(default=10, ge=1, le=20)
+    # Locked production top-20 (AGENTS.md §4). Hard-capped at 20 in the
+    # worker/queue; lower it only for local testing.
+    proposal_batch_limit: int = Field(default=20, ge=1, le=20)
     proposal_attempt_timeout_seconds: float = Field(default=90.0, ge=10, le=120)
     proposal_max_attempts: int = Field(default=2, ge=1, le=2)
     # Populate exchange holidays as JSON in the environment, for example
@@ -395,10 +409,24 @@ class Settings(BaseSettings):
             if not self.app_password:
                 self.app_password = "dev_swing_password_2026"
 
+        if (
+            self.app_environment == "production"
+            and self.market_data_provider == "upstox"
+            and not self.upstox_analytics_token.strip()
+        ):
+            raise ValueError(
+                "UPSTOX_ANALYTICS_TOKEN is required when MARKET_DATA_PROVIDER=upstox"
+            )
+
         if self.session_cookie_secure is None:
             self.session_cookie_secure = self.app_environment == "production"
 
         return self
+
+    @property
+    def fyers_session_required(self) -> bool:
+        """Live orders always need Fyers; paper needs it only for Fyers data."""
+        return self.execution_mode == "live" or self.market_data_provider == "fyers"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

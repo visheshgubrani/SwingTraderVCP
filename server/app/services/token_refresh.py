@@ -135,11 +135,119 @@ async def run_auth_guard(ctx: dict[str, Any]) -> dict[str, Any]:
             return {"status": "crashed", "error": str(exc)[:300]}
 
 
+def upstox_token_days_left(
+    token: str, expires_on: str | None, today: dt.date
+) -> int | None:
+    """Days until the Analytics Token expires (env date wins, else JWT ``exp``)."""
+    import base64
+
+    expiry: dt.date | None = None
+    if expires_on:
+        try:
+            expiry = dt.date.fromisoformat(expires_on.strip())
+        except ValueError:
+            expiry = None
+    if expiry is None and token.count(".") == 2:
+        try:
+            segment = token.split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+            if isinstance(claims.get("exp"), (int, float)):
+                expiry = dt.datetime.fromtimestamp(claims["exp"], IST_TZ).date()
+        except (ValueError, TypeError, json.JSONDecodeError):
+            expiry = None
+    return None if expiry is None else (expiry - today).days
+
+
+async def _guard_tick_fyers_optional(
+    db, redis, *, state: dict[str, Any], session_date: dt.date
+) -> dict[str, Any]:
+    """Paper + Upstox data: no Fyers calls, no login alerts; check Upstox once a day."""
+    from app.domain.market_regime import BENCHMARK_SYMBOL
+    from app.services.upstox_market_data import (
+        UpstoxMarketDataAuthError,
+        clear_upstox_auth_failure,
+        open_upstox_client,
+    )
+
+    result: dict[str, Any] = {
+        "status": "fyers_not_required",
+        "market_data_provider": settings.market_data_provider,
+        "session_date": session_date.isoformat(),
+    }
+    if not state.get("fyers_optional_noted"):
+        await _emit_system_event(
+            db,
+            "info",
+            "auth_fyers_not_required",
+            {"execution_mode": settings.execution_mode,
+             "market_data_provider": settings.market_data_provider},
+        )
+        await db.commit()
+        state["fyers_optional_noted"] = True
+    if settings.market_data_provider != "upstox" or state.get("upstox_checked"):
+        await save_guard_state(redis, session_date, state)
+        return result
+
+    problem: str | None = None
+    severity = "critical"
+    client = None
+    try:
+        await clear_upstox_auth_failure(redis)
+        client = await open_upstox_client(redis, [BENCHMARK_SYMBOL])
+        quotes = await client.fetch_ltp(redis, [BENCHMARK_SYMBOL])
+        if BENCHMARK_SYMBOL not in quotes:
+            problem = "Upstox LTP returned no benchmark quote"
+    except UpstoxMarketDataAuthError as exc:
+        problem = str(exc)
+    except Exception as exc:  # network/budget: report, retry next slot
+        problem = f"{type(exc).__name__}: {exc}"
+        severity = "warning"
+    finally:
+        if client is not None:
+            await client.close()
+
+    days_left = upstox_token_days_left(
+        settings.upstox_analytics_token,
+        settings.upstox_analytics_token_expires_on,
+        session_date,
+    )
+    result["upstox_token_days_left"] = days_left
+    if problem is None and days_left is not None and days_left <= 14:
+        problem = f"Upstox Analytics Token expires in {days_left} day(s); regenerate it."
+        severity = "critical" if days_left <= 3 else "warning"
+    if problem is None:
+        state["upstox_checked"] = True
+        result["upstox"] = "ok"
+    else:
+        result["upstox"] = problem
+        if severity == "critical" or days_left is not None:
+            state["upstox_checked"] = True
+        await _emit_system_event(
+            db, severity, "upstox_market_data_check_failed", {"reason": problem[:300]},
+            redis=redis,
+        )
+        await db.commit()
+        await telegram_service.send_message(
+            db,
+            ("🚨" if severity == "critical" else "⚠️")
+            + " <b>Upstox market data</b>\n\n"
+            + telegram_service._escape(problem)
+            + "\n\nPaper trading needs this token for prices and 5-minute bars.",
+        )
+    await save_guard_state(redis, session_date, state)
+    return result
+
+
 async def _guard_tick(db, redis, *, now: dt.datetime) -> dict[str, Any]:
     now_ist = as_ist(now)
     session_date = now_ist.date()
     trading_day = is_nse_session(session_date)
     state = await load_guard_state(redis, session_date)
+
+    if not settings.fyers_session_required:
+        return await _guard_tick_fyers_optional(
+            db, redis, state=state, session_date=session_date
+        )
 
     readiness = await evaluate_auth_readiness(db, redis, verify=True, now=now)
     if readiness["healthy"]:

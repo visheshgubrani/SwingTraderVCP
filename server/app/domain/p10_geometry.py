@@ -682,66 +682,94 @@ def format_candidate_summary(
     """Short text packet sent with the 126-session chart. Not a raw OHLCV
     table, and never contains absolute prices (percentages/statuses only).
 
-    When ``facts`` is provided (StructuralFacts over the raw geometry),
-    deterministic right-edge context lines are appended so the model judges
-    maturity, low progression, and pullback volume from Python-computed
-    facts instead of pixel estimates.
+    ``contractions`` are the folded Python candidates (``facts.candidates``).
+    When ``facts`` is provided, deterministic right-edge context and gate
+    *statuses* are appended so the model judges maturity, low progression,
+    and pullback volume from Python-computed facts instead of pixel estimates.
     """
     lines: list[str] = []
     if not contractions:
         lines.append("No Python swing-detector candidates in the 126-session window.")
     else:
+        members = dict(zip((w.index for w in facts.candidates), facts.candidate_members)) if facts else {}
         for wave in contractions:
             vol20 = f"{wave.vol_adv20:.2f}" if wave.vol_adv20 is not None else "n/a"
             vol50 = f"{wave.vol_adv50:.2f}" if wave.vol_adv50 is not None else "n/a"
+            folded = len(members.get(wave.index, ()))
+            fold_txt = f" (folds {folded} raw swings)" if folded > 1 else ""
             lines.append(
                 f"C{wave.index}: {wave.high_date}→{wave.low_date} "
-                f"depth {wave.depth_pct:.1f}% vol/ADV20 {vol20} vol/ADV50 {vol50}"
+                f"depth {wave.depth_pct:.1f}% vol/ADV20 {vol20} vol/ADV50 {vol50}{fold_txt}"
             )
     if facts is None:
         return "\n".join(lines)
+
+    verdict = evaluate_structural_gates(facts)
+    codes = set(verdict.codes)
+
+    def status(code: str) -> str:
+        return "FAILED" if code in codes else "passed"
 
     first_high = contractions[0].high_date if contractions else None
     lines.append("— Deterministic structure (Python-computed, do not re-estimate):")
     lines.append(
         f"Base age: {facts.base_age_sessions} completed sessions since the first "
-        f"pullback high ({first_high}); raw pullbacks detected: {facts.raw_count}."
+        f"pullback high ({first_high}); Python candidates: {facts.candidate_count} "
+        f"(from {facts.raw_count} raw fractal swings)."
     )
+    by_index = {w.index: w for w in facts.candidates}
+    stair = [by_index[i] for i in facts.staircase_indices if i in by_index]
+    if len(stair) >= 2:
+        chain = " → ".join(f"C{w.index} {w.depth_pct:.1f}%" for w in stair)
+        skipped = [f"C{w.index}" for w in facts.candidates if w.index not in facts.staircase_indices]
+        skip_txt = ""
+        if skipped:
+            noun = "is a shallower dip" if len(skipped) == 1 else "are shallower dips"
+            skip_txt = f"; {', '.join(skipped)} {noun} superseded by a deeper later contraction"
+        lines.append(
+            f"Significant contractions (tightening check: "
+            f"{status('structural_flat_shelf_not_tightening')}): {chain}{skip_txt}."
+        )
     if facts.undercut_gap is not None and facts.lowest_prior_low:
         gap_pct = facts.undercut_gap / facts.lowest_prior_low * Decimal("100")
         if facts.undercut_gap > 0:
             lines.append(
-                f"Low progression: latest pullback low is {gap_pct:.2f}% BELOW the "
-                "prior pullback floor (lower low / undercut)."
+                f"Low progression (undercut check: {status('structural_undercut_lower_low')}): "
+                f"latest pullback low is {gap_pct:.2f}% below the prior pullback floor."
             )
         else:
-            lines.append("Low progression: lows are rising or equal (no undercut).")
+            lines.append("Low progression (undercut check: passed): lows are rising or equal.")
     if facts.close_vs_pivot_pct is not None:
+        edge = (
+            f"; close sits at {facts.right_edge_position_pct:.0f}% of the final contraction's range"
+            if facts.right_edge_position_pct is not None else ""
+        )
         lines.append(
             f"Right edge: last close is {facts.close_vs_pivot_pct:+.1f}% vs the "
-            "final pullback high (pivot candidate) and "
-            f"{facts.close_vs_final_low_pct:+.1f}% vs the final pullback low."
+            f"final contraction high (pivot candidate){edge}."
         )
     pb = facts.final_pullback
     if pb is not None:
         seg_txt = (
-            f"Final pullback segment: {pb.segment_days} session(s), "
+            f"Final pullback (distribution check: "
+            f"{status('structural_final_pullback_distribution')}): {pb.segment_days} session(s), "
             f"{pb.down_days} down day(s)"
         )
         if pb.seg_max_down_vs_adv_ratio is not None:
             seg_txt += f"; max down-day volume {pb.seg_max_down_vs_adv_ratio:.2f}x its prior-20-day ADV"
         if pb.seg_mean_vs_prev_ratio is not None:
-            seg_txt += f"; segment mean {pb.seg_mean_vs_prev_ratio:.2f}x the previous pullback-window mean"
+            seg_txt += f"; segment mean {pb.seg_mean_vs_prev_ratio:.2f}x the previous contraction's mean"
         lines.append(seg_txt + ".")
     pd = facts.pivot_day
     if pd is not None:
-        pivot_txt = "Final pivot day:"
+        pivot_txt = f"Final pivot day (climax check: {status('structural_pivot_climax_fade')}):"
         if pd.vol_ratio is not None:
             pivot_txt += f" volume {pd.vol_ratio:.2f}x its prior-20-day ADV"
         if pd.upper_wick_frac is not None:
             pivot_txt += f"; upper-wick share {pd.upper_wick_frac:.0%}"
-        if pd.fade_atr is not None and pd.later_sessions:
-            pivot_txt += f"; later closes faded up to {pd.fade_atr:.2f}x ATR14"
+        if pd.follow_closes:
+            held = "broke below" if pd.retention_failed else "held inside or above"
+            pivot_txt += f"; the next session {held} the pivot-day range"
         lines.append(pivot_txt + ".")
     return "\n".join(lines)
 
@@ -1453,9 +1481,18 @@ PULLBACK_MAX_DOWN_ADV_RATIO = Decimal("1.75")  # max down-session vol / ADV befo
 PULLBACK_MEAN_PREV_RATIO = Decimal("1.10")  # segment mean vs previous contraction window mean
 PULLBACK_MIN_ADV_RATIO = Decimal("0.75")  # segment mean must also be >= this x ADV to fail
 PIVOT_CLIMAX_VOL_RATIO = Decimal("1.75")  # pivot-day volume / ADV before pivot
-PIVOT_FADE_ATR = Decimal("1.0")  # later close drawdown in ATR terms
-POST_PIVOT_FADE_SESSIONS = 5
-STRUCTURAL_GATE_POLICY_VERSION = "p10_structural_gates_v1"
+PIVOT_FADE_ATR = Decimal("1.0")  # audit only: post-pivot drawdown in ATR terms
+# A climax pivot "fails retention" when the first completed session after it
+# closes below the pivot-day low (key reversal). The final contraction's own
+# pullback depth is never a climax signal (that is the tightening rule's job).
+PIVOT_RETENTION_SESSIONS = 1
+POST_PIVOT_FOLLOW_SESSIONS = 3  # follow closes recorded for audit/sweeps
+# Raw fractal swings are folded before they become candidates: a swing whose
+# low undercuts the running leg low by more than max(tick, this x ATR14) is a
+# continuation of the same decline, not a new contraction.
+FOLD_CONTINUATION_TOLERANCE_ATR = Decimal("0.10")
+MAX_GEMINI_CANDIDATES = 6  # the strict schema allows at most 6 assessment rows
+STRUCTURAL_GATE_POLICY_VERSION = "p10_structural_gates_v2"
 
 # Dispositions the structural gates return (see AGENTS.md lifecycle).
 StructuralDisposition = str  # 'ok' | 'forming' | 'invalid'
@@ -1503,8 +1540,11 @@ class PivotDayFacts:
     upper_wick_frac: Decimal | None = None
     pivot_close: Decimal | None = None
     min_later_close: Decimal | None = None
-    fade_atr: Decimal | None = None
+    fade_atr: Decimal | None = None  # post-pivot drawdown through as-of; audit only
     later_sessions: int = 0
+    pivot_low: Decimal | None = None
+    follow_closes: tuple[Decimal, ...] = ()
+    retention_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -1529,6 +1569,13 @@ class StructuralFacts:
     close_vs_final_low_pct: Decimal | None = None
     final_pullback: PullbackFacts | None = None
     pivot_day: PivotDayFacts | None = None
+    # Folded Python candidates (what Gemini sees) and their raw members.
+    candidates: tuple["VcpContractionWave", ...] = ()
+    candidate_members: tuple[tuple[int, ...], ...] = ()
+    candidate_count: int = 0
+    staircase_indices: tuple[int, ...] = ()
+    raw_depth_steps: tuple[DepthStep, ...] = ()  # audit only, never gated
+    right_edge_position_pct: Decimal | None = None  # close within final leg, 0=low 100=pivot
 
 
 @dataclass(frozen=True)
@@ -1595,14 +1642,131 @@ def _adv_before(
     return _mean_decimal(vols), False
 
 
+def _merge_waves(a: VcpContractionWave, b: VcpContractionWave) -> VcpContractionWave:
+    """Same semantics as Gemini merge resolution: max high, min low."""
+    high_date, high = (a.high_date, a.high_price) if a.high_price >= b.high_price else (b.high_date, b.high_price)
+    low_date, low = (a.low_date, a.low_price) if a.low_price <= b.low_price else (b.low_date, b.low_price)
+    depth = _depth_pct(Decimal(str(high)), Decimal(str(low))).quantize(Decimal("0.01"))
+    return VcpContractionWave(
+        index=0,
+        high_date=high_date,
+        high_price=Decimal(str(high)),
+        low_date=low_date,
+        low_price=Decimal(str(low)),
+        depth_pct=depth,
+    )
+
+
+def fold_contraction_candidates(
+    raw: Sequence[VcpContractionWave],
+    *,
+    atr14: Decimal,
+    tick_size: Decimal = DEFAULT_TICK_SIZE,
+    noise_depth_pct: Decimal = NOISE_DEPTH_PCT,
+    tolerance_atr: Decimal = FOLD_CONTINUATION_TOLERANCE_ATR,
+    cap: int = MAX_GEMINI_CANDIDATES,
+) -> tuple[tuple[VcpContractionWave, ...], tuple[tuple[int, ...], ...]]:
+    """Fold noisy fractal swings into discrete contraction legs (pure).
+
+    - A swing whose low undercuts the running leg's low by more than
+      ``max(tick, tolerance_atr x ATR14)`` continues that decline and merges
+      into it (a bounce inside one larger pullback is not a contraction).
+    - A non-final swing shallower than the noise floor is dropped.
+    - The final raw swing is always kept (the right edge is never lost).
+    - Beyond ``cap`` legs the oldest two merge, so the strict 6-row Gemini
+      schema is always satisfiable.
+
+    Low progression (undercut) is evaluated on the unfolded raw lows, so
+    folding can never hide a lower low.
+    """
+    ordered = sorted(raw, key=lambda w: (w.high_date, w.low_date))
+    tolerance = max(tick_size, atr14 * tolerance_atr)
+    stack: list[tuple[VcpContractionWave, tuple[int, ...]]] = []
+    for position, wave in enumerate(ordered):
+        final = position == len(ordered) - 1
+        current, members, merged = wave, (wave.index,), False
+        while stack and current.low_price < stack[-1][0].low_price - tolerance:
+            previous, previous_members = stack.pop()
+            current = _merge_waves(previous, current)
+            members = previous_members + members
+            merged = True
+        if not merged and not final and current.depth_pct < noise_depth_pct:
+            continue
+        stack.append((current, members))
+    while len(stack) > max(1, cap):
+        (first, m1), (second, m2) = stack[0], stack[1]
+        stack[0:2] = [(_merge_waves(first, second), m1 + m2)]
+    folded = tuple(
+        VcpContractionWave(
+            index=i,
+            high_date=w.high_date,
+            high_price=w.high_price,
+            low_date=w.low_date,
+            low_price=w.low_price,
+            depth_pct=w.depth_pct,
+        )
+        for i, (w, _) in enumerate(stack, start=1)
+    )
+    return folded, tuple(m for _, m in stack)
+
+
+def significant_staircase(
+    candidates: Sequence[VcpContractionWave],
+    *,
+    noise_depth_pct: Decimal = NOISE_DEPTH_PCT,
+) -> tuple[VcpContractionWave, ...]:
+    """Contractions the tightening rule compares.
+
+    Scanning right to left, keep each candidate at least as deep as every
+    later kept one; shallower dips superseded by a deeper contraction from a
+    higher high are not steps. When the final candidate is the deepest, the
+    step from the deepest earlier candidate to the final one is evaluated (an
+    expanding final must still fail).
+    """
+    if not candidates:
+        return ()
+    eligible = [w for w in candidates[:-1] if w.depth_pct >= noise_depth_pct]
+    eligible.append(candidates[-1])
+    kept: list[VcpContractionWave] = []
+    running = Decimal("-1")
+    for wave in reversed(eligible):
+        if wave.depth_pct >= running:
+            kept.append(wave)
+            running = wave.depth_pct
+    kept.reverse()
+    if len(kept) == 1 and len(eligible) >= 2:
+        deepest_earlier = max(eligible[:-1], key=lambda w: w.depth_pct)
+        kept = [deepest_earlier, eligible[-1]]
+    return tuple(kept)
+
+
+def _depth_step(prev: VcpContractionWave, curr: VcpContractionWave) -> DepthStep:
+    ratio = None
+    if prev.depth_pct > 0:
+        ratio = Decimal(str(curr.depth_pct / prev.depth_pct))
+    return DepthStep(
+        prev_index=prev.index,
+        curr_index=curr.index,
+        prev_depth=Decimal(str(prev.depth_pct)),
+        curr_depth=Decimal(str(curr.depth_pct)),
+        ratio=ratio,
+        diff_pp=Decimal(str(prev.depth_pct)) - Decimal(str(curr.depth_pct)),
+    )
+
+
 def compute_structural_facts(
     candles: Sequence[CandleData],
     contractions: Sequence[VcpContractionWave],
     *,
     tick_size: Decimal = DEFAULT_TICK_SIZE,
+    fold_tolerance_atr: Decimal = FOLD_CONTINUATION_TOLERANCE_ATR,
+    noise_depth_pct: Decimal = NOISE_DEPTH_PCT,
 ) -> StructuralFacts:
-    """Facts over the raw geometry. Uses only candles ending at the freeze's
-    as-of date; every baseline comes strictly from earlier sessions."""
+    """Facts over the Python geometry. Uses only candles ending at the
+    freeze's as-of date; every baseline comes strictly from earlier sessions.
+
+    ``contractions`` are the RAW fractal swings. They are folded internally
+    into the candidates Gemini sees; undercut and base age stay on raw."""
     dated = [c for c in candles if c.date is not None]
     dates = [c.date for c in dated]  # ascending order as given
     as_of = candles[-1].date if candles and candles[-1].date else None
@@ -1626,29 +1790,26 @@ def compute_structural_facts(
     base_age = len(_dates_between(dates, after=first_high, through=as_of))
     depths = tuple(Decimal(str(w.depth_pct)) for w in raw)
 
-    # Depth steps over waves that are not detector noise.
+    folded, members = fold_contraction_candidates(
+        raw,
+        atr14=atr14,
+        tick_size=tick_size,
+        noise_depth_pct=noise_depth_pct,
+        tolerance_atr=fold_tolerance_atr,
+    )
+    folded = annotate_contraction_volume(candles, folded)
+    staircase = significant_staircase(folded, noise_depth_pct=noise_depth_pct)
+    steps = [_depth_step(p, c) for p, c in zip(staircase, staircase[1:])]
+
+    # Raw steps are kept for audit/sweeps only; gates read the staircase.
     eligible: list[VcpContractionWave] = []
     noise_idx: list[int] = []
     for wave in raw:
-        if wave.depth_pct < NOISE_DEPTH_PCT:
+        if wave.depth_pct < noise_depth_pct:
             noise_idx.append(wave.index)
         else:
             eligible.append(wave)
-    steps: list[DepthStep] = []
-    for prev, curr in zip(eligible, eligible[1:]):
-        ratio = None
-        if prev.depth_pct > 0:
-            ratio = Decimal(str(curr.depth_pct / prev.depth_pct))
-        steps.append(
-            DepthStep(
-                prev_index=prev.index,
-                curr_index=curr.index,
-                prev_depth=Decimal(str(prev.depth_pct)),
-                curr_depth=Decimal(str(curr.depth_pct)),
-                ratio=ratio,
-                diff_pp=Decimal(str(prev.depth_pct)) - Decimal(str(curr.depth_pct)),
-            )
-        )
+    raw_steps = [_depth_step(p, c) for p, c in zip(eligible, eligible[1:])]
 
     prior_lows = lows[:-1]
     lowest_prior = (
@@ -1656,12 +1817,14 @@ def compute_structural_facts(
         if prior_lows
         else None
     )
-    final_wave = raw[-1]
-    final_low = Decimal(str(final_wave.low_price)) if final_wave.low_date else None
+    raw_final = raw[-1]
+    final_low = Decimal(str(raw_final.low_price)) if raw_final.low_date else None
     undercut_gap = None
     if lowest_prior is not None and final_low is not None:
         undercut_gap = lowest_prior - final_low
 
+    # Pivot, pullback segment and right edge come from the final folded leg.
+    final_wave = folded[-1]
     pivot_price = floor_to_tick(final_wave.high_price, tick_size) if final_wave else None
     pivot_date = final_wave.high_date if final_wave else None
 
@@ -1673,10 +1836,13 @@ def compute_structural_facts(
         close_vs_pivot = (
             (last_close - pivot_price) / pivot_price * Decimal("100")
         )
-    if last_close is not None and final_low and final_low > 0:
-        close_vs_low = (
-            (last_close - final_low) / final_low * Decimal("100")
-        )
+    leg_low = Decimal(str(final_wave.low_price))
+    if last_close is not None and leg_low > 0:
+        close_vs_low = (last_close - leg_low) / leg_low * Decimal("100")
+    right_edge = None
+    leg_high = Decimal(str(final_wave.high_price))
+    if last_close is not None and leg_high > leg_low:
+        right_edge = (last_close - leg_low) / (leg_high - leg_low) * Decimal("100")
 
     # Final pullback segment volume facts.
     pullback = None
@@ -1717,11 +1883,14 @@ def compute_structural_facts(
                 dates, by_date, before=seg_dates[0], window=20
             )
             prev_mean = None
-            if len(raw) >= 2 and raw[-2].high_date and raw[-2].low_date:
+            # Previous window = the previous significant (staircase)
+            # contraction, never a quiet dip during the advance.
+            previous = staircase[-2] if len(staircase) >= 2 else None
+            if previous is not None and previous.high_date and previous.low_date:
                 prev_dates = _dates_between(
                     dates,
-                    after=raw[-2].high_date,
-                    through=raw[-2].low_date,
+                    after=previous.high_date,
+                    through=previous.low_date,
                 )
                 if prev_dates:
                     prev_mean = _window_mean_vol(by_date, prev_dates)
@@ -1778,6 +1947,11 @@ def compute_structural_facts(
         fade_atr = None
         if min_later is not None and atr14 > 0:
             fade_atr = max(Decimal("0"), (pivot_close - min_later) / atr14)
+        pivot_low = Decimal(str(pivot_c.low))
+        follow_closes = tuple(later_closes[:POST_PIVOT_FOLLOW_SESSIONS])
+        retention_failed = any(
+            close < pivot_low for close in follow_closes[:PIVOT_RETENTION_SESSIONS]
+        )
         pivot_day_facts = PivotDayFacts(
             pivot_date=pivot_date,
             pivot_vol=pivot_vol,
@@ -1788,6 +1962,9 @@ def compute_structural_facts(
             min_later_close=min_later,
             fade_atr=fade_atr,
             later_sessions=len(later),
+            pivot_low=pivot_low,
+            follow_closes=follow_closes,
+            retention_failed=retention_failed,
         )
 
     return StructuralFacts(
@@ -1811,6 +1988,12 @@ def compute_structural_facts(
         close_vs_final_low_pct=close_vs_low,
         final_pullback=pullback,
         pivot_day=pivot_day_facts,
+        candidates=folded,
+        candidate_members=members,
+        candidate_count=len(folded),
+        staircase_indices=tuple(w.index for w in staircase),
+        raw_depth_steps=tuple(raw_steps),
+        right_edge_position_pct=right_edge,
     )
 
 
@@ -1835,6 +2018,8 @@ def evaluate_structural_gates(
         "base_age_sessions": facts.base_age_sessions,
         "maturity_floor_sessions": maturity_floor_sessions,
         "raw_count": facts.raw_count,
+        "candidate_count": facts.candidate_count,
+        "staircase_indices": list(facts.staircase_indices),
     }
 
     # 1. Undercut: latest raw structural low below the minimum earlier
@@ -1911,7 +2096,9 @@ def evaluate_structural_gates(
                 codes.append("structural_final_pullback_distribution")
 
     # 4. Climax-fade: pivot-day volume elevated AND failed retention (upper
-    #    rejection on the day or a later close materially below pivot close).
+    #    rejection on the day, or the next completed session closing below the
+    #    pivot-day low). A normal final pullback after a high-volume pivot is
+    #    the contraction itself, not a failed climax.
     pd = facts.pivot_day
     if pd is not None:
         details["pivot_day"] = {
@@ -1921,13 +2108,14 @@ def evaluate_structural_gates(
             "upper_wick_frac": (
                 str(pd.upper_wick_frac) if pd.upper_wick_frac is not None else None
             ),
-            "fade_atr": str(pd.fade_atr) if pd.fade_atr is not None else None,
+            "post_pivot_drawdown_atr": str(pd.fade_atr) if pd.fade_atr is not None else None,
+            "follow_closes": [str(c) for c in pd.follow_closes],
+            "retention_failed": pd.retention_failed,
             "later_sessions": pd.later_sessions,
         }
         climax = pd.vol_ratio is not None and pd.vol_ratio > pivot_climax_vol_ratio
         wick = pd.upper_wick_frac is not None and pd.upper_wick_frac >= Decimal("0.5")
-        fade = pd.fade_atr is not None and pd.fade_atr >= pivot_fade_atr
-        if climax and (wick or fade):
+        if climax and (wick or pd.retention_failed):
             codes.append("structural_pivot_climax_fade")
 
     invalid = bool(codes)
@@ -1935,7 +2123,7 @@ def evaluate_structural_gates(
 
     forming_codes: list[str] = []
     if not invalid:
-        if facts.raw_count < 2:
+        if facts.candidate_count < 2:
             forming_codes.append("structural_single_contraction")
         if (
             facts.base_age_sessions >= 0
@@ -2065,8 +2253,41 @@ def structural_facts_to_dict(facts: StructuralFacts) -> dict[str, Any]:
                     else None
                 ),
                 "later_sessions": facts.pivot_day.later_sessions,
+                "pivot_low": (
+                    str(facts.pivot_day.pivot_low)
+                    if facts.pivot_day.pivot_low is not None
+                    else None
+                ),
+                "follow_closes": [str(c) for c in facts.pivot_day.follow_closes],
+                "retention_failed": facts.pivot_day.retention_failed,
             }
             if facts.pivot_day is not None
+            else None
+        ),
+        "candidate_count": facts.candidate_count,
+        "candidates": [
+            {
+                "index": w.index,
+                "high_date": w.high_date,
+                "low_date": w.low_date,
+                "depth_pct": str(w.depth_pct),
+                "raw_members": list(m),
+            }
+            for w, m in zip(facts.candidates, facts.candidate_members)
+        ],
+        "staircase_indices": list(facts.staircase_indices),
+        "raw_depth_steps": [
+            {
+                "prev_index": st.prev_index,
+                "curr_index": st.curr_index,
+                "ratio": str(st.ratio) if st.ratio is not None else None,
+                "diff_pp": str(st.diff_pp),
+            }
+            for st in facts.raw_depth_steps
+        ],
+        "right_edge_position_pct": (
+            str(facts.right_edge_position_pct)
+            if facts.right_edge_position_pct is not None
             else None
         ),
     }

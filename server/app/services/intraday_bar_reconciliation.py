@@ -1,4 +1,4 @@
-"""Fyers-authoritative 5-minute reconciliation and volume-profile refresh."""
+"""Provider-authoritative (Fyers or Upstox) 5-minute reconciliation and volume-profile refresh."""
 
 from __future__ import annotations
 
@@ -16,6 +16,10 @@ from app.database import async_session
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.services.bar_aggregator import REDIS_CHANNEL_5M_BARS
 from app.services.fyers_history import HistoryUnavailable, fetch_history
+from app.services.upstox_market_data import (
+    UpstoxMarketDataAuthError,
+    open_upstox_client,
+)
 from arq.connections import ArqRedis
 from fyers_apiv3 import fyersModel
 from sqlalchemy import text
@@ -90,10 +94,13 @@ def build_volume_profile(
 
 async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
     redis: ArqRedis = ctx["redis"]
-    try:
-        token = await get_valid_access_token(redis)
-    except AuthUnavailableError as exc:
-        return {"status": "authentication_required", "error": str(exc)}
+    use_upstox = settings.market_data_provider == "upstox"
+    token = None
+    if not use_upstox:
+        try:
+            token = await get_valid_access_token(redis)
+        except AuthUnavailableError as exc:
+            return {"status": "authentication_required", "error": str(exc)}
 
     async with async_session() as session:
         symbols = (
@@ -121,12 +128,20 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
     if not symbols:
         return {"status": "no_symbols", "verified": 0}
 
-    fyers = fyersModel.FyersModel(
-        is_async=True,
-        client_id=settings.fyers_app_id,
-        token=token,
-        log_path=settings.fyers_log_path,
-    )
+    if use_upstox:
+        try:
+            fyers = await open_upstox_client(redis, [item["symbol"] for item in symbols])
+        except UpstoxMarketDataAuthError as exc:
+            return {"status": "authentication_required", "error": str(exc)}
+        history_source, candle_source = "upstox_history", "upstox_reconciled"
+    else:
+        fyers = fyersModel.FyersModel(
+            is_async=True,
+            client_id=settings.fyers_app_id,
+            token=token,
+            log_path=settings.fyers_log_path,
+        )
+        history_source, candle_source = "fyers_history", "fyers_reconciled"
     now_ist = dt.datetime.now(IST_TZ)
     verified = 0
     failures = 0
@@ -146,7 +161,7 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
             try:
                 response = await fetch_history(redis, fyers, payload)
                 if response.get("s") != "ok" or not isinstance(response.get("candles"), list):
-                    raise RuntimeError(str(response.get("message") or "Fyers history failed"))
+                    raise RuntimeError(str(response.get("message") or "5-minute history failed"))
                 candles = response["candles"]
                 cumulative_by_date: dict[dt.date, int] = defaultdict(int)
                 rows: list[dict[str, Any]] = []
@@ -172,6 +187,8 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
                             "volume": volume,
                             "cumulative": cumulative_by_date[timestamp.date()],
                             "raw": json.dumps(candle),
+                            "history_source": history_source,
+                            "candle_source": candle_source,
                         }
                     )
                 async with async_session() as session:
@@ -201,7 +218,7 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
                                 ) VALUES (
                                     :symbol, :bar_time, :open, :high, :low, :close,
                                     :volume, :cumulative, 'verified', now(),
-                                    jsonb_build_object('source', 'fyers_history')
+                                    jsonb_build_object('source', CAST(:history_source AS text))
                                 )
                                 ON CONFLICT (symbol, bar_time) DO UPDATE SET
                                     open = EXCLUDED.open, high = EXCLUDED.high,
@@ -224,7 +241,7 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
                                     raw_payload
                                 ) VALUES (
                                     :instrument_id, '5m', :bar_time, :open, :high,
-                                    :low, :close, :volume, 'fyers_reconciled',
+                                    :low, :close, :volume, :candle_source,
                                     CAST(:raw AS jsonb)
                                 )
                                 ON CONFLICT (instrument_id, timeframe, candle_start)

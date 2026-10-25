@@ -10,6 +10,7 @@ import asyncio
 import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
@@ -20,15 +21,17 @@ PREFIX = "fyers:history:budget"
 ADMIT = """
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local window = tonumber(ARGV[4] or '86400000')
+local block = tonumber(ARGV[5] or '86400000')
 local blocked = tonumber(redis.call('HGET', KEYS[1], 'blocked') or '0')
 if blocked > now then return {3, blocked} end
 if blocked > 0 then
   redis.call('HDEL', KEYS[1], 'blocked', 'cooldown', 'probe', 'probe_until')
 end
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now - 86400000)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now - window)
 if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[2]) then
   local oldest = redis.call('ZRANGE', KEYS[2], 0, 0, 'WITHSCORES')
-  return {4, tonumber(oldest[2]) + 86400000}
+  return {4, tonumber(oldest[2]) + window}
 end
 local cooldown = tonumber(redis.call('HGET', KEYS[1], 'cooldown') or '0')
 if cooldown > now then return {2, cooldown} end
@@ -36,8 +39,8 @@ local probe_until = tonumber(redis.call('HGET', KEYS[1], 'probe_until') or '0')
 if probe_until > now then return {2, probe_until} end
 -- A crashed/timed-out recovery probe must not authorize more probes.
 if probe_until > 0 then
-  redis.call('HSET', KEYS[1], 'blocked', now + 86400000)
-  return {3, now + 86400000}
+  redis.call('HSET', KEYS[1], 'blocked', now + block)
+  return {3, now + block}
 end
 local next_at = tonumber(redis.call('HGET', KEYS[1], 'next') or '0')
 if next_at > now then return {1, next_at} end
@@ -53,12 +56,14 @@ return {0, now}
 RESULT = """
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local block = tonumber(ARGV[4] or '86400000')
+local cooldown = tonumber(ARGV[5] or '65000')
 local probe = redis.call('HGET', KEYS[1], 'probe') == ARGV[1]
 if ARGV[2] == '1' then
   if probe or ARGV[3] == '1' then
-    redis.call('HSET', KEYS[1], 'blocked', now + 86400000)
+    redis.call('HSET', KEYS[1], 'blocked', now + block)
   else
-    redis.call('HSET', KEYS[1], 'cooldown', now + 65000)
+    redis.call('HSET', KEYS[1], 'cooldown', now + cooldown)
   end
 elseif probe then
   redis.call('HDEL', KEYS[1], 'cooldown', 'probe', 'probe_until')
@@ -112,6 +117,33 @@ def rate_restriction(response: dict[str, Any]) -> tuple[bool, bool]:
     return limited, hard
 
 
+@dataclass(frozen=True)
+class HistoryBudget:
+    """One account-wide request budget shared through Redis."""
+
+    prefix: str
+    label: str
+    spacing_ms: int
+    window_cap: int
+    window_ms: int = 86_400_000
+    block_ms: int = 86_400_000
+    cooldown_ms: int = 65_000
+
+    @property
+    def window_label(self) -> str:
+        hours = self.window_ms / 3_600_000
+        return f"{hours:g}-hour" if hours >= 1 else f"{self.window_ms // 60_000}-minute"
+
+
+def fyers_budget() -> HistoryBudget:
+    return HistoryBudget(
+        prefix=PREFIX,
+        label="Fyers history",
+        spacing_ms=int(60000 / settings.fyers_data_requests_per_minute) + 1,
+        window_cap=settings.fyers_data_requests_per_day,
+    )
+
+
 async def fetch_history(
     redis: Any,
     fyers: Any,
@@ -120,8 +152,36 @@ async def fetch_history(
     heartbeat: Callable[[], Awaitable[None]] | None = None,
     on_wait: Callable[[str | None, str | None], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
-    """Pace every attempt; allow one shared recovery probe after a restriction."""
+    """Pace every attempt; allow one shared recovery probe after a restriction.
+
+    Clients that pace their own sub-requests (the Upstox adapter) expose
+    ``paced_history`` and keep the same Fyers-shaped response contract.
+    """
+    if getattr(type(fyers), "paced_history", None) is not None:
+        return await fyers.paced_history(
+            redis, payload, heartbeat=heartbeat, on_wait=on_wait
+        )
+    return await paced_request(
+        redis,
+        fyers_budget(),
+        lambda: fyers.history(data=payload),
+        heartbeat=heartbeat,
+        on_wait=on_wait,
+    )
+
+
+async def paced_request(
+    redis: Any,
+    budget: HistoryBudget,
+    call: Callable[[], Awaitable[dict[str, Any]]],
+    *,
+    heartbeat: Callable[[], Awaitable[None]] | None = None,
+    on_wait: Callable[[str | None, str | None], Awaitable[None]] | None = None,
+    max_wait_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Admit one request through ``budget``; ``call`` returns a Fyers-shaped dict."""
     previous_wait = None
+    waited = 0.0
     while True:
         if heartbeat:
             try:
@@ -130,29 +190,31 @@ async def fetch_history(
                 raise
             except Exception as exc:
                 raise HistoryUnavailable(
-                    "Fyers history paused: progress heartbeat failed."
+                    f"{budget.label} paused: progress heartbeat failed."
                 ) from exc
         request_id = uuid.uuid4().hex
         try:
             result = await redis.eval(
                 ADMIT,
                 2,
-                PREFIX,
-                PREFIX + ":requests",
-                int(60000 / settings.fyers_data_requests_per_minute) + 1,
-                settings.fyers_data_requests_per_day,
+                budget.prefix,
+                budget.prefix + ":requests",
+                budget.spacing_ms,
+                budget.window_cap,
                 request_id,
+                budget.window_ms,
+                budget.block_ms,
             )
             state, until = map(int, result)
         except Exception as exc:
             raise HistoryUnavailable(
-                "Fyers history paused: Redis request budget is unavailable."
+                f"{budget.label} paused: Redis request budget is unavailable."
             ) from exc
         if state in {3, 4}:
             reason = (
-                "Fyers history is restricted for 24 hours."
+                f"{budget.label} is restricted after a failed recovery probe."
                 if state == 3
-                else "Fyers history rolling 24-hour request quota is exhausted."
+                else f"{budget.label} rolling {budget.window_label} request quota is exhausted."
             )
             raise HistoryUnavailable(reason, timestamp(until))
         if state:
@@ -163,18 +225,34 @@ async def fetch_history(
             previous_wait = wait
             # Short waits keep cancellation, lease renewal and status responsive.
             now = dt.datetime.now(dt.timezone.utc).timestamp() * 1000
-            await asyncio.sleep(min(1.0, max(0.01, (until - now) / 1000)))
+            delay = min(1.0, max(0.01, (until - now) / 1000))
+            if max_wait_seconds is not None and waited + delay > max_wait_seconds:
+                raise HistoryUnavailable(
+                    f"{budget.label} deferred: request budget is pacing.",
+                    timestamp(until),
+                )
+            waited += delay
+            await asyncio.sleep(delay)
             continue
         if on_wait and previous_wait:
             await on_wait(None, None)
         async with asyncio.timeout(30):
-            response = await fyers.history(data=payload)
+            response = await call()
         limited, hard = rate_restriction(response)
         try:
-            await redis.eval(RESULT, 1, PREFIX, request_id, int(limited), int(hard))
+            await redis.eval(
+                RESULT,
+                1,
+                budget.prefix,
+                request_id,
+                int(limited),
+                int(hard),
+                budget.block_ms,
+                budget.cooldown_ms,
+            )
         except Exception as exc:
             raise HistoryUnavailable(
-                "Fyers history paused: Redis request budget is unavailable."
+                f"{budget.label} paused: Redis request budget is unavailable."
             ) from exc
         if not limited:
             return response

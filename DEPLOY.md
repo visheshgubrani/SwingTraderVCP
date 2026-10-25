@@ -287,3 +287,41 @@ Client image bake-in (CI):
 ```bash
 docker compose -f docker-compose.dev.yml up -d   # or ./start-dev.sh
 ```
+
+## Upstox market data (paper mode without the daily Fyers login)
+
+Paper trading only needs market data, not the Fyers order path. With
+`MARKET_DATA_PROVIDER=upstox` EOD candles, 5-minute bars and LTP come from the
+read-only Upstox Analytics Token (1-year validity, no daily 2FA, no static IP),
+so proposals, triggers and paper fills run every trading day unattended. Live
+mode still needs the daily Fyers session for orders.
+
+```bash
+# 1) Deploy with the provider unset (no behaviour change), then probe the API.
+#    Run once in market hours and once after 18:00 IST. Exits non-zero on failure.
+"${COMPOSE[@]}" run --rm --no-deps -T api python scripts/upstox_market_data_probe.py --all
+
+# 2) Outside market hours, with no in-flight paper intents:
+#    set MARKET_DATA_PROVIDER=upstox in .env.prod, then recreate the data consumers.
+"${COMPOSE[@]}" up -d --force-recreate api worker tick-worker entry-supervisor proposal-worker
+
+# 3) Optional: backfill longer daily history for P9 (Upstox serves from 2000).
+curl -X POST http://127.0.0.1:8002/api/v1/historical/sync \
+  -H 'Content-Type: application/json' -d '{"backfill_years":8,"repair_history":true}'
+
+# 4) Next session: provider/transport in tick_worker:status, fresh ltp:NSE:NIFTY50-INDEX,
+#    upstox_reconciled 5m bars for armed symbols.
+"${COMPOSE[@]}" exec -T redis redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET tick_worker:status
+
+# Rollback: MARKET_DATA_PROVIDER=fyers and recreate the same services.
+```
+
+## P10 diagnostics (read-only)
+
+```bash
+"${COMPOSE[@]}" exec -T proposal-worker python scripts/p10_disposition_report.py --days 30
+```
+
+Shows effective settings, rollout stage, controls, scans vs proposal batches,
+disposition and gate-code distributions, approved proposals with their D1
+bars/high, trigger outcomes, and auth/market-data events.

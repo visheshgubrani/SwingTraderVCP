@@ -11,6 +11,10 @@ from app.services.fyers_history import (
     HistoryUnavailable,
     fetch_history,
 )
+from app.services.upstox_market_data import (
+    UpstoxMarketDataAuthError,
+    open_upstox_client,
+)
 from fyers_apiv3 import fyersModel
 from sqlalchemy import text
 
@@ -97,7 +101,8 @@ async def _run_data_validation(years: int = 2, redis: Any = None):
     
     # 1. Fetch symbols from DB
     access_token = None
-    if redis is not None:
+    use_upstox = settings.market_data_provider == "upstox"
+    if redis is not None and not use_upstox:
         try:
             access_token = await get_valid_access_token(redis)
         except AuthUnavailableError:
@@ -125,7 +130,16 @@ async def _run_data_validation(years: int = 2, redis: Any = None):
     
     # Initialize Fyers client if token is valid (for listing date probes)
     fyers = None
-    if access_token:
+    if use_upstox and redis is not None:
+        try:
+            fyers = await open_upstox_client(redis)
+            validation_progress.log("Upstox market data enabled. Active listing check enabled.")
+        except UpstoxMarketDataAuthError as exc:
+            validation_progress.log(
+                f"WARNING: Upstox market data unavailable ({exc}). Listing checking "
+                "will assume first available candle as the listing date."
+            )
+    elif access_token:
         validation_progress.log("Fyers access token found. Active listing check enabled.")
         fyers = fyersModel.FyersModel(
             is_async=True,

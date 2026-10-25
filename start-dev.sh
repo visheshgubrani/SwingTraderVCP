@@ -224,12 +224,14 @@ main() {
   ORDER_GATEWAY_ENABLED="$(
     cd "$SERVER_DIR"
     uv run python -c \
-      'from app.config import settings; print(int(settings.execution_mode == "live" and settings.live_order_placement_enabled))'
+      'from app.config import settings; print(int(settings.execution_mode == "paper" or settings.live_order_placement_enabled))'
   )"
   if [[ "$ORDER_GATEWAY_ENABLED" == "1" ]]; then
     start_service "order gateway" "$ORDER_GATEWAY_PID_FILE" "$ORDER_GATEWAY_LOG" \
       bash -c 'cd "$1" && exec uv run python -m app.workers.order_gateway' _ "$SERVER_DIR"
   else
+    # Paper mode always needs the gateway: every paper order requires its
+    # heartbeat and it drains paper fills (prod compose always runs it).
     echo "Order gateway not started (live execution is not double-armed)."
   fi
   start_service "UI" "$UI_PID_FILE" "$UI_LOG" \

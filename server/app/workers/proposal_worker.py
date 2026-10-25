@@ -678,7 +678,10 @@ async def process_proposal_candidate(
         candles, annotations.contractions, tick_size=tick_size
     )
     verdict = evaluate_structural_gates(facts)
-    candidate_summary = format_candidate_summary(annotations.contractions, facts=facts)
+    # Gemini, survivor resolution and the forming watch all see the folded
+    # candidates (at most 6), never the raw fractal swings.
+    python_candidates = facts.candidates
+    candidate_summary = format_candidate_summary(python_candidates, facts=facts)
     charts = await asyncio.to_thread(
         render_proposal_charts, candles=candles, symbol=candidate.symbol
     )
@@ -865,7 +868,7 @@ async def process_proposal_candidate(
                                     "low_date": wave.low_date,
                                     "depth_pct": str(wave.depth_pct),
                                 }
-                                for wave in annotations.contractions
+                                for wave in python_candidates
                             ],
                             attempt_id=attempt_id,
                             holidays=_holiday_dates(),
@@ -917,7 +920,7 @@ async def process_proposal_candidate(
                             "low_date": wave.low_date,
                             "depth_pct": str(wave.depth_pct),
                         }
-                        for wave in annotations.contractions
+                        for wave in python_candidates
                     ],
                     attempt_id=attempt_id,
                     holidays=_holiday_dates(),
@@ -935,7 +938,7 @@ async def process_proposal_candidate(
             rendered_charts=charts,
             model=settings.vcp_vision_model,
             tick_size=tick_size,
-            python_candidates=annotations.contractions,
+            python_candidates=python_candidates,
             structural_facts=facts,
             structural_verdict=verdict,
             risk_policy_id=str(policy["id"]),
@@ -977,7 +980,7 @@ async def process_proposal_candidate(
                                 "low_date": wave.low_date,
                                 "depth_pct": str(wave.depth_pct),
                             }
-                            for wave in annotations.contractions
+                            for wave in python_candidates
                         ],
                         attempt_id=attempt_id,
                         holidays=_holiday_dates(),

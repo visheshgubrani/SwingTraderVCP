@@ -19,6 +19,10 @@ from app.services.fyers_history import (
     fetch_history,
 )
 from app.services.scan_readiness import load_scan_readiness
+from app.services.upstox_market_data import (
+    UpstoxMarketDataAuthError,
+    open_upstox_client,
+)
 from app.services.screening_config import TechnicalScreeningConfig
 from arq.connections import ArqRedis
 from fyers_apiv3 import fyersModel
@@ -150,12 +154,15 @@ async def sync_status_blocks_enqueue(
 def build_date_chunks(
     start_date: datetime.date,
     end_date: datetime.date,
+    max_days: int = 365,
 ) -> list[tuple[datetime.date, datetime.date]]:
-    """Split an inclusive date range into Fyers-safe chunks of at most 365 days."""
+    """Split an inclusive date range into provider-safe chunks (Fyers: 365 days)."""
     chunks: list[tuple[datetime.date, datetime.date]] = []
     current_start = start_date
     while current_start <= end_date:
-        current_end = min(current_start + datetime.timedelta(days=364), end_date)
+        current_end = min(
+            current_start + datetime.timedelta(days=max_days - 1), end_date
+        )
         chunks.append((current_start, current_end))
         current_start = current_end + datetime.timedelta(days=1)
     return chunks
@@ -166,8 +173,9 @@ def ordered_date_chunks(
     end_date: datetime.date,
     *,
     newest_first: bool = False,
+    max_days: int = 365,
 ) -> list[tuple[datetime.date, datetime.date]]:
-    chunks = build_date_chunks(start_date, end_date)
+    chunks = build_date_chunks(start_date, end_date, max_days)
     return list(reversed(chunks)) if newest_first else chunks
 
 
@@ -346,12 +354,17 @@ async def run_historical_sync(
             await save_sync_status(redis, progress)
             return {"status": "cancelled"}
 
+        use_upstox = settings.market_data_provider == "upstox"
+        provider_label = "Upstox" if use_upstox else "Fyers"
         try:
-            access_token = await get_valid_access_token(redis)
-        except AuthUnavailableError:
+            if use_upstox:
+                fyers = await open_upstox_client(redis)
+            else:
+                access_token = await get_valid_access_token(redis)
+        except (AuthUnavailableError, UpstoxMarketDataAuthError):
             progress.finish(
                 "authentication_required",
-                "Fyers authentication is required before EOD data can be synced.",
+                f"{provider_label} authentication is required before EOD data can be synced.",
             )
             await save_sync_status(redis, progress)
             return {"status": "authentication_required"}
@@ -408,12 +421,15 @@ async def run_historical_sync(
         progress.total_symbols = len(instruments)
         await save_sync_status(redis, progress)
 
-        fyers = fyersModel.FyersModel(
-            is_async=True,
-            client_id=settings.fyers_app_id,
-            token=access_token,
-            log_path=settings.fyers_log_path,
-        )
+        if not use_upstox:
+            fyers = fyersModel.FyersModel(
+                is_async=True,
+                client_id=settings.fyers_app_id,
+                token=access_token,
+                log_path=settings.fyers_log_path,
+            )
+        candle_source = "upstox" if use_upstox else "fyers"
+        chunk_days = getattr(fyers, "daily_chunk_days", 365)
 
         upsert_query = text(
             """
@@ -423,7 +439,7 @@ async def run_historical_sync(
             )
             VALUES (
                 :instrument_id, '1d', :candle_start, :open_price, :high_price,
-                :low_price, :close_price, :volume, 'fyers', CAST(:raw_payload AS jsonb)
+                :low_price, :close_price, :volume, :source, CAST(:raw_payload AS jsonb)
             )
             ON CONFLICT (instrument_id, timeframe, candle_start) DO UPDATE SET
                 open_price = EXCLUDED.open_price,
@@ -432,6 +448,7 @@ async def run_historical_sync(
                 close_price = EXCLUDED.close_price,
                 volume = EXCLUDED.volume,
                 fetched_at = now(),
+                source = EXCLUDED.source,
                 raw_payload = EXCLUDED.raw_payload
             """
         )
@@ -448,7 +465,10 @@ async def run_historical_sync(
             progress.wait_reason = reason
             progress.retry_at = retry_at
             if reason == "rate_limit":
-                progress.log(f"Fyers rate limit: waiting until {retry_at} for one recovery request.")
+                progress.log(
+                    f"{provider_label} rate limit: waiting until {retry_at} "
+                    "for one recovery request."
+                )
             await save_sync_status(redis, progress)
 
         for index, instrument in enumerate(instruments, start=1):
@@ -487,6 +507,7 @@ async def run_historical_sync(
                 ]
                 for chunk_start, chunk_end in ordered_date_chunks(
                     range_start, range_end, newest_first=is_prefix,
+                    max_days=chunk_days,
                 )
             ]
             range_summary = ", ".join(
@@ -511,7 +532,7 @@ async def run_historical_sync(
                     if response.get("s") != "ok":
                         if is_prefix and history_response_has_no_data(response):
                             progress.log(
-                                f"{instrument.symbol}: no Fyers candles before "
+                                f"{instrument.symbol}: no {provider_label} candles before "
                                 f"{instrument.earliest_candle_date}; treating it "
                                 "as listing-limited history."
                             )
@@ -521,7 +542,7 @@ async def run_historical_sync(
                                 instrument.symbol,
                                 response.get(
                                     "message",
-                                    "Fyers history API returned an error.",
+                                    f"{provider_label} history API returned an error.",
                                 ),
                             )
                     else:
@@ -539,6 +560,7 @@ async def run_historical_sync(
                                     "low_price": float(candle[3]),
                                     "close_price": float(candle[4]),
                                     "volume": int(candle[5]),
+                                    "source": candle_source,
                                     "raw_payload": json.dumps({"c": candle}),
                                 }
                                 for candle in candles

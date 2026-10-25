@@ -1,5 +1,5 @@
 """Structural gates, schema-consistency, and provider-taxonomy tests for the
-P10 audit reliability v2 machinery (p10_structural_gates_v1 / schema v7)."""
+P10 audit reliability machinery (p10_structural_gates_v2 / schema v8)."""
 
 import datetime as dt
 import unittest
@@ -157,9 +157,17 @@ class StructuralGateTest(unittest.TestCase):
         ]
         # 5.31 -> 4.55: ratio 0.86 <= 0.90 so tightening passes; build a
         # genuinely flat case instead: 5.31 -> 5.05 (ratio 0.95, step 0.26pp).
+        # Lows must rise (107 -> 107.2) so the flat-shelf rule, not the
+        # undercut rule, is what rejects it: 5.31% -> 5.13% (ratio 0.97).
+        candles = synth_candles(
+            overrides={
+                150: (114.0, 115.0, 107.0, 108.0, 80_000),
+                165: (110.0, 111.0, 107.2, 108.5, 70_000),
+            }
+        )
         flat_waves = [
             wave(1, 145, 113.0, 150, 107.0),
-            wave(2, 160, 111.0, 165, 105.4),  # 5.05%
+            wave(2, 160, 113.0, 165, 107.2),
         ]
         verdict = evaluate_structural_gates(self._facts(candles, flat_waves))
         self.assertEqual(verdict.disposition, "invalid")
@@ -445,3 +453,163 @@ class ProviderTaxonomyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Gates v2: real detector on noisy synthetic bases (folding, staircase,
+# retention-based climax). These run derive_chart_geometry end to end.
+# ---------------------------------------------------------------------------
+
+from app.domain.p10_geometry import (  # noqa: E402
+    MAX_GEMINI_CANDIDATES,
+    derive_chart_geometry,
+    fold_contraction_candidates,
+    significant_staircase,
+)
+
+PATH_BASE = dt.date(2025, 1, 1)
+
+
+def path_to_candles(points, *, wick=0.4, vol=100_000, vols=None):
+    """Piecewise-linear closes: points = [(start, 0), (target, sessions), ...]."""
+    closes = [float(points[0][0])]
+    for target, sessions in points[1:]:
+        start = closes[-1]
+        closes.extend(start + (target - start) * k / sessions for k in range(1, sessions + 1))
+    candles, prev = [], closes[0]
+    for i, close in enumerate(closes):
+        candles.append(
+            CandleData(
+                open=prev,
+                high=max(prev, close) + wick,
+                low=min(prev, close) - wick,
+                close=close,
+                volume=(vols or {}).get(i, vol),
+                date=(PATH_BASE + dt.timedelta(days=i)).isoformat(),
+            )
+        )
+        prev = close
+    return candles
+
+
+def real_detector(candles):
+    geometry = derive_chart_geometry(candles, tick_size=Decimal("0.05"))
+    facts = compute_structural_facts(candles, geometry.contractions, tick_size=Decimal("0.05"))
+    return geometry, facts, evaluate_structural_gates(facts)
+
+
+NOISY_TWO_CONTRACTION = [
+    (60, 0), (100, 170), (90, 6), (94, 3), (85, 5), (92, 5), (90.5, 2), (97, 5), (92.5, 5), (95.8, 4)
+]
+# Pivot (final contraction high) sits at index 170 + 8 + 9 + 1 = 188.
+PIVOT_INDEX = 188
+
+
+class RealDetectorGateTest(unittest.TestCase):
+    def test_noisy_two_contraction_vcp_passes(self):
+        geometry, facts, verdict = real_detector(path_to_candles(NOISY_TWO_CONTRACTION))
+        raw_depths = [w.depth_pct for w in geometry.contractions]
+        # Raw zigzag noise is present: an expanding raw step (2.49 -> 5.44).
+        self.assertTrue(any(b > a for a, b in zip(raw_depths, raw_depths[1:])))
+        self.assertLessEqual(facts.candidate_count, MAX_GEMINI_CANDIDATES)
+        self.assertEqual(verdict.disposition, "ok", verdict.codes)
+        self.assertEqual(verdict.codes, ())
+
+    def test_high_volume_pivot_then_quiet_pullback_is_not_climax(self):
+        points = [(60, 0), (100, 170), (88, 8), (97, 9), (99, 1), (98.2, 1), (96, 3)]
+        n = len(path_to_candles(points))
+        vols = {PIVOT_INDEX: 300_000, **{i: 60_000 for i in range(PIVOT_INDEX + 1, n)}}
+        _, facts, verdict = real_detector(path_to_candles(points, vols=vols))
+        self.assertGreater(facts.pivot_day.vol_ratio, Decimal("1.75"))
+        # The retired as-of drawdown measure would have fired here.
+        self.assertGreaterEqual(facts.pivot_day.fade_atr, Decimal("1.0"))
+        self.assertNotIn("structural_pivot_climax_fade", verdict.codes)
+        self.assertEqual(verdict.disposition, "ok", verdict.codes)
+
+    def test_climax_reversal_through_pivot_low_is_invalid(self):
+        points = [(60, 0), (100, 170), (88, 8), (97, 9), (99, 1), (95, 1), (94.5, 3)]
+        _, facts, verdict = real_detector(path_to_candles(points, vols={PIVOT_INDEX: 300_000}))
+        self.assertTrue(facts.pivot_day.retention_failed)
+        self.assertIn("structural_pivot_climax_fade", verdict.codes)
+
+    def test_retention_ignores_sessions_after_pivot_plus_k(self):
+        points = [(60, 0), (100, 170), (88, 8), (97, 9), (99, 1), (98.2, 1), (96, 3)]
+        base = path_to_candles(points, vols={PIVOT_INDEX: 300_000})
+        changed = list(base)
+        # Crash a session two days after the pivot: drawdown changes, the
+        # one-session retention verdict and the pivot ADV baseline do not.
+        c = changed[PIVOT_INDEX + 2]
+        changed[PIVOT_INDEX + 2] = CandleData(
+            open=c.open, high=c.high, low=80.0, close=81.0, volume=c.volume, date=c.date
+        )
+        geometry, a, va = real_detector(base)
+        # Same frozen geometry; only a session after pivot+K differs.
+        b = compute_structural_facts(changed, geometry.contractions, tick_size=Decimal("0.05"))
+        vb = evaluate_structural_gates(b)
+        self.assertEqual(a.pivot_day.retention_failed, b.pivot_day.retention_failed)
+        self.assertEqual(a.pivot_day.adv20_before_pivot, b.pivot_day.adv20_before_pivot)
+        self.assertNotEqual(a.pivot_day.fade_atr, b.pivot_day.fade_atr)
+        self.assertNotIn("structural_pivot_climax_fade", vb.codes)
+
+    def test_flat_shelf_with_rising_lows_is_invalid(self):
+        points = [(60, 0), (100, 170), (94.5, 4), (99.9, 4), (94.55, 4), (99.85, 4),
+                  (94.6, 4), (99.8, 4), (94.65, 4), (97, 3)]
+        _, facts, verdict = real_detector(path_to_candles(points))
+        self.assertGreaterEqual(facts.candidate_count, 3)
+        self.assertEqual(verdict.disposition, "invalid")
+        self.assertIn("structural_flat_shelf_not_tightening", verdict.codes)
+
+    def test_folding_cannot_hide_an_undercut(self):
+        points = [(60, 0), (100, 170), (85, 6), (95, 5), (91, 3), (93, 3), (84, 4), (88, 3)]
+        _, facts, verdict = real_detector(path_to_candles(points))
+        self.assertEqual(facts.candidate_count, 1)  # folded into one leg
+        self.assertIn("structural_undercut_lower_low", verdict.codes)
+
+    def test_summary_has_statuses_not_drawdown_and_at_most_six_candidates(self):
+        _, facts, _ = real_detector(path_to_candles(NOISY_TWO_CONTRACTION))
+        summary = format_candidate_summary(facts.candidates, facts=facts)
+        self.assertNotIn("faded", summary)
+        self.assertIn("Significant contractions (tightening check: passed)", summary)
+        self.assertIn("next session held", summary)
+        self.assertLessEqual(sum(line.startswith("C") for line in summary.splitlines()), 6)
+
+
+class FoldAndStaircaseTest(unittest.TestCase):
+    ATR = Decimal("2")
+
+    def test_bounce_inside_decline_merges_and_records_members(self):
+        folded, members = fold_contraction_candidates(
+            [wave(1, 10, 100.0, 15, 90.0), wave(2, 18, 94.0, 22, 85.0)], atr14=self.ATR
+        )
+        self.assertEqual(len(folded), 1)
+        self.assertEqual((folded[0].high_price, folded[0].low_price), (Decimal("100.0"), Decimal("85.0")))
+        self.assertEqual(members, ((1, 2),))
+
+    def test_lower_low_within_tolerance_is_not_merged(self):
+        folded, _ = fold_contraction_candidates(
+            [wave(1, 10, 100.0, 15, 90.0), wave(2, 18, 96.0, 22, 89.9)], atr14=self.ATR
+        )
+        self.assertEqual(len(folded), 2)
+
+    def test_non_final_noise_dropped_final_noise_kept(self):
+        folded, _ = fold_contraction_candidates(
+            [wave(1, 10, 100.0, 15, 90.0), wave(2, 18, 95.0, 19, 94.5),
+             wave(3, 25, 97.0, 28, 93.0), wave(4, 30, 96.0, 31, 95.5)],
+            atr14=self.ATR,
+        )
+        self.assertEqual([w.index for w in folded], [1, 2, 3])
+        self.assertEqual(folded[-1].low_price, Decimal("95.5"))
+
+    def test_cap_merges_oldest_and_input_order_is_irrelevant(self):
+        waves = [wave(i, 10 * i, 100.0 - i * 0.1, 10 * i + 4, 95.0 + i * 0.3) for i in range(1, 9)]
+        folded, members = fold_contraction_candidates(list(reversed(waves)), atr14=self.ATR)
+        self.assertEqual(len(folded), MAX_GEMINI_CANDIDATES)
+        self.assertEqual(members[0], (1, 2, 3))
+
+    def test_staircase_skips_superseded_dips_and_checks_expanding_final(self):
+        def wv(i, depth):
+            return VcpContractionWave(i, f"2025-01-{i:02d}", Decimal("100"), f"2025-01-{i:02d}",
+                                      Decimal("100") - Decimal(str(depth)), Decimal(str(depth)))
+
+        self.assertEqual([w.index for w in significant_staircase([wv(1, 15), wv(2, 6), wv(3, 9), wv(4, 4)])], [1, 3, 4])
+        self.assertEqual([w.index for w in significant_staircase([wv(1, 8.0), wv(2, 3), wv(3, 8.05)])], [1, 3])

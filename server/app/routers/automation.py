@@ -737,37 +737,50 @@ async def list_rejected_attempts(
     automation_run_id: UUID | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[ProposalGenerationAttemptResponse]:
-    """Returns candidate attempts that were rejected by the system (Python rules or Gemini) or failed."""
-    where_clauses = ["pa.status <> 'valid' AND pa.status <> 'running'"]
+    """Returns candidate attempts that were rejected by the system (Python rules or Gemini) or failed.
+
+    Only each candidate's LATEST attempt counts: a failed attempt 1 followed
+    by a valid attempt 2 is not a rejection. Newest first.
+    """
+    inner_clauses: list[str] = []
+    outer_clauses = ["latest.status <> 'valid' AND latest.status <> 'running'"]
     params: dict[str, Any] = {"limit": limit}
 
     if status_filter != "all":
-        where_clauses.append("pa.status = :status")
+        outer_clauses.append("latest.status = :status")
         params["status"] = status_filter
 
     if symbol:
-        where_clauses.append("pa.symbol = :symbol")
+        inner_clauses.append("pa.symbol = :symbol")
         params["symbol"] = symbol.upper()
 
     if automation_run_id:
-        where_clauses.append("pa.automation_run_id = :automation_run_id")
+        inner_clauses.append("pa.automation_run_id = :automation_run_id")
         params["automation_run_id"] = automation_run_id
 
-    where_sql = f"WHERE {' AND '.join(where_clauses)}"
+    inner_where = f"WHERE {' AND '.join(inner_clauses)}" if inner_clauses else ""
+    outer_where = f"WHERE {' AND '.join(outer_clauses)}"
     stmt = text(f"""
-        SELECT DISTINCT ON (pa.screening_result_id)
-               pa.id, pa.automation_run_id, pa.screening_result_id, pa.instrument_id,
-               pa.symbol, pa.attempt_number, pa.status, pa.source_hash, pa.renderer_version,
-               pa.prompt_version, pa.schema_version, pa.geometry_version, pa.model,
-               pa.risk_policy_version, pa.context_image_hash, pa.detail_image_hash,
-               pa.provider_request_id, pa.provider_usage, pa.provider_cost,
-               pa.structured_output, pa.error_type, pa.error_message, pa.error_details,
-               pa.started_at, pa.completed_at, sr.as_of_date
-        FROM proposal_attempts pa
-        LEFT JOIN automation_runs ar ON ar.id = pa.automation_run_id
+        WITH latest AS (
+            SELECT DISTINCT ON (pa.automation_run_id, pa.screening_result_id)
+                   pa.id, pa.automation_run_id, pa.screening_result_id, pa.instrument_id,
+                   pa.symbol, pa.attempt_number, pa.status, pa.source_hash, pa.renderer_version,
+                   pa.prompt_version, pa.schema_version, pa.geometry_version, pa.model,
+                   pa.risk_policy_version, pa.context_image_hash, pa.detail_image_hash,
+                   pa.provider_request_id, pa.provider_usage, pa.provider_cost,
+                   pa.structured_output, pa.error_type, pa.error_message, pa.error_details,
+                   pa.started_at, pa.completed_at
+            FROM proposal_attempts pa
+            {inner_where}
+            ORDER BY pa.automation_run_id, pa.screening_result_id,
+                     pa.attempt_number DESC, pa.started_at DESC
+        )
+        SELECT latest.*, sr.as_of_date
+        FROM latest
+        LEFT JOIN automation_runs ar ON ar.id = latest.automation_run_id
         LEFT JOIN scan_runs sr ON sr.id = ar.scan_run_id
-        {where_sql}
-        ORDER BY pa.started_at ASC, pa.attempt_number ASC
+        {outer_where}
+        ORDER BY latest.started_at DESC
         LIMIT :limit;
     """)
     rows = (await db.execute(stmt, params)).mappings().all()

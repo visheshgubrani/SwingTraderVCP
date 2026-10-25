@@ -12,7 +12,9 @@ Flow:
     5. Listen for subscription changes via Redis channel `tick_subs`
     6. On auth failure: emit system_event, pause, retry with fresh token
 
-Single Fyers market-data WS per AGENTS.md §10.1.
+Single market-data ingestion owner per AGENTS.md §10.1. With
+MARKET_DATA_PROVIDER=upstox the same worker polls Upstox v3 LTP REST
+instead (no Fyers socket or token) and publishes the identical tick shape.
 """
 
 import asyncio
@@ -20,11 +22,13 @@ import datetime
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
 import time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import redis.asyncio as aioredis
 from sqlalchemy import text
@@ -144,6 +148,65 @@ def _on_connect_factory(state: TickWorkerState, connected_event: threading.Event
     return on_connect
 
 
+# Word-bounded: a bare "-8" substring also matched "utf-8" and invalidated
+# the shared Fyers session for every component on an unrelated socket error.
+_FYERS_WS_AUTH_ERROR = re.compile(
+    r"auth|token|unauthori[sz]ed|forbidden|(?<![\w.])-(?:8|15|99)(?!\d)",
+    re.IGNORECASE,
+)
+
+
+def is_fyers_ws_auth_error(error: Any) -> bool:
+    return bool(_FYERS_WS_AUTH_ERROR.search(str(error)))
+
+
+def build_upstox_tick(
+    symbol: str, quote: dict[str, Any], received_at: datetime.datetime
+) -> dict[str, Any] | None:
+    """Map an Upstox v3 LTP quote onto the Fyers tick shape consumers read."""
+    try:
+        ltp = float(quote.get("last_price"))
+    except (TypeError, ValueError):
+        return None
+    if ltp <= 0:
+        return None
+    prev_close = quote.get("cp")
+    change = change_pct = None
+    try:
+        if prev_close is not None and float(prev_close) > 0:
+            change = round(ltp - float(prev_close), 4)
+            change_pct = round(change / float(prev_close) * 100, 4)
+    except (TypeError, ValueError):
+        prev_close = None
+    stamp = received_at.astimezone(datetime.timezone.utc).isoformat()
+    return {
+        "symbol": symbol,
+        "ltp": ltp,
+        "volume": quote.get("volume"),
+        "bid": None,
+        "ask": None,
+        "open": None,
+        "high": None,
+        "low": None,
+        "prev_close": prev_close,
+        "change": change,
+        "change_pct": change_pct,
+        "timestamp": stamp,
+        "received_at": stamp,
+    }
+
+
+def in_upstox_poll_window(now: datetime.datetime | None = None) -> bool:
+    """NSE weekday, not a configured holiday, inside the configured IST window."""
+    ist = ZoneInfo("Asia/Kolkata")
+    current = (now or datetime.datetime.now(ist)).astimezone(ist)
+    if current.weekday() >= 5 or current.date().isoformat() in set(settings.nse_trading_holidays):
+        return False
+    start = datetime.time.fromisoformat(settings.upstox_poll_start_ist)
+    end = datetime.time.fromisoformat(settings.upstox_poll_end_ist)
+    return start <= current.time().replace(tzinfo=None) <= end
+
+
 def _on_error_factory(
     state: TickWorkerState,
     session_reconnect_event: threading.Event,
@@ -153,8 +216,7 @@ def _on_error_factory(
     def on_error(error):
         logger.error("Fyers WS error: %s", error)
         state.status = "degraded"
-        msg = str(error).lower()
-        if any(marker in msg for marker in ("auth", "token", "unauthorized", "forbidden", "-99", "-8", "-15")):
+        if is_fyers_ws_auth_error(error):
             logger.warning("Fyers WS authentication failed or expired: %s", error)
             state.status = "auth_required"
 
@@ -246,6 +308,8 @@ async def _set_worker_status(
     payload = {
         "status": status,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "provider": settings.market_data_provider,
+        "transport": "rest_poll" if settings.market_data_provider == "upstox" else "ws",
     }
     if worker_id is not None:
         payload["worker_id"] = worker_id
@@ -424,6 +488,130 @@ def _safe_close_fyers_socket(ws: Any) -> None:
         logger.debug("Fyers socket close noise: %s", e)
 
 
+async def _run_upstox_poll_loop(redis: aioredis.Redis, state: TickWorkerState) -> None:
+    """Upstox REST LTP polling: same tick dict, LTP cache, pub/sub and 5m bars.
+
+    Never imports the Fyers socket or reads a Fyers token, so paper mode on
+    Upstox data runs without the daily Fyers 2FA session.
+    """
+    from app.services.fyers_history import HistoryUnavailable
+    from app.services.upstox_market_data import (
+        UpstoxMarketDataAuthError,
+        open_upstox_client,
+    )
+
+    publish_queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
+    stop_event = asyncio.Event()
+    current_symbols: set[str] = set(await _mandatory_tick_symbols() or set())
+    current_symbols.add(BENCHMARK_SYMBOL)
+    state.symbols = current_symbols
+    publish_task = asyncio.create_task(_publish_loop(publish_queue, redis, stop_event))
+    # Polling reads `current_symbols` each cycle, so subscribe/unsubscribe
+    # only need the listener's in-place set mutation.
+    sub_task = asyncio.create_task(
+        _subscription_listener(
+            redis,
+            subscribe_cb=lambda _symbols: None,
+            unsubscribe_cb=lambda _symbols: None,
+            current_symbols=current_symbols,
+            stop_event=stop_event,
+        )
+    )
+    client = None
+    retry_after = 0.0
+    last_refresh = time.monotonic()
+    last_error: str | None = None
+    unmapped_logged: set[str] = set()
+    try:
+        while not _shutdown.is_set():
+            cycle_start = time.monotonic()
+            if cycle_start < retry_after:
+                await asyncio.sleep(1)
+                continue
+            if client is None:
+                try:
+                    client = await open_upstox_client(redis)
+                except UpstoxMarketDataAuthError as exc:
+                    if state.status != "auth_required":
+                        state.status = "auth_required"
+                        await _emit_system_event(
+                            redis, "critical", "tick_worker_upstox_auth_unavailable",
+                            {"reason": str(exc)},
+                        )
+                    retry_after = cycle_start + 300
+                    continue
+                state.status = "ready"
+                await _emit_system_event(redis, "info", "tick_worker_started", {
+                    "symbol_count": len(current_symbols),
+                    "worker_id": state.worker_id,
+                    "provider": "upstox",
+                    "transport": "rest_poll",
+                })
+            if cycle_start - last_refresh >= 60:
+                mandatory = await _mandatory_tick_symbols()
+                if mandatory:
+                    current_symbols.update(mandatory)
+                last_refresh = cycle_start
+            if not in_upstox_poll_window():
+                state.status = "ready"
+                await asyncio.sleep(5)
+                continue
+            unmapped = current_symbols - set(client.key_map) - unmapped_logged
+            if unmapped:
+                logger.warning("No Upstox instrument key for %s; not polled.", sorted(unmapped))
+                unmapped_logged |= unmapped
+            try:
+                quotes = await client.fetch_ltp(
+                    redis,
+                    list(current_symbols),
+                    max_wait_seconds=settings.upstox_ltp_poll_seconds,
+                )
+                received_at = datetime.datetime.now(datetime.timezone.utc)
+                for symbol, quote in quotes.items():
+                    tick = build_upstox_tick(symbol, quote, received_at)
+                    if tick is None:
+                        continue
+                    try:
+                        publish_queue.put_nowait(tick)
+                    except asyncio.QueueFull:
+                        logger.critical("Tick queue is full; event was dropped.")
+                        state.status = "degraded"
+                if state.status != "degraded":
+                    state.status = "ready"
+                last_error = None
+            except UpstoxMarketDataAuthError as exc:
+                state.status = "auth_required"
+                await _emit_system_event(
+                    redis, "critical", "tick_worker_upstox_auth_rejected", {"reason": str(exc)}
+                )
+                await client.close()
+                client = None
+                retry_after = time.monotonic() + 300
+                continue
+            except HistoryUnavailable as exc:
+                state.status = "degraded"
+                if str(exc) != last_error:
+                    logger.warning("Upstox LTP poll deferred: %s", exc)
+                    last_error = str(exc)
+            except Exception as exc:
+                state.status = "degraded"
+                if str(exc) != last_error:
+                    logger.exception("Upstox LTP poll failed")
+                    last_error = str(exc)
+            elapsed = time.monotonic() - cycle_start
+            await asyncio.sleep(max(0.1, settings.upstox_ltp_poll_seconds - elapsed))
+    finally:
+        stop_event.set()
+        for task in (publish_task, sub_task):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if client is not None:
+            await client.close()
+
+
 async def run_tick_worker():
     """Main async entry point for the tick ingestion worker."""
 
@@ -453,7 +641,9 @@ async def run_tick_worker():
     failure: Exception | None = None
 
     try:
-        while not _shutdown.is_set():
+        if settings.market_data_provider == "upstox":
+            await _run_upstox_poll_loop(redis, state)
+        while settings.market_data_provider == "fyers" and not _shutdown.is_set():
             # 1. Obtain valid access token (or wait if auth expired/not yet logged in)
             try:
                 access_token = await get_valid_access_token(redis)

@@ -184,13 +184,13 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(locked["geometry"]["planned_entry"], str(locked["geometry"]["calculation_basis"]["entry_chase"]["planned_entry"]))
         self.assertEqual(len(locked["proposal_hash"]), 64)
         self.assertEqual(locked["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v7")
+        self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v8")
         self.assertEqual(locked["geometry_version"], GEOMETRY_VERSION)
         self.assertEqual(
             locked["entry_trigger_policy_version"],
             "balanced_breakout_v3",
         )
-        self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v6")
+        self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v7")
         self.assertEqual(len(locked["geometry"]["target_slots"]), 3)
 
     def test_proposal_generated_after_d1_deadline_starts_expired(self):
@@ -516,3 +516,26 @@ class TestParseProposalOpenRouterResponse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PromptV8NeutralityTest(unittest.TestCase):
+    def test_prompt_drops_forming_bias_and_keeps_strict_schema(self):
+        import json
+
+        from app.schemas.proposals import GeminiVcpProposalOutput
+        from app.services.openrouter_schema import gemini_compatible_json_schema
+        from app.services.proposal_generator import GEMINI_PROPOSAL_SYSTEM_PROMPT as prompt
+
+        strict = json.dumps(gemini_compatible_json_schema(GeminiVcpProposalOutput.model_json_schema()))
+        self.assertIn('"maxItems": 6', strict)
+
+        for phrase in (
+            "only 1-2 pullbacks",
+            "valid is the exception",
+            "Do not rubber-stamp",
+            "below 50 means",
+            "mid-base below its pivot",
+        ):
+            self.assertNotIn(phrase, prompt)
+        self.assertIn("Two genuine contractions", prompt)
+        self.assertIn("no class is the default", prompt)

@@ -60,9 +60,9 @@ from app.services.proposal_renderer import RenderedProposalCharts
 
 logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
-PROMPT_VERSION = "p10_vcp_proposal_v7"
-SCHEMA_VERSION = "gemini_vcp_proposal_output_v7"
-GEOMETRY_VERSION = "p10_python_owned_levels_v6"
+PROMPT_VERSION = "p10_vcp_proposal_v8"
+SCHEMA_VERSION = "gemini_vcp_proposal_output_v8"
+GEOMETRY_VERSION = "p10_python_owned_levels_v7"
 ENTRY_TRIGGER_POLICY_VERSION = BALANCED_BREAKOUT_POLICY_V3
 PROPOSAL_INVALID_PROVIDER_JSON = "proposal_invalid_provider_json"
 PROPOSAL_STRUCTURAL_FORMING = "proposal_structural_forming"
@@ -129,31 +129,33 @@ You audit ONE standardized 126-session stock chart (log price, volume pane, EMA2
 
 The numbered candidates are algorithmic hypotheses, NOT proven contractions. Your job is the qualitative audit an algorithm cannot do: judge whether the visual pattern forms a completed, tradeable VCP and which hypotheses are real contractions.
 
-1. Classification — disqualifier first. Check hard disqualifiers before anything else; ANY one of them means not_vcp (and primary_reason names it):
+1. Classification. Classify on the evidence; no class is the default.
+   Hard disqualifiers — ANY one means not_vcp (primary_reason names it):
    - latest pullback low undercuts the prior pullback floor (lower lows), or price closed through the final pullback low / the base is breaking down with closes sagging near the daily low;
-   - the final pullback printed expanding volume (distribution; see the final-pullback facts);
-   - the pivot day printed a volume climax that failed to hold (climax + fade facts);
+   - the final pullback printed expanding volume (distribution);
+   - the pivot day printed a volume climax that reversed;
    - no Stage 2 uptrend context (the move is a downtrend bounce or the stock is below its key averages);
    - price action is wide, choppy, or swinging in widening ranges.
-   Choose forming (forming_state=developing) when the structure is intact but immature: base younger than roughly 3 weeks (use the stated base-age session count; fewer than ~15 completed sessions is developing), only 1-2 pullbacks so far, price still mid-base below its pivot, or the right edge is still searching for a floor. Choose forming_state=breaking_down when a developing base is now undercutting or failing.
-   Choose valid ONLY when ALL of these hold: at least two visually genuine, discrete contractions; a multi-week base (use the stated session count); lows rising or equal (no undercut); each subsequent dip materially shallower than the previous one; volume dried up through the final pullback (no expanding pullback, no failed climax at the pivot); price coiling near the right edge at the final pivot.
-   valid is the exception, not the default. When borderline or ambiguous, choose forming.
+   Charts reach you only after Python's undercut, tightening, distribution and climax checks; their statuses are in the facts. Do not assert a disqualifier from pixels that a Python fact says is absent. Do choose not_vcp for a visible disqualifier the facts do not capture.
+   Choose forming (forming_state=developing) when the structure is intact but not yet complete: base younger than about 15 completed sessions (use the stated base age), only ONE genuine contraction so far, or the last close is still in the lower part of the final contraction / searching for a floor. Choose forming_state=breaking_down when a developing base is now undercutting or failing.
+   Two genuine contractions are enough. Choose valid when: at least two genuine, discrete contractions; a base of at least about 15 completed sessions; lows rising or equal; each significant contraction shallower than the one before; a quiet final pullback; and price in the upper part of the final contraction, coiling toward its pivot. Being below the pivot is expected before a breakout and is never by itself a reason for forming.
 
-2. Pattern shape (pattern_type and primary_reason). A high-tight shelf or flat base (successive pullbacks of nearly identical depth, price oscillating between a flat ceiling and floor) is NOT a valid VCP here, regardless of how tradeable it may be in momentum terms. Name it pattern_type=high_tight_shelf or flat_base with primary_reason=flat_or_high_tight_shelf or not_progressively_tightening, and classify not_vcp or forming according to the rules above. A mature, textbook contraction sequence is pattern_type=vcp with primary_reason=mature_vcp and classification=valid.
+2. Pattern shape (pattern_type and primary_reason). A high-tight shelf or flat base (successive pullbacks of nearly identical depth, price oscillating between a flat ceiling and floor) is NOT a valid VCP here. Name it pattern_type=high_tight_shelf or flat_base with primary_reason=flat_or_high_tight_shelf or not_progressively_tightening, and classify not_vcp or forming according to the rules above. A completed contraction sequence is pattern_type=vcp with primary_reason=mature_vcp and classification=valid.
 
-3. Candidate audit. For every numbered hypothesis return exactly one assessment row:
-   - confirm: a genuine discrete contraction pullback (separated from neighbours by roughly 3-5+ sessions and a visually meaningful depth);
-   - merge: two hypotheses describe the same contraction; merge_with_index names the sibling index;
-   - reject: the dip is noise — a micro-wiggle inside one larger pullback, a single-day flush, or not part of the base structure.
-   Do not rubber-stamp the list; shortlists contain noise by design.
+3. Candidate audit. Python already folded raw zigzag swings into the numbered candidates. For every numbered candidate return exactly one assessment row, judging each on its own:
+   - confirm: a genuine discrete contraction pullback;
+   - merge: two candidates describe the same contraction; merge_with_index names the sibling index;
+   - reject: the dip is noise inside a larger move, a single-day flush, or not part of the base.
 
-4. extra_windows: only add a real contraction you can see on the chart that the detector missed (date ranges only, no prices).
+4. extra_windows: only add a real contraction you can see on the chart that the candidates missed (date ranges only, no prices).
 
 5. Volume: read the volume pane AND the deterministic facts together. volume_dry_up=clearly only when pullback volume is visibly quiet against recent averages; somewhat when partially dried; not_really when the last pullback prints heavy volume.
 
 6. Consistency (mandatory): your answers must agree with each other. classification=valid is impossible when pattern_type is not vcp, primary_reason is not mature_vcp, progressive_tightening=no, volume_dry_up=not_really, stage2_context=no, or climax_or_gap_violation=yes. If the chart supports valid, every field must say so; otherwise classify forming/not_vcp instead of contradicting yourself.
 
-7. Confidence calibration: report confidence 0-100 for how clearly the chart supports your classification. 85+ only for unambiguous textbook patterns; 50-70 for borderline calls; below 50 means you should be choosing forming or not_vcp. Confidence is a display field only.
+7. Confidence: report 0-100 for how clearly the chart supports the class you chose. It is a display field and never selects the class.
+
+Length: evidence_summary at most 500 characters; each candidate note at most 160 characters; at most 6 red_flags.
 
 Evidence discipline: your evidence_summary and red_flags must be specific to this chart's right edge, contractions, and volume facts. Do not reuse stock phrases.
 
@@ -198,7 +200,7 @@ _STRUCTURAL_CODE_PHRASES = {
         "the final pullback printed expanding volume (distribution)"
     ),
     "structural_pivot_climax_fade": (
-        "the pivot day printed a volume climax that failed to hold"
+        "a pivot-day volume climax reversed (upper-wick rejection or the next close broke the pivot-day low)"
     ),
     "structural_base_immature": "the base is immature (younger than the maturity floor)",
     "structural_single_contraction": "only a single pullback has formed so far",
@@ -218,8 +220,8 @@ def structural_rejection_message(
                 f"base has only {facts.base_age_sessions} completed sessions "
                 "(<15 maturity floor) — still developing"
             )
-        if facts.raw_count < 2:
-            parts.append("only one raw pullback so far — still developing")
+        if facts.candidate_count < 2:
+            parts.append("only one contraction so far — still developing")
     if verdict.disposition == "forming":
         head = "Deterministic structure is still developing (forming): "
     else:
@@ -428,18 +430,29 @@ def generate_trade_proposal_from_analysis(
             f"Deterministic chart geometry could not be derived: {exc}",
         )
 
-    candidates = tuple(python_candidates) if python_candidates is not None else chart_geometry.contractions
+    # The worker passes facts computed from the RAW swings (undercut/base age
+    # stay raw) and the folded candidates Gemini audited. Direct callers that
+    # pass only candidates get facts over those candidates.
+    facts = (
+        structural_facts
+        if structural_facts is not None
+        else compute_structural_facts(
+            candles,
+            python_candidates
+            if python_candidates is not None
+            else chart_geometry.contractions,
+            tick_size=tick_size,
+        )
+    )
+    candidates = (
+        tuple(python_candidates) if python_candidates is not None else facts.candidates
+    )
     if not candidates:
         return _rejected(
             "proposal_no_python_candidates",
             "Python swing detection found no contraction candidates in the 126-session window.",
         )
 
-    facts = (
-        structural_facts
-        if structural_facts is not None
-        else compute_structural_facts(candles, candidates, tick_size=tick_size)
-    )
     verdict = (
         structural_verdict
         if structural_verdict is not None

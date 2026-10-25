@@ -456,6 +456,26 @@ async def ensure_session_ready(
         )
 
 
+async def ensure_upstox_market_data_ready(redis) -> None:
+    """Fail closed for new paper entries when the Upstox data token is unusable.
+
+    The message keeps the word "authentication" so the entry supervisor
+    classifies it as ``rejected_preflight`` exactly like a missing Fyers session.
+    """
+    from app.config import settings
+    from app.services.auth_service import AuthUnavailableError
+    from app.services.upstox_market_data import upstox_auth_failed
+
+    if not settings.upstox_analytics_token.strip():
+        raise AuthUnavailableError(
+            "Upstox market data authentication unavailable: UPSTOX_ANALYTICS_TOKEN is not set."
+        )
+    if await upstox_auth_failed(redis):
+        raise AuthUnavailableError(
+            "Upstox market data authentication unavailable: token was rejected recently."
+        )
+
+
 def _as_utc(moment: dt.datetime | None) -> dt.datetime:
     if moment is None:
         return dt.datetime.now(dt.timezone.utc)

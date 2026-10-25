@@ -26,7 +26,8 @@ from app.services.screening_config import TechnicalScreeningConfig
 router = APIRouter(prefix="/historical", tags=["historical"])
 
 class SyncRequest(BaseModel):
-    backfill_years: int = Field(default=2, ge=1, le=5)
+    # Fyers Standard serves 5 years of daily history; Upstox serves from 2000.
+    backfill_years: int = Field(default=2, ge=1, le=10)
     repair_history: bool = False
 
 
@@ -48,6 +49,11 @@ async def trigger_sync(
     Enqueue an EOD sync. A repair also fills missing historical prefixes for
     symbols whose latest candle is already current.
     """
+    if settings.market_data_provider == "fyers" and payload.backfill_years > 5:
+        raise HTTPException(
+            status_code=422,
+            detail="Fyers daily history is limited to 5 years; use MARKET_DATA_PROVIDER=upstox for more.",
+        )
     redis = request.app.state.redis
     current_status = await get_stored_sync_status(redis)
     if await sync_status_blocks_enqueue(redis, current_status):
@@ -56,13 +62,22 @@ async def trigger_sync(
             detail="An EOD sync is already queued or running.",
         )
 
-    try:
-        await get_valid_access_token(redis)
-    except AuthUnavailableError:
-        raise HTTPException(
-            status_code=401,
-            detail="Fyers authentication is required before EOD data can be synced.",
-        )
+    if settings.market_data_provider == "upstox":
+        from app.services.upstox_market_data import upstox_auth_failed
+
+        if not settings.upstox_analytics_token.strip() or await upstox_auth_failed(redis):
+            raise HTTPException(
+                status_code=401,
+                detail="A valid UPSTOX_ANALYTICS_TOKEN is required before EOD data can be synced.",
+            )
+    else:
+        try:
+            await get_valid_access_token(redis)
+        except AuthUnavailableError:
+            raise HTTPException(
+                status_code=401,
+                detail="Fyers authentication is required before EOD data can be synced.",
+            )
 
     # Ensure active universe memberships are ready in DB
     try:

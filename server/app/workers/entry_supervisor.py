@@ -58,7 +58,10 @@ from app.domain.p10_triggers import (
     evaluate_intraday_trigger,
 )
 from app.domain.journal_charges import FillLeg, estimate_cnc_charges
-from app.services.auth_readiness import ensure_session_ready
+from app.services.auth_readiness import (
+    ensure_session_ready,
+    ensure_upstox_market_data_ready,
+)
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.redis_pool import create_async_redis
 from app.redis_pubsub import consume_pubsub
@@ -570,11 +573,16 @@ async def _fetch_broker_preflight(redis: aioredis.Redis) -> BrokerPreflightSnaps
     # because Fyers retires tokens at the 06:30 IST cutoff even when the stored
     # expiry still looks valid. Exits and the position monitor are unaffected:
     # they keep their own authoritative AuthUnavailableError handling.
-    await ensure_session_ready(
-        redis,
-        context="Fyers session",
-        verify=settings.execution_mode == "live",
-    )
+    # Paper mode on Upstox market data needs no Fyers session at all; it
+    # instead requires a usable Upstox Analytics Token.
+    if settings.fyers_session_required:
+        await ensure_session_ready(
+            redis,
+            context="Fyers session",
+            verify=settings.execution_mode == "live",
+        )
+    if settings.market_data_provider == "upstox":
+        await ensure_upstox_market_data_ready(redis)
     if settings.execution_mode == "paper":
         async with async_session() as db:
             try:

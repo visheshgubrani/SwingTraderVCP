@@ -104,7 +104,8 @@ Do not substitute these without an explicit instruction from the user.
 | Backend              | FastAPI (Python)                                  | Async throughout for I/O-bound work (WS, HTTP calls to Fyers)                                                                                       |
 | Database             | PostgreSQL                                        | Chosen over SQLite specifically because multiple processes (API, ingestion, monitor, screener) read/write concurrently — do not fall back to SQLite |
 | Broker/queue         | Redis                                             | (1) pub/sub for LTP fan-out, (2) hot LTP cache, (3) backing store for async job queue (`arq`)                                                        |
-| Market data & orders | Fyers API (REST + WebSocket)                      | See §2.1 for which Fyers surfaces we use                                                                                                            |
+| Orders, funds & auth | Fyers API (REST + order WebSocket)                | See §2.1 for which Fyers surfaces we use. Always Fyers, in every mode                                                                               |
+| Market data          | `MARKET_DATA_PROVIDER`: Fyers (REST + market WS, default) or Upstox (read-only Analytics Token: v3 historical REST + v3 LTP REST polling, no Upstox WS) | Upstox needs no daily 2FA, so paper mode on Upstox data needs no Fyers session. One provider at a time, owned by `services/upstox_market_data.py` / the Fyers clients |
 | Fundamentals         | Upstox Company Fundamentals API + official NSE corporate filings | Upstox remains primary; official NSE shareholding and integrated-filing XBRL are read-only risk enrichment for technical survivors only; never prices, sockets, or orders |
 | Fundamental LLM inference | OpenRouter (`openai/gpt-5.6-luna-pro`)      | Blind structured second opinion over normalized snapshots; Python's deterministic fit remains authoritative. No tools or money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
 | VCP vision inference | OpenRouter (`google/gemini-3.7-flash`)            | P10 proposal reader: serial audit of Python swing candidates over a standardized 126-session chart plus a short candidate summary (not a raw OHLCV table). Advisory screener VCP still sends frozen OHLCV. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
@@ -113,7 +114,7 @@ Do not substitute these without an explicit instruction from the user.
 
 | Decision              | Choice                                         | Notes                                                                 |
 | --------------------- | ---------------------------------------------- | --------------------------------------------------------------------- |
-| Live market data      | **LTP / quote WebSocket primary**              | Not TBT 50-depth by default. Depth is optional/on-demand later only   |
+| Live market data      | **Fyers LTP WebSocket**, or **Upstox v3 LTP REST poll** (2 s, NSE hours, ≤500 keys/request) | Not TBT 50-depth by default. Same tick shape and 15 s LTP-freshness contract for both providers |
 | Exit enforcement      | **Software position monitor** + market/limit exits via execution engine | Not exchange CO/BO as the primary path                      |
 | Default product type  | **CNC**                                        | Multi-day swing. Per-trade override may be added later; default CNC   |
 | Order placement API   | **Async** (`/api/v3/orders/async`)             | Correlate via **Order WebSocket** (`id_fyers` → exchange order id)    |
@@ -125,12 +126,13 @@ Do not substitute these without an explicit instruction from the user.
 
 - TBT 50-depth / protobuf incremental merge as the monitor feed
 - Exchange Cover Order / Bracket Order as the primary SL/TP mechanism
-- Frontend connecting to any Fyers endpoint or socket
+- Frontend connecting to any broker or data-provider endpoint or socket
 - Live auto-entry without a versioned, unexpired human-approved proposal
 - LLM-authored stop, quantity, monetary risk, exposure, daily-loss, or
   trailing calculations
 - Writing every raw tick to Postgres (sample/debug only if needed)
-- Upstox market quotes, WebSockets, portfolio APIs, or order APIs
+- Upstox WebSockets (protobuf), portfolio/account APIs, or order APIs; Upstox
+  quotes only through the tick worker's REST adapter
 - Persisting or displaying model `reasoning_details`
 
 ---
@@ -153,7 +155,7 @@ money-path workers into the API process.
                                                                       ▼
 ┌─────────────────┐  Redis LTP/5m bars  ┌─────────────────┐   ┌─────────────────┐
 │ tick ingestion  │────────────────────►│ position monitor│──►│ execution engine│
-│ 1× market WS    │────────────────────►│ SL/TP/trailing  │   │ Fyers async REST│
+│ 1× market feed  │────────────────────►│ SL/TP/trailing  │   │ Fyers async REST│
 └─────────────────┘  entry supervisor   └─────────────────┘   └────────┬────────┘
                                                                        ▼
                                                               ┌─────────────────┐
@@ -177,13 +179,15 @@ money-path workers into the API process.
   **browser** WebSocket connections. It neither runs proposal/entry loops nor
   calls Fyers order APIs. Approval arms the durable entry supervisor; an HTTP
   request must not place an entry inline.
-- **Tick ingestion worker** — the _only_ component holding the Fyers
-  **market data** WebSocket (LTP/quote). Publishes ticks to Redis pub/sub and
+- **Tick ingestion worker** — the _only_ real-time market-data ingestion
+  owner: it holds the Fyers **market data** WebSocket (LTP/quote) or, with
+  `MARKET_DATA_PROVIDER=upstox`, polls Upstox v3 LTP REST instead. Publishes ticks to Redis pub/sub and
   updates the hot LTP cache. It also aggregates/persists completed 5-minute
   bars and publishes bar events; this is data ingestion, not trade logic.
   Dynamic subscribe set = open positions ∪ armed proposal symbols ∪ active
   watchlist ∪ open chart sessions ∪ **`NSE:NIFTY50-INDEX` benchmark**. It
-  periodically reconciles intraday bars with Fyers data. No entry/risk logic.
+  periodically reconciles intraday bars with the configured provider's
+  5-minute history. No entry/risk logic.
 - **Order gateway** — the _only_ component holding the Fyers **order**
   WebSocket in live mode. In paper mode the same process never opens a Fyers
   order socket; it consumes paper order/trade events and runs the same
@@ -217,7 +221,8 @@ money-path workers into the API process.
   order.**
 - **Proposal / VCP vision worker** — a dedicated `arq` process with
   concurrency `1`, separate from core cron/reconciliation work. For the
-  scanner's existing selected top 20 it freezes EOD OHLCV, runs Python
+  scanner's existing selected top 20 (`PROPOSAL_BATCH_LIMIT`, default and
+  hard cap 20) it freezes EOD OHLCV, runs Python
   swing detection on the same 126-session window the chart will show,
   renders a clean 126-session chart (plus a 252-session context chart for
   humans only), computes StructuralFacts and structural gate dispositions
@@ -279,7 +284,7 @@ without updating this file.
 | ---------------------------- | --------------------------------------------------------------- |
 | `routers/*`                  | Thin HTTP; no Fyers orders; no screening loop                   |
 | Browser WS handler           | Fan-out of Redis LTP / position events to sessions              |
-| Tick ingestion worker        | Fyers market WS → Redis/LTP cache; persisted completed 5m bars  |
+| Tick ingestion worker        | Fyers market WS or Upstox LTP poll → Redis/LTP cache; persisted completed 5m bars |
 | Order gateway worker         | Live: Fyers order WS → events/fills. Paper: paper-event drain into the same processors |
 | Paper broker                 | `paper_broker_*` cash/books; never Fyers `/funds` or order APIs                         |
 | P10 rollout                  | `p10_rollout_state` / `p10_rollout_events`; owner-gated stage lock                      |
@@ -351,14 +356,24 @@ story; hard structural invalidation skips the provider call entirely.
   context chart is for the human review UI and is not sent to Gemini. Fix
   colors, fonts, DPI, candle/volume layout, MAs, axes, margins, and encoding.
 - Python swing-detects first on the **same 126-session window** the chart
-  shows (fractal k=2). Each candidate includes exact high/low dates, `%`
+  shows (fractal k=2). Raw fractal swings are then folded deterministically
+  into the candidates (`fold_contraction_candidates`): a swing whose low is
+  below the running leg low by more than `max(one tick, 0.10×ATR14)`
+  continues that decline and merges into it (max high, min low — the same
+  semantics as a Gemini merge); a non-final swing shallower than the 1.25%
+  noise floor is dropped; the final raw swing is always kept; beyond 6 the
+  oldest merge. At most 6 candidates are sent, so the 6-row schema is always
+  satisfiable. `python_count` is the folded count; the raw fractal count is
+  audit-only (`raw_count`). Each candidate includes exact high/low dates, `%`
   depth, and volume vs ADV20/ADV50. Gemini receives that short text summary
   with the 126-session image and may confirm, merge, reject, or add extra
   date-window pointers. It may not rewrite the frozen OHLCV or emit prices.
   The summary additionally carries StructuralFacts computed by Python from
   the same freeze: base age in completed sessions, low progression and any
-  undercut, right-edge close position vs the final pivot and final low, and
-  final-pullback/pivot-day volume ratios. Facts are percentages, session
+  undercut, the significant-contraction staircase, right-edge position
+  inside the final contraction, final-pullback/pivot-day volume ratios, and
+  each structural gate's pass/fail status. It never carries the post-pivot
+  drawdown through as-of. Facts are percentages, session
   counts, and statuses only — never absolute prices — and Gemini must treat
   them as authoritative rather than re-estimating them from pixels.
 - Missing/stale candles, failed survivor resolution, hash/render mismatch,
@@ -392,7 +407,9 @@ Gemini must return strict JSON (`additionalProperties: false`) containing only:
 The schema must not contain a pivot, stop, target, entry, quantity, capital,
 monetary risk, position or sector exposure, daily-loss, add-size,
 target-size, trailing, template, or a free `contraction_count`. Do not
-persist or display provider `reasoning_details`. Python derives `llm_count`
+persist or display provider `reasoning_details`. The prompt is neutral: no
+class is the default, two genuine contractions are eligible for `valid`,
+and confidence never selects the class. Python derives `llm_count`
 from survivors after resolution; that derived count is the only LLM-side
 count used by disagreement and template scoring.
 
@@ -457,9 +474,10 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
   - Persist which formula landed in which slot.
 - 52-week high is informational (`near_52w_high`, `fresh_high_breakout`,
   `level_to_watch`). It is never a rejection.
-- **Structural gates (policy `p10_structural_gates_v1`, carried by
-  `GEOMETRY_VERSION = p10_python_owned_levels_v6`)** run on the RAW Python
-  geometry before inference and are independent of Gemini survivor
+- **Structural gates (policy `p10_structural_gates_v2`, carried by
+  `GEOMETRY_VERSION = p10_python_owned_levels_v7`)** run on the Python
+  geometry before inference (undercut and base age on unfolded raw swings;
+  tightening, pullback volume and pivot on the folded candidates) and are independent of Gemini survivor
   resolution. Dispositions: `ok` (proceed), `forming` (watch — never a
   permanent rejection), `invalid` (audited non-proposal; provider call
   skipped). Rules with defaults:
@@ -469,21 +487,28 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
     contraction low by more than `max(one tick, 0.10×ATR14)` ⇒ invalid
     (`structural_undercut_lower_low`); tolerance swept 0.05–0.20 ATR on
     development data.
-  - **Tightening**: every consecutive non-noise raw step must satisfy
-    `current/previous ≤ 0.90` **or** `previous − current ≥ 0.75pp` ⇒
-    invalid (`structural_flat_shelf_not_tightening`); dips shallower than
-    the noise floor (1.25%) are excluded from step computation.
-  - **Final-pullback volume**: segment = sessions after the final raw high
-    through its low; down session = `close < previous close`. Invalid
+  - **Tightening**: every step of the significant-contraction staircase
+    must satisfy `current/previous ≤ 0.90` **or** `previous − current ≥
+    0.75pp` ⇒ invalid (`structural_flat_shelf_not_tightening`). Staircase =
+    folded candidates at or above the 1.25% noise floor (plus the final one)
+    scanned right to left, keeping each one at least as deep as every later
+    kept one; shallower dips superseded by a deeper contraction from a
+    higher high are not steps. If the final is the deepest, the step from
+    the deepest earlier candidate to the final is evaluated.
+  - **Final-pullback volume**: segment = sessions after the final folded
+    candidate's high through its low; the previous window is the previous
+    staircase contraction; down session = `close < previous close`. Invalid
     (`structural_final_pullback_distribution`) when the max down-session
     volume exceeds 1.75× the prior-20-day ADV, or the segment mean exceeds
     1.10× the previous contraction-window mean while also ≥ 0.75× ADV.
     The pivot day is never part of the segment. The legacy survivor
     window-mean volume rule is log-only audit evidence now, not a gate.
   - **Climax-fade**: pivot-day volume > 1.75× its prior ADV **and** failed
-    retention (upper-wick share ≥ 50% or later closes fading ≥ 1.0× ATR14)
-    ⇒ invalid (`structural_pivot_climax_fade`). Elevated pivot volume alone
-    never rejects (healthy institutional accumulation).
+    retention (upper-wick share ≥ 50%, or the first completed session after
+    the pivot — never beyond as-of — closes below the pivot-day low) ⇒
+    invalid (`structural_pivot_climax_fade`). Elevated pivot volume alone
+    never rejects (healthy institutional accumulation), and the final
+    contraction's own pullback depth is never a climax signal.
   No structural rule may use a session after as-of; baselines use strictly
   earlier sessions (unit-tested no-lookahead).
 - Independent numeric gates (any failure → audited non-proposal):
@@ -557,7 +582,7 @@ proof. No template may create more than three entry legs.
 computes pivot, entry, stop, or targets. The proposal worker upserts
 `p10_forming_patterns` (`watching | promoted | broken_down | expired`) and
 does not write LTP `watchlists`. Structural immaturity (base younger than
-the maturity floor, or a single raw pullback so far) routes into this watch
+the maturity floor, or fewer than two folded candidates so far) routes into this watch
 even when Gemini says `valid` — the attempt is recorded `partial` with
 `proposal_structural_forming` and the pattern is rechecked on later EODs
 instead of being killed.
@@ -682,7 +707,8 @@ reports it available.
 
 In `EXECUTION_MODE=paper`, that snapshot is the durable paper-broker cash
 ledger (seeded from `deployable_capital_override`, default ₹5,00,000), not
-Fyers `/funds`. Fyers remains market-data and auth only. In live mode the
+Fyers `/funds`. Fyers remains market-data (when `MARKET_DATA_PROVIDER=fyers`)
+and auth only; with Upstox market data paper mode needs no Fyers session. In live mode the
 snapshot is Fyers Available Balance as before.
 
 - Open risk uses remaining quantity and the current effective stop; risk is
@@ -820,7 +846,7 @@ events, and fills live in Postgres. Redis events are never authoritative.
 ### 6.9 Live data and traceability
 
 ```
-Fyers market WS (tick worker only)
+Fyers market WS or Upstox LTP poll (tick worker only)
   → normalized tick + Redis LTP cache/pub-sub
   → completed/persisted 5m bars + Redis bar event
   → entry supervisor (approved proposals only)
@@ -976,9 +1002,18 @@ or weaken the global kill switch.
   `TELEGRAM_CHAT_ID`) are environment-only. Never log them, never return them
   from an API response, and never store them in Postgres or Redis payloads.
 - The Upstox Analytics Token is a separate read-only environment secret used
-  only by P7. It is never sent to the frontend or stored in fundamentals
-  snapshots. Upstox auth failure marks annotations failed but does not pause
-  or alter the Fyers money path.
+  by P7 and, with `MARKET_DATA_PROVIDER=upstox`, by the market-data adapter
+  (history + LTP). It is never sent to the frontend or stored in snapshots.
+  A 401/403 sets a Redis auth flag and one cooldown-bounded critical event,
+  blocks new paper entries/adds via the preflight, and marks the EOD sync
+  `authentication_required`; it never pauses Fyers order/exit paths. The
+  auth guard checks the token once per trading day and warns ≤14 days
+  before its 1-year expiry.
+- The daily Fyers session is required in live mode always, and in paper
+  mode only when `MARKET_DATA_PROVIDER=fyers`. Otherwise the auth guard
+  makes no Fyers calls, attempts no headless login, and sends no Fyers login
+  alerts. Live mode on Upstox data still needs the daily Fyers 2FA for
+  orders, funds, and the order WebSocket.
 - Official NSE corporate filing endpoints and archive XBRLs are public,
   read-only P7 enrichment. Fetch or parse failures remain visible `unknown`
   warnings and never pause or alter the Fyers money path.
@@ -1014,8 +1049,9 @@ Frontend AI SDK streaming is fine only for read-only context.
 
 ## 10. Non-negotiable architectural rules
 
-1. **Single Fyers market-data WebSocket**, owned only by the tick ingestion
-   worker. Nothing else connects to Fyers market WS.
+1. **Single real-time market-data ingestion owner** (the tick ingestion
+   worker): only it holds the Fyers market WS or polls real-time Upstox LTP.
+   History REST runs in arq jobs/probes through the shared Redis budget.
 2. **Single Fyers order WebSocket**, owned only by the order gateway.
    Nothing else connects to Fyers order WS.
 3. **Frontend never talks to Fyers directly** — always through our backend.
@@ -1043,9 +1079,10 @@ Frontend AI SDK streaming is fine only for read-only context.
 12. **Do not add dependencies or new long-running services** not listed in §2–§4
     without asking.
 13. **Fundamental sources are read-only.** P7 may call documented
-   fundamentals GET endpoints for persisted technical survivors. All market
-   data, sockets, account state, and orders remain exclusively on the locked
-   Fyers paths. Upstox is primary; official NSE shareholding and integrated
+   fundamentals GET endpoints for persisted technical survivors. Account
+   state and orders remain exclusively on the locked Fyers paths; market data
+   may come from Upstox only as read-only historical/quote GETs through the
+   market-data adapter (§2). Upstox is primary; official NSE shareholding and integrated
    filing XBRLs are limited to promoter-pledge and leverage risk enrichment.
    Known warning/red/severe results may reduce only the deterministic
    fundamental score and grade; they never change technical rank, reject a
@@ -1097,7 +1134,7 @@ Notes:
 - P10 implementation is complete; its next operational step is the Shadow
   gate in §12.2. P9 must complete its own replay-backed Shadow gate before any
   reduced-live P10 rollout. No rollout stage may be skipped or self-promote.
-- P10 must reuse the single market WS, single order WS, execution-engine-only
+- P10 must reuse the single market-data ingestion owner, single order WS, execution-engine-only
   order mutation, reconciliation, journal, and kill-switch foundations. Do not
   replace them with a parallel broker path.
 - P10 was implemented in this order: schema/migrations and pure domain rules →
@@ -1140,7 +1177,16 @@ the phase table above is authoritative going forward.
   session after as-of (no-lookahead); the pivot day is never inside the
   final-pullback segment; climax requires elevated volume AND failed
   retention; flat-shelf step rule (ratio ≤ 0.90 or step ≥ 0.75pp) rejects
-  near-equal dips.
+  near-equal dips. Tightening and climax are tested with the REAL detector
+  on noisy synthetic bases (noisy two-contraction VCP ⇒ ok; high-volume
+  pivot plus quiet pullback ⇒ not climax; flat shelf with rising lows ⇒
+  invalid); folding never hides an undercut; retention ignores sessions
+  after pivot+K.
+- Market-data provider: Upstox history/LTP adapter returns the Fyers-shaped
+  response in the stored timestamp convention; every index literal maps to a
+  verified Upstox key; Upstox ticks have the Fyers tick shape; 401/403 never
+  retries; paper + Upstox entry preflight never touches the Fyers session
+  while live still verifies it.
 - Schema consistency: contradictory `valid`/`forming`/`not_vcp` packets are
   retryable `proposal_schema_inconsistent` errors; provider taxonomy mapping
   (timeout/upstream/rate-limited/invalid-JSON); `existing` is a no-op

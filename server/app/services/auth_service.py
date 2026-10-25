@@ -423,5 +423,7 @@ async def get_auth_status_from_db(db: AsyncSession, redis=None) -> dict:
         "headless_login_configured": readiness["headless_login_configured"],
         "telegram_configured": readiness["telegram_configured"],
         "telegram_enabled": readiness["telegram_enabled"],
+        "market_data_provider": settings.market_data_provider,
+        "fyers_required": settings.fyers_session_required,
     }
 

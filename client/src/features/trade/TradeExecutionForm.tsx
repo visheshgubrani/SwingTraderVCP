@@ -64,6 +64,8 @@ interface TradeExecutionFormProps {
   initialSide?: TradeSide
   onTradeConfirmed?: (confirmation: TradeConfirmation) => void
   onValuesChange?: (entry: number, sl: number, target: number) => void
+  /** Close the ticket panel (renders a × in the ticket header). */
+  onClose?: () => void
 }
 
 function optionalPositiveNumber(value: string): number | null {
@@ -79,6 +81,7 @@ export function TradeExecutionForm({
   initialSide = "buy",
   onTradeConfirmed,
   onValuesChange,
+  onClose,
 }: TradeExecutionFormProps) {
   const [side, setSide] = useState<TradeSide>(initialSide)
   const [orderType, setOrderType] = useState<EntryOrderType>("limit")
@@ -208,7 +211,7 @@ export function TradeExecutionForm({
   }
 
   return (
-    <aside className="flex h-full w-80 shrink-0 flex-col overflow-y-auto border-l border-border bg-card p-3 text-card-foreground">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-y-auto p-3 text-card-foreground">
       <form
         className="flex min-h-full flex-col justify-between gap-4"
         onSubmit={handleReview}
@@ -219,9 +222,22 @@ export function TradeExecutionForm({
               <ShieldCheckIcon aria-hidden="true" />
               <span className="text-sm font-semibold">Trade checkpoint</span>
             </div>
-            <Badge variant={isLive ? "destructive" : "outline"}>
-              {isLive ? "LIVE" : "PAPER"} · CNC
-            </Badge>
+            <div className="flex items-center gap-1">
+              <Badge variant={isLive ? "destructive" : "outline"}>
+                {isLive ? "LIVE" : "PAPER"} · CNC
+              </Badge>
+              {onClose && (
+                <button
+                  aria-label="Close trade ticket"
+                  className="ibtn"
+                  onClick={onClose}
+                  title="Close ticket"
+                  type="button"
+                >
+                  ×
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center justify-between rounded-lg bg-muted p-2.5">
@@ -612,6 +628,6 @@ export function TradeExecutionForm({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </aside>
+    </div>
   )
 }

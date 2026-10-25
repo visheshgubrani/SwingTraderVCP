@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
-import { toneCls } from "@/lib/format"
+import { fmtMoney, fmtR, toneCls } from "@/lib/format"
 import {
   journalChartUrl,
   useAiCoachRun,
@@ -19,15 +19,8 @@ import {
   type PeriodBucket,
 } from "@/features/journal/api"
 
-function formatMoney(value: number | null | undefined): string {
-  if (value == null) return "—"
-  return value >= 0 ? `+₹${value.toFixed(2)}` : `₹${value.toFixed(2)}`
-}
-
-function formatR(value: number | null | undefined): string {
-  if (value == null) return "—"
-  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}R`
-}
+const formatMoney = (value: number | null | undefined) => fmtMoney(value, { sign: true })
+const formatR = (value: number | null | undefined) => fmtR(value, { sign: true })
 
 function runTone(status: string | undefined): StatusTone {
   const s = status ?? ""
@@ -48,7 +41,7 @@ function PanelBox({
   return (
     <section className={cn("rounded-lg border border-border bg-surface", className)}>
       <header className="flex items-center justify-between border-b border-border-soft px-4 py-2">
-        <h4 className="mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted-text">
+        <h4 className="mono text-2xs font-bold uppercase tracking-[0.12em] text-muted-text">
           {title}
         </h4>
       </header>
@@ -59,7 +52,7 @@ function PanelBox({
 
 function KV({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-baseline justify-between gap-6 text-[12px]">
+    <div className="flex items-baseline justify-between gap-6 text-xs">
       <span className="shrink-0 text-muted-text">{label}</span>
       <span className="mono truncate text-fg2" title={value}>
         {value}
@@ -72,8 +65,8 @@ function SectionList({ title, items }: { title: string; items?: string[] }) {
   if (!items?.length) return null
   return (
     <div>
-      <div className="mb-1 text-[11px] font-bold text-accent">{title}</div>
-      <ul className="list-disc space-y-0.5 pl-4 text-[11.5px] text-muted-foreground">
+      <div className="mb-1 text-2xs font-bold text-accent">{title}</div>
+      <ul className="list-disc space-y-0.5 pl-4 text-xs text-muted-foreground">
         {items.map((item) => (
           <li key={item}>{item}</li>
         ))}
@@ -224,15 +217,15 @@ export function JournalView() {
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-[300px] shrink-0 flex-col border-r border-border bg-surface max-[900px]:hidden">
           <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border px-3">
-            <span className="mono text-[10px] font-bold uppercase tracking-[0.13em] text-fg2">
+            <span className="mono text-2xs font-bold uppercase tracking-[0.13em] text-fg2">
               TRADE JOURNAL
             </span>
-            <span className="ml-auto mono text-[10px] text-muted-text">{items.length}</span>
+            <span className="ml-auto mono text-2xs text-muted-text">{items.length}</span>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {listLoading && <div className="p-3 text-[11.5px] text-muted-text">Loading journal entries…</div>}
+            {listLoading && <div className="p-3 text-xs text-muted-text">Loading journal entries…</div>}
             {!listLoading && items.length === 0 && (
-              <div className="p-3 text-[11.5px] leading-relaxed text-muted-text">
+              <div className="p-3 text-xs leading-relaxed text-muted-text">
                 No journal entries yet. Future fills will appear here automatically.
               </div>
             )}
@@ -254,13 +247,13 @@ export function JournalView() {
                 >
                   <span className="flex items-baseline justify-between gap-2">
                     <span className="truncate text-[12.5px] font-bold text-fg">{entry.symbol}</span>
-                    <span className={cn("mono shrink-0 text-[12px] font-bold", tone)}>
+                    <span className={cn("mono shrink-0 text-xs font-bold", tone)}>
                       {formatMoney(pnl)}
                     </span>
                   </span>
                   <span className="mt-0.5 flex items-baseline justify-between gap-2">
-                    <span className="truncate text-[10.5px] text-muted-text">{tag}</span>
-                    <span className="mono shrink-0 text-[10px] text-muted-text">
+                    <span className="truncate text-2xs text-muted-text">{tag}</span>
+                    <span className="mono shrink-0 text-2xs text-muted-text">
                       {entry.closed_at
                         ? new Date(entry.closed_at).toLocaleDateString("en-IN")
                         : "Open"}
@@ -274,12 +267,12 @@ export function JournalView() {
 
         <div className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
           {!selectedId && (
-            <p className="px-1 pt-2 text-[12px] text-muted-text">
+            <p className="px-1 pt-2 text-xs text-muted-text">
               Select a trade to review entry context and fills.
             </p>
           )}
           {selectedId && detailLoading && (
-            <p className="px-1 pt-2 text-[12px] text-muted-text">Loading trade detail…</p>
+            <p className="px-1 pt-2 text-xs text-muted-text">Loading trade detail…</p>
           )}
           {detail && (
             <>
@@ -290,7 +283,7 @@ export function JournalView() {
                     <h3 className="text-[15px] font-bold text-fg">{detail.symbol}</h3>
                     <StatusChip tone={runTone(detail.status)}>{detail.status.toUpperCase()}</StatusChip>
                   </div>
-                  <p className="mono mt-1 text-[11px] text-muted-text">
+                  <p className="mono mt-1 text-2xs text-muted-text">
                     Closed{" "}
                     {detail.closed_at ? new Date(detail.closed_at).toLocaleString("en-IN") : "—"}
                     {" · "}
@@ -306,7 +299,7 @@ export function JournalView() {
                   >
                     {formatMoney(detail.net_pnl)}
                   </div>
-                  <div className="mono text-[10px] text-muted-text">
+                  <div className="mono text-2xs text-muted-text">
                     Gross {formatMoney(detail.gross_pnl)} · Charges {detail.charge_quality}
                   </div>
                 </div>
@@ -337,9 +330,9 @@ export function JournalView() {
 
               <PanelBox title="Fill timeline">
                 {(detail.exit_fills ?? []).length === 0 ? (
-                  <p className="text-[11.5px] text-muted-text">No exit fills recorded yet.</p>
+                  <p className="text-xs text-muted-text">No exit fills recorded yet.</p>
                 ) : (
-                  <ul className="mono space-y-1 text-[11.5px] text-muted-foreground">
+                  <ul className="mono space-y-1 text-xs text-muted-foreground">
                     {(detail.exit_fills ?? []).map((fill) => (
                       <li key={String(fill.order_fill_id)}>
                         Exit {String(fill.quantity)} @ {String(fill.price)} ({String(fill.exit_reason)})
@@ -351,7 +344,7 @@ export function JournalView() {
 
               <PanelBox title="Review editor">
                 <div className="flex items-center gap-1">
-                  <span className="mono mr-1 text-[10px] uppercase tracking-[0.1em] text-muted-text">Rating</span>
+                  <span className="mono mr-1 text-2xs uppercase tracking-[0.1em] text-muted-text">Rating</span>
                   {[1, 2, 3, 4, 5].map((star) => (
                     <button
                       aria-label={`Rate ${star} stars`}
@@ -416,7 +409,7 @@ export function JournalView() {
                 )}
               </div>
               {aiRun.status === "succeeded" && aiRun.result && (
-                <div className="space-y-3 text-[12px] text-fg">
+                <div className="space-y-3 text-xs text-fg">
                   <SectionList title="Strengths" items={aiRun.result.strengths as string[]} />
                   <SectionList title="Weaknesses" items={aiRun.result.weaknesses as string[]} />
                   <SectionList
@@ -425,7 +418,7 @@ export function JournalView() {
                   />
                 </div>
               )}
-              {aiRun.error_message && <p className="text-[11.5px] text-ko">{aiRun.error_message}</p>}
+              {aiRun.error_message && <p className="text-xs text-ko">{aiRun.error_message}</p>}
             </PanelBox>
           )}
         </div>

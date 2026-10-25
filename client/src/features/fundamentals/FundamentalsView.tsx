@@ -117,10 +117,10 @@ function aiVerdictBadge(verdict: string | null, status: string) {
     return <Badge className="bg-ok hover:bg-ok text-white font-bold px-2.5 py-0.5">PASS</Badge>
   }
   if (verdict === "fail") {
-    return <Badge className="bg-red-600 hover:bg-red-600 text-white font-bold px-2.5 py-0.5">FAIL</Badge>
+    return <Badge className="bg-ko hover:bg-ko text-white font-bold px-2.5 py-0.5">FAIL</Badge>
   }
   if (verdict === "uncertain") {
-    return <Badge className="bg-amber-600 hover:bg-amber-600 text-white font-bold px-2.5 py-0.5">UNCERTAIN</Badge>
+    return <Badge className="bg-wa hover:bg-wa text-white font-bold px-2.5 py-0.5">UNCERTAIN</Badge>
   }
   return <Badge variant="outline">{status.replaceAll("_", " ")}</Badge>
 }
@@ -297,7 +297,7 @@ function FundamentalPipelineTrace({
               >
                 <span>{item.label}</span>
                 <Badge
-                  className="ml-1 text-[10px]"
+                  className="ml-1 text-2xs"
                   variant={
                     ["invalid", "invalid_response", "provider_error", "transport_unknown", "unavailable"].includes(item.status)
                       ? "destructive"
@@ -311,7 +311,7 @@ function FundamentalPipelineTrace({
               </ToggleGroupItem>
             ))}
           </ToggleGroup>
-          <pre className="max-h-80 overflow-auto rounded-lg border bg-background p-3 text-[11px] font-mono whitespace-pre-wrap">
+          <pre className="max-h-80 overflow-auto rounded-lg border bg-background p-3 text-2xs font-mono whitespace-pre-wrap">
             {JSON.stringify(selectedPayload, null, 2)}
           </pre>
         </>
@@ -340,22 +340,22 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
 
   const verdictMeta = {
     pass: {
-      bg: "bg-green-500/10 border-green-500/30 text-ok dark:text-ok",
+      bg: "bg-ok/10 border-ok/30 text-ok dark:text-ok",
       badgeClass: "bg-ok hover:bg-ok text-white font-black text-sm tracking-wider px-3 py-1",
       icon: CheckCircle2Icon,
       label: "AI VERDICT: PASS",
       desc: "Fundamental evidence aligns with SEPA/Minervini growth criteria.",
     },
     fail: {
-      bg: "bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-300",
-      badgeClass: "bg-red-600 hover:bg-red-600 text-white font-black text-sm tracking-wider px-3 py-1",
+      bg: "bg-ko/10 border-ko/30 text-ko dark:text-ko",
+      badgeClass: "bg-ko hover:bg-ko text-white font-black text-sm tracking-wider px-3 py-1",
       icon: XCircleIcon,
       label: "AI VERDICT: FAIL",
       desc: "Severe fundamental weakness, revenue/profit contraction, or margin erosion detected.",
     },
     uncertain: {
-      bg: "bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300",
-      badgeClass: "bg-amber-600 hover:bg-amber-600 text-white font-black text-sm tracking-wider px-3 py-1",
+      bg: "bg-wa/10 border-wa/30 text-wa dark:text-wa",
+      badgeClass: "bg-wa hover:bg-wa text-white font-black text-sm tracking-wider px-3 py-1",
       icon: AlertTriangleIcon,
       label: "AI VERDICT: UNCERTAIN",
       desc: "Financial data is sparse or quarterly/annual signals are conflicting.",
@@ -393,7 +393,7 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
 
         <div className="mt-2 rounded-lg bg-background/80 p-4 border shadow-2xs backdrop-blur-xs">
           <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
-            <SparklesIcon className="size-4 text-amber-500" />
+            <SparklesIcon className="size-4 text-wa" />
             <span>AI Executive Summary</span>
           </div>
           <p className="mt-2 text-sm leading-relaxed text-foreground">
@@ -457,14 +457,14 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
       {(detail.ai_opinion.strengths.length > 0 || detail.ai_opinion.risks.length > 0 || detail.ai_opinion.review_focus.length > 0) && (
         <section className="grid gap-4 md:grid-cols-3">
           {detail.ai_opinion.strengths.length > 0 && (
-            <div className="flex flex-col gap-2.5 rounded-xl border border-green-500/20 bg-green-500/5 p-4">
-              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ok dark:text-green-400">
+            <div className="flex flex-col gap-2.5 rounded-xl border border-ok/20 bg-ok/5 p-4">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ok dark:text-ok">
                 <TrendingUpIcon className="size-4" />
                 <span>Key Strengths ({detail.ai_opinion.strengths.length})</span>
               </div>
               <div className="flex flex-col gap-2">
                 {detail.ai_opinion.strengths.map((note, index) => (
-                  <div className="rounded-lg border border-green-500/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`str-${index}`}>
+                  <div className="rounded-lg border border-ok/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`str-${index}`}>
                     <p className="font-medium">{note.text}</p>
                   </div>
                 ))}
@@ -473,14 +473,14 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
           )}
 
           {detail.ai_opinion.risks.length > 0 && (
-            <div className="flex flex-col gap-2.5 rounded-xl border border-red-500/20 bg-red-500/5 p-4">
-              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-red-700 dark:text-red-400">
+            <div className="flex flex-col gap-2.5 rounded-xl border border-ko/20 bg-ko/5 p-4">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ko dark:text-ko">
                 <ShieldAlertIcon className="size-4" />
                 <span>Risks & Headwinds ({detail.ai_opinion.risks.length})</span>
               </div>
               <div className="flex flex-col gap-2">
                 {detail.ai_opinion.risks.map((note, index) => (
-                  <div className="rounded-lg border border-red-500/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`risk-${index}`}>
+                  <div className="rounded-lg border border-ko/20 bg-background p-2.5 text-xs text-foreground shadow-2xs" key={`risk-${index}`}>
                     <p className="font-medium">{note.text}</p>
                   </div>
                 ))}
@@ -553,11 +553,11 @@ function FundamentalInspector({ detail }: { detail: FundamentalDetail }) {
           </div>
           <div className="grid grid-cols-2 gap-3 text-xs">
             <div className="rounded-lg bg-muted/30 p-2.5 border">
-              <span className="text-muted-foreground block text-[11px]">Sector</span>
+              <span className="text-muted-foreground block text-2xs">Sector</span>
               <strong className="mt-0.5 block text-sm font-semibold">{facts.company.sector ?? "—"}</strong>
             </div>
             <div className="rounded-lg bg-muted/30 p-2.5 border">
-              <span className="text-muted-foreground block text-[11px]">Industry</span>
+              <span className="text-muted-foreground block text-2xs">Industry</span>
               <strong className="mt-0.5 block text-sm font-semibold">{facts.company.industry ?? "—"}</strong>
             </div>
             <p className="col-span-2 text-xs leading-relaxed text-muted-foreground">
@@ -781,7 +781,7 @@ export function FundamentalsView() {
               size="sm"
               variant={controlsQuery.data?.processing.paused ? "outline" : "secondary"}
             >
-              {controlsQuery.data?.processing.paused ? <PlayCircleIcon className="mr-1 size-3.5 text-ok" /> : <PauseCircleIcon className="mr-1 size-3.5 text-amber-600" />}
+              {controlsQuery.data?.processing.paused ? <PlayCircleIcon className="mr-1 size-3.5 text-ok" /> : <PauseCircleIcon className="mr-1 size-3.5 text-wa" />}
               {controlsQuery.data?.processing.paused ? "Resume Pipeline" : "Pause Pipeline"}
             </Button>
 
@@ -816,14 +816,14 @@ export function FundamentalsView() {
         {progressData && (
           <div className="flex items-center gap-3 rounded-lg border bg-card px-3.5 py-1.5 text-xs shadow-2xs">
             <div className="flex items-center gap-2">
-              <span className="size-2 rounded-full bg-green-500 animate-pulse" />
+              <span className="size-2 rounded-full bg-ok animate-pulse" />
               <strong className="font-semibold">{progressData.status}</strong>
               {progressData.current_symbol && (
                 <span className="font-mono text-muted-foreground">· #{progressData.current_rank} {progressData.current_symbol}</span>
               )}
             </div>
             <Separator className="h-4" orientation="vertical" />
-            <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground">
+            <div className="flex items-center gap-3 font-mono text-2xs text-muted-foreground">
               <span><strong className="text-foreground">{progressData.counts.succeeded ?? 0}</strong> complete</span>
               <span>Tokens: <strong className="text-foreground">{totalTokensUsed.toLocaleString()}</strong> / {(tokenBudget / 1000).toFixed(0)}k</span>
             </div>

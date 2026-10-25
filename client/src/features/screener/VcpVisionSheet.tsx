@@ -46,9 +46,9 @@ import { ApiError } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 function verdictClass(verdict: VcpVisionVerdict) {
-  if (verdict === "valid") return "bg-green-500/15 text-green-400 border-green-500/40"
-  if (verdict === "invalid") return "bg-red-500/15 text-red-400 border-red-500/40"
-  return "bg-amber-500/15 text-amber-400 border-amber-500/40"
+  if (verdict === "valid") return "bg-ok/15 text-ok border-ok/40"
+  if (verdict === "invalid") return "bg-ko/15 text-ko border-ko/40"
+  return "bg-wa/15 text-wa border-wa/40"
 }
 
 export function VcpVisionStatusBadge({
@@ -62,7 +62,7 @@ export function VcpVisionStatusBadge({
 }) {
   if (!status) {
     return (
-      <Badge variant="outline" className="gap-1 text-[10px]">
+      <Badge variant="outline" className="gap-1 text-2xs">
         <Eye className="size-2.5" />
         {compact ? "" : "No VCP analysis"}
       </Badge>
@@ -72,7 +72,7 @@ export function VcpVisionStatusBadge({
     return (
       <Badge
         variant="outline"
-        className={cn("gap-1 text-[10px]", verdictClass(aiVerdict))}
+        className={cn("gap-1 text-2xs", verdictClass(aiVerdict))}
       >
         <Sparkles className="size-2.5" />
         {aiVerdict.toUpperCase()}
@@ -83,7 +83,7 @@ export function VcpVisionStatusBadge({
     return (
       <Badge
         variant="outline"
-        className="gap-1 text-[10px] border-red-500/40 text-red-400"
+        className="gap-1 text-2xs border-ko/40 text-ko"
       >
         <XCircle className="size-2.5" />
         {compact ? "" : "FAILED"}
@@ -91,7 +91,7 @@ export function VcpVisionStatusBadge({
     )
   }
   return (
-    <Badge variant="outline" className="gap-1 text-[10px] animate-pulse">
+    <Badge variant="outline" className="gap-1 text-2xs animate-pulse">
       <Spinner className="size-2.5" />
       {status === "awaiting_capture"
         ? "CAPTURE"
@@ -258,7 +258,7 @@ export function VcpVisionSheet({
               status={analysis?.status ?? null}
             />
           </SheetTitle>
-          <SheetDescription className="font-mono text-[11px]">
+          <SheetDescription className="font-mono text-2xs">
             Advisory second opinion over frozen EOD candles. It never changes
             rank, eligibility, watchlists, or trade state.
           </SheetDescription>
@@ -409,20 +409,20 @@ export function VcpVisionSheet({
                   <Sparkles className="size-3" />
                   AI VERDICT: {(verdict ?? "uncertain").toUpperCase()}
                 </Badge>
-                <Badge variant="secondary" className="text-[11px]">
+                <Badge variant="secondary" className="text-2xs">
                   Confidence {analysis.result.confidence}%
                 </Badge>
-                <Badge variant="outline" className="text-[11px]">
+                <Badge variant="outline" className="text-2xs">
                   {analysis.result.prior_uptrend.assessment.toUpperCase()} PRIOR
                   TREND
                 </Badge>
                 {analysis.result.volume && (
-                  <Badge variant="outline" className="text-[11px]">
+                  <Badge variant="outline" className="text-2xs">
                     {analysis.result.volume.assessment.replaceAll("_", " ").toUpperCase()} VOLUME
                   </Badge>
                 )}
                 {humanReview?.verdict && (
-                  <Badge variant="outline" className="gap-1 text-[11px]">
+                  <Badge variant="outline" className="gap-1 text-2xs">
                     <CheckCircle2 className="size-3" />
                     HUMAN: {humanReview.verdict.toUpperCase()}
                   </Badge>
@@ -433,13 +433,13 @@ export function VcpVisionSheet({
                 {analysis.result.summary}
               </p>
               {analysis.result.volume?.note && (
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   Volume: {analysis.result.volume.note}
                 </p>
               )}
 
               <div className="flex items-center justify-between">
-                <span className="text-[11px] text-muted-foreground">
+                <span className="text-2xs text-muted-foreground">
                   Read-only overlay: AI contraction regions + pivot
                 </span>
                 <Button
@@ -447,7 +447,7 @@ export function VcpVisionSheet({
                   size="sm"
                   type="button"
                   variant="ghost"
-                  className="h-7 gap-1.5 text-[11px]"
+                  className="h-7 gap-1.5 text-2xs"
                 >
                   <Eye className="size-3" />
                   {showSourceImages ? "Hide source images" : "Show source images"}
@@ -493,11 +493,11 @@ export function VcpVisionSheet({
                       <span className="font-bold text-primary">
                         {contraction.label}
                       </span>
-                      <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
+                      <div className="mt-1 flex justify-between text-2xs text-muted-foreground">
                         <span>{contraction.start}</span>
                         <span>{contraction.end}</span>
                       </div>
-                      <div className="mt-1 flex justify-between text-[11px]">
+                      <div className="mt-1 flex justify-between text-2xs">
                         <span className="text-foreground">
                           {contraction.sessions} sessions
                         </span>
@@ -505,7 +505,7 @@ export function VcpVisionSheet({
                           {contraction.depth_pct.toFixed(2)}% deep
                         </span>
                       </div>
-                      <div className="text-[11px] text-muted-foreground">
+                      <div className="text-2xs text-muted-foreground">
                         {contraction.high.toFixed(2)} → {contraction.low.toFixed(2)}
                       </div>
                     </div>
@@ -515,10 +515,10 @@ export function VcpVisionSheet({
 
               {analysis.result.contraction_anchors.length > 0 && (
                 <div>
-                  <span className="text-[11px] font-bold uppercase text-muted-foreground">
+                  <span className="text-2xs font-bold uppercase text-muted-foreground">
                     Contraction anchors
                   </span>
-                  <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">
+                  <ul className="mt-1 list-disc space-y-1 pl-4 text-2xs text-muted-foreground">
                     {analysis.result.contraction_anchors.map((anchor) => (
                       <li key={anchor.date}>
                         <strong className="text-foreground">{anchor.date}</strong>{" "}
@@ -531,10 +531,10 @@ export function VcpVisionSheet({
 
               {analysis.result.bases.length > 0 && (
                 <div>
-                  <span className="text-[11px] font-bold uppercase text-muted-foreground">
+                  <span className="text-2xs font-bold uppercase text-muted-foreground">
                     Base windows
                   </span>
-                  <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">
+                  <ul className="mt-1 list-disc space-y-1 pl-4 text-2xs text-muted-foreground">
                     {analysis.result.bases.map((base) => (
                       <li key={`${base.start}-${base.end}`}>
                         <strong className="text-foreground">
@@ -550,10 +550,10 @@ export function VcpVisionSheet({
               <div className="grid gap-2 sm:grid-cols-2">
                 {analysis.result.supporting_evidence.length > 0 && (
                   <div>
-                    <span className="text-[11px] font-bold uppercase text-green-500/80">
+                    <span className="text-2xs font-bold uppercase text-ok/80">
                       Supporting evidence
                     </span>
-                    <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">
+                    <ul className="mt-1 list-disc space-y-1 pl-4 text-2xs text-muted-foreground">
                       {analysis.result.supporting_evidence.map((item) => (
                         <li key={item}>{item}</li>
                       ))}
@@ -562,10 +562,10 @@ export function VcpVisionSheet({
                 )}
                 {analysis.result.contrary_evidence.length > 0 && (
                   <div>
-                    <span className="text-[11px] font-bold uppercase text-red-500/80">
+                    <span className="text-2xs font-bold uppercase text-ko/80">
                       Contrary evidence
                     </span>
-                    <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">
+                    <ul className="mt-1 list-disc space-y-1 pl-4 text-2xs text-muted-foreground">
                       {analysis.result.contrary_evidence.map((item) => (
                         <li key={item}>{item}</li>
                       ))}
@@ -577,14 +577,14 @@ export function VcpVisionSheet({
               <Separator />
 
               <div className="space-y-2">
-                <span className="text-[11px] font-bold uppercase text-muted-foreground">
+                <span className="text-2xs font-bold uppercase text-muted-foreground">
                   Human review
                 </span>
                 <div className="flex items-center gap-2">
                   {(["valid", "invalid", "uncertain"] as const).map((option) => (
                     <button
                       className={cn(
-                        "h-7 rounded border px-3 text-[11px] font-semibold transition-colors",
+                        "h-7 rounded border px-3 text-2xs font-semibold transition-colors",
                         reviewVerdict === option
                           ? verdictClass(option)
                           : humanReview?.verdict === option
@@ -599,7 +599,7 @@ export function VcpVisionSheet({
                     </button>
                   ))}
                 </div>
-                <Label className="text-[11px] text-muted-foreground">
+                <Label className="text-2xs text-muted-foreground">
                   Note (review metadata only, never prompt-training input)
                 </Label>
                 <Textarea
@@ -623,7 +623,7 @@ export function VcpVisionSheet({
           )}
 
           {activeStatus && analysis && (
-            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <div className="flex items-center gap-2 text-2xs text-muted-foreground">
               <Spinner className="size-3" />
               Analysis {analysis.id.slice(0, 8)} · created{" "}
               {new Date(analysis.created_at).toLocaleString("en-IN")}
@@ -632,7 +632,7 @@ export function VcpVisionSheet({
         </div>
 
         {analysis && analysis.status === "succeeded" && (
-          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t bg-card px-4 py-2 font-mono text-[11px] text-muted-foreground">
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t bg-card px-4 py-2 font-mono text-2xs text-muted-foreground">
             <span>
               {analysis.model ?? "Vision model"} · {analysis.prompt_version} ·{" "}
               {analysis.renderer_version}

@@ -47,6 +47,7 @@ from app.schemas.proposals import (
     ProposalSingleTriggerResponse,
 )
 from app.services.p10_rollout import (
+    PAPER_AUTO_ARM_DECISION_NOTE,
     RolloutBlockedError,
     get_rollout_state,
     promote_rollout_stage,
@@ -319,8 +320,9 @@ async def get_latest_proposal_batch(
 async def list_proposal_batches(
     db: db_dep,
     limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ProposalRunSummaryResponse]:
-    """Returns a list of recent proposal automation runs (batches and single-stock runs)."""
+    """Returns recent proposal automation runs (batches and single-stock runs), newest first."""
     stmt = text("""
         SELECT ar.id, ar.scan_run_id, ar.status, ar.candidates_total, ar.candidates_processed,
                ar.proposals_generated, ar.proposals_rejected, ar.proposals_uncertain,
@@ -336,9 +338,9 @@ async def list_proposal_batches(
         FROM automation_runs ar
         LEFT JOIN scan_runs sr ON sr.id = ar.scan_run_id
         ORDER BY ar.created_at DESC
-        LIMIT :limit;
+        LIMIT :limit OFFSET :offset;
     """)
-    rows = (await db.execute(stmt, {"limit": limit})).mappings().all()
+    rows = (await db.execute(stmt, {"limit": limit, "offset": offset})).mappings().all()
     results = []
     for r in rows:
         status_val, error_message = _effective_proposal_batch_state(r)
@@ -735,24 +737,34 @@ async def list_rejected_attempts(
     ] = "all",
     symbol: str | None = None,
     automation_run_id: UUID | None = None,
+    include_existing: bool = False,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ProposalGenerationAttemptResponse]:
     """Returns candidate attempts that were rejected by the system (Python rules or Gemini) or failed.
 
     Only each candidate's LATEST attempt counts: a failed attempt 1 followed
-    by a valid attempt 2 is not a rejection. Newest first.
+    by a valid attempt 2 is not a rejection. `proposal_already_exists` no-ops
+    are not rejections and are left out unless `include_existing` is set.
+    `symbol` is a case-insensitive substring. Newest first, paged with
+    `limit`/`offset`.
     """
     inner_clauses: list[str] = []
     outer_clauses = ["latest.status <> 'valid' AND latest.status <> 'running'"]
-    params: dict[str, Any] = {"limit": limit}
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+
+    if not include_existing:
+        outer_clauses.append(
+            "COALESCE(latest.error_type, '') <> 'proposal_already_exists'"
+        )
 
     if status_filter != "all":
         outer_clauses.append("latest.status = :status")
         params["status"] = status_filter
 
-    if symbol:
-        inner_clauses.append("pa.symbol = :symbol")
-        params["symbol"] = symbol.upper()
+    if symbol and symbol.strip():
+        inner_clauses.append("pa.symbol ILIKE :symbol_pattern ESCAPE '\\'")
+        params["symbol_pattern"] = _symbol_pattern(symbol)
 
     if automation_run_id:
         inner_clauses.append("pa.automation_run_id = :automation_run_id")
@@ -781,7 +793,7 @@ async def list_rejected_attempts(
         LEFT JOIN scan_runs sr ON sr.id = ar.scan_run_id
         {outer_where}
         ORDER BY latest.started_at DESC
-        LIMIT :limit;
+        LIMIT :limit OFFSET :offset;
     """)
     rows = (await db.execute(stmt, params)).mappings().all()
     return [
@@ -926,6 +938,81 @@ async def list_forming_patterns(
     return [dict(row._mapping) for row in result]
 
 
+# Shared projection for the proposal list and detail endpoints: the immutable
+# proposal, its (at most one) decision, and the newest linked position so the
+# UI can show history and outcomes without extra round trips.
+_PROPOSAL_SELECT = """
+    SELECT tp.id, tp.automation_run_id, tp.screening_result_id, tp.instrument_id,
+           tp.symbol, tp.as_of_date, tp.status, tp.approval_deadline,
+           tp.entry_session_date, tp.proposal_hash, tp.source_hash,
+           tp.renderer_version, tp.prompt_version, tp.schema_version,
+           tp.geometry_version, tp.model, tp.confidence, tp.entry_template,
+           tp.pivot_price, tp.initial_stop, tp.stop_distance_pct, tp.chase_ceiling,
+           tp.t1, tp.t2, tp.t3, tp.risk_budget_pct, tp.approved_risk_budget_amount,
+           tp.risk_policy_version, tp.leg_count, tp.leg_risk_allocations,
+           tp.relative_volume_threshold, tp.entry_trigger_policy_version,
+           tp.gemini_evidence, tp.geometry, tp.context_image_hash,
+           tp.detail_image_hash, tp.live_eligible, tp.generated_at, tp.created_at,
+           tp.updated_at,
+           d.decision AS decision, d.decided_at AS decided_at,
+           d.notes AS decision_notes,
+           pos.id AS position_id, pos.state AS position_state,
+           pos.realized_pnl AS position_realized_pnl,
+           pos.execution_mode AS position_execution_mode,
+           pos.opened_at AS position_opened_at, pos.closed_at AS position_closed_at,
+           pos.quantity AS position_quantity,
+           pos.open_quantity AS position_open_quantity,
+           pos.average_entry_price AS position_average_entry_price
+    FROM trade_proposals tp
+    LEFT JOIN proposal_decisions d ON d.proposal_id = tp.id
+    LEFT JOIN LATERAL (
+        SELECT p.id, p.state, p.realized_pnl, p.execution_mode, p.opened_at,
+               p.closed_at, p.quantity, p.open_quantity, p.average_entry_price
+        FROM positions p
+        WHERE p.proposal_id = tp.id
+        ORDER BY p.created_at DESC
+        LIMIT 1
+    ) pos ON true
+"""
+
+_POSITION_FIELDS = (
+    "state",
+    "realized_pnl",
+    "execution_mode",
+    "opened_at",
+    "closed_at",
+    "quantity",
+    "open_quantity",
+    "average_entry_price",
+)
+
+
+def _proposal_row_to_dict(row: Any) -> dict[str, Any]:
+    """Shape a _PROPOSAL_SELECT row: nest the position, label the decision source."""
+    item = dict(row)
+    position_id = item.pop("position_id", None)
+    position = {"id": position_id} if position_id is not None else None
+    for field in _POSITION_FIELDS:
+        value = item.pop(f"position_{field}", None)
+        if position is not None:
+            position[field] = value
+    item["position"] = position
+    decision_notes = item.get("decision_notes")
+    if item.get("decision") is None:
+        item["decision_source"] = None
+    elif decision_notes == PAPER_AUTO_ARM_DECISION_NOTE:
+        item["decision_source"] = "paper_auto"
+    else:
+        item["decision_source"] = "operator"
+    return item
+
+
+def _symbol_pattern(symbol: str) -> str:
+    """Case-insensitive substring pattern with LIKE wildcards escaped."""
+    escaped = symbol.strip().upper().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 @router.get("/proposals")
 async def list_trade_proposals(
     db: db_dep,
@@ -936,6 +1023,8 @@ async def list_trade_proposals(
     symbol: str | None = None,
     automation_run_id: UUID | None = None,
     as_of_date: dt.date | None = None,
+    from_date: dt.date | None = None,
+    to_date: dt.date | None = None,
     entry_state: Annotated[
         Literal[
             "armed",
@@ -949,51 +1038,62 @@ async def list_trade_proposals(
         Query(alias="entry_state"),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[dict[str, Any]]:
     """Returns trade proposals filtered by status (default: pending_approval), symbol, run, or date.
 
+    `symbol` is a case-insensitive substring ("reli" matches NSE:RELIANCE-EQ).
+    `from_date`/`to_date` bound `as_of_date` inclusively. Newest first, paged
+    with `limit`/`offset`.
+
     Each row carries a derived `entry_state` for its entry legs (armed,
     trigger_observed, waiting_for_reset, executing, filled, or expired — see
-    derive_proposal_entry_state). The optional `entry_state` filter applies
-    Python-side after fetching, and `expired` reflects a closed entry window
-    even before the entry supervisor has persisted the transition.
+    derive_proposal_entry_state), its decision (`decision`, `decided_at`,
+    `decision_notes`, `decision_source` operator | paper_auto) and the newest
+    linked `position` (or null). The derived `entry_state` filter is applied
+    before paging, and `expired` reflects a closed entry window even before the
+    entry supervisor has persisted the transition.
     """
     where_clauses = []
-    params: dict[str, Any] = {"limit": limit}
+    params: dict[str, Any] = {}
 
     if status_filter != "all":
-        where_clauses.append("status = :status")
+        where_clauses.append("tp.status = :status")
         params["status"] = status_filter
 
-    if symbol:
-        where_clauses.append("symbol = :symbol")
-        params["symbol"] = symbol.upper()
+    if symbol and symbol.strip():
+        where_clauses.append("tp.symbol ILIKE :symbol_pattern ESCAPE '\\'")
+        params["symbol_pattern"] = _symbol_pattern(symbol)
 
     if automation_run_id:
-        where_clauses.append("automation_run_id = :automation_run_id")
+        where_clauses.append("tp.automation_run_id = :automation_run_id")
         params["automation_run_id"] = automation_run_id
 
     if as_of_date:
-        where_clauses.append("as_of_date = :as_of_date")
+        where_clauses.append("tp.as_of_date = :as_of_date")
         params["as_of_date"] = as_of_date
+
+    if from_date:
+        where_clauses.append("tp.as_of_date >= :from_date")
+        params["from_date"] = from_date
+
+    if to_date:
+        where_clauses.append("tp.as_of_date <= :to_date")
+        params["to_date"] = to_date
+
+    # entry_state is derived in Python, so page after filtering in that case.
+    paging_sql = ""
+    if entry_state is None:
+        paging_sql = "LIMIT :limit OFFSET :offset"
+        params["limit"] = limit
+        params["offset"] = offset
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     stmt = text(f"""
-        SELECT id, automation_run_id, screening_result_id, instrument_id, symbol,
-               as_of_date, status, approval_deadline, entry_session_date,
-               proposal_hash, source_hash, renderer_version, prompt_version,
-               schema_version, geometry_version, model, confidence,
-               entry_template, pivot_price, initial_stop, stop_distance_pct,
-               chase_ceiling, t1, t2, t3, risk_budget_pct,
-               approved_risk_budget_amount, risk_policy_version, leg_count,
-               leg_risk_allocations, relative_volume_threshold,
-               entry_trigger_policy_version, gemini_evidence,
-               geometry, context_image_hash, detail_image_hash, live_eligible,
-               generated_at, created_at, updated_at
-        FROM trade_proposals
+        {_PROPOSAL_SELECT}
         {where_sql}
-        ORDER BY created_at DESC
-        LIMIT :limit;
+        ORDER BY tp.created_at DESC
+        {paging_sql};
     """)
     res = await db.execute(stmt, params)
     rows = res.mappings().all()
@@ -1017,13 +1117,15 @@ async def list_trade_proposals(
     now_ist = dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
     results: list[dict[str, Any]] = []
     for row in rows:
-        item = dict(row)
+        item = _proposal_row_to_dict(row)
         item["entry_state"] = derive_proposal_entry_state(
             legs_by_proposal.get(row["id"], []), now_ist
         )
         if entry_state is not None and item["entry_state"] != entry_state:
             continue
         results.append(item)
+    if entry_state is not None:
+        results = results[offset : offset + limit]
     return results
 
 
@@ -1032,21 +1134,11 @@ async def get_trade_proposal(
     proposal_id: UUID,
     db: db_dep,
 ) -> dict[str, Any]:
-    """Returns full details of an immutable trade proposal and its planned entry legs."""
-    prop_stmt = text("""
-        SELECT id, automation_run_id, screening_result_id, instrument_id, symbol,
-               as_of_date, status, approval_deadline, entry_session_date,
-               proposal_hash, source_hash, renderer_version, prompt_version,
-               schema_version, geometry_version, model, confidence,
-               entry_template, pivot_price, initial_stop, stop_distance_pct,
-               chase_ceiling, t1, t2, t3, risk_budget_pct,
-               approved_risk_budget_amount, risk_policy_version, leg_count,
-               leg_risk_allocations, relative_volume_threshold,
-               entry_trigger_policy_version, gemini_evidence,
-               geometry, context_image_hash, detail_image_hash, live_eligible,
-               generated_at, created_at, updated_at
-        FROM trade_proposals
-        WHERE id = :proposal_id;
+    """Returns full details of an immutable trade proposal, its decision,
+    linked position, planned entry legs and trigger evidence."""
+    prop_stmt = text(f"""
+        {_PROPOSAL_SELECT}
+        WHERE tp.id = :proposal_id;
     """)
     prop_res = await db.execute(prop_stmt, {"proposal_id": proposal_id})
     prop = prop_res.fetchone()
@@ -1099,7 +1191,7 @@ async def get_trade_proposal(
         ).fetchall()
     ]
 
-    result = dict(prop._mapping)
+    result = _proposal_row_to_dict(prop._mapping)
     result["legs"] = legs
     result["trigger_events"] = trigger_events
     result["entry_state"] = derive_proposal_entry_state(legs, now_ist)

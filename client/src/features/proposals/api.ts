@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { apiRequest } from "@/lib/api"
 
 export interface TradeProposalItem {
@@ -117,6 +117,14 @@ export interface TradeProposalItem {
   generated_at: string
   created_at: string
   updated_at: string
+  /** The (at most one) recorded decision. */
+  decision: "approved" | "rejected" | null
+  decided_at: string | null
+  decision_notes: string | null
+  /** operator = human approve/reject; paper_auto = paper-only synthetic approval (AGENTS.md §5.4). */
+  decision_source: "operator" | "paper_auto" | null
+  /** Newest position opened from this proposal, if any. */
+  position: ProposalPosition | null
   legs?: Array<{
     id: string
     leg_index: number
@@ -137,6 +145,8 @@ export interface TradeProposalItem {
     eligible_session_end: string | null
     filled_shares: number
     filled_avg_price: number | null
+    position_id?: string | null
+    order_intent_id?: string | null
   }>
   trigger_events?: Array<{
     id: number
@@ -162,6 +172,21 @@ export interface TradeProposalItem {
     is_confirmed: boolean
   }>
 }
+
+export interface ProposalPosition {
+  id: string
+  state: string
+  realized_pnl: number | string | null
+  execution_mode: "paper" | "live"
+  opened_at: string | null
+  closed_at: string | null
+  quantity: number | null
+  open_quantity: number | null
+  average_entry_price: number | string | null
+}
+
+export type ProposalStatus = TradeProposalItem["status"]
+export type ProposalEntryState = NonNullable<TradeProposalItem["entry_state"]>
 
 export interface DecisionPayload {
   decision: "approved" | "rejected"
@@ -395,6 +420,25 @@ const operationsKeys = {
     ["automation", "proposal-generation-results", automationRunId] as const,
 }
 
+/** Query keys for proposal lists, details and attempts (all under "automation"). */
+export const proposalKeys = {
+  lists: ["automation", "trade-proposals"] as const,
+  list: (params: Record<string, unknown>) => [...proposalKeys.lists, params] as const,
+  history: (params: Record<string, unknown>) => [...proposalKeys.lists, "history", params] as const,
+  details: ["automation", "trade-proposal"] as const,
+  detail: (id: string | null) => [...proposalKeys.details, id] as const,
+  rejected: ["automation", "rejected-attempts"] as const,
+  attempt: (id: string | null) => ["automation", "proposal-attempt", id] as const,
+}
+
+function invalidateProposalData(queryClient: QueryClient) {
+  void queryClient.invalidateQueries({ queryKey: proposalKeys.lists })
+  void queryClient.invalidateQueries({ queryKey: proposalKeys.details })
+  void queryClient.invalidateQueries({ queryKey: proposalKeys.rejected })
+  void queryClient.invalidateQueries({ queryKey: ["automation", "proposal-generation-results"] })
+  void queryClient.invalidateQueries({ queryKey: operationsKeys.proposalBatches })
+}
+
 export function useMarketContext() {
   return useQuery<MarketContextLatest>({
     queryKey: operationsKeys.marketContext,
@@ -542,54 +586,82 @@ export function useProposalBatches(limit: number = 30) {
       apiRequest<ProposalRunSummary[]>(
         `/automation/proposal-batches?limit=${limit}`,
       ),
-    refetchInterval: 5000,
+    placeholderData: keepPreviousData,
+    refetchInterval: 10_000,
   })
 }
 
-export function useFormingPatterns(statusFilter: string = "watching") {
+export function useFormingPatterns(statusFilter: string = "watching", enabled = true) {
   return useQuery<FormingPatternItem[]>({
     queryKey: [...operationsKeys.proposals, "forming", statusFilter],
     queryFn: () =>
       apiRequest<FormingPatternItem[]>(
-        `/automation/forming-patterns?status=${statusFilter}`,
+        `/automation/forming-patterns?status=${statusFilter}&limit=200`,
       ),
-    refetchInterval: 15000,
+    enabled,
+    refetchInterval: 30_000,
   })
+}
+
+export interface ProposalListFilters {
+  automationRunId?: string | null
+  /** Case-insensitive substring of the symbol. */
+  symbol?: string | null
+  asOfDate?: string | null
+  fromDate?: string | null
+  toDate?: string | null
+  entryState?: string | null
+  limit?: number
+  offset?: number
+}
+
+function proposalQueryString(statusFilter: string, options: ProposalListFilters = {}) {
+  const queryParams = new URLSearchParams()
+  if (statusFilter) queryParams.set("status", statusFilter)
+  if (options.symbol) queryParams.set("symbol", options.symbol)
+  if (options.automationRunId) queryParams.set("automation_run_id", options.automationRunId)
+  if (options.asOfDate) queryParams.set("as_of_date", options.asOfDate)
+  if (options.fromDate) queryParams.set("from_date", options.fromDate)
+  if (options.toDate) queryParams.set("to_date", options.toDate)
+  if (options.entryState) queryParams.set("entry_state", options.entryState)
+  if (options.limit) queryParams.set("limit", String(options.limit))
+  if (options.offset) queryParams.set("offset", String(options.offset))
+  return queryParams.toString()
 }
 
 export function useTradeProposals(
   statusFilter: string = "pending_approval",
-  options?: {
-    automationRunId?: string | null
-    symbol?: string | null
-    asOfDate?: string | null
-    entryState?: string | null
-    limit?: number
-  },
+  options: ProposalListFilters & { enabled?: boolean; refetchInterval?: number | false } = {},
 ) {
-  const queryParams = new URLSearchParams()
-  if (statusFilter) queryParams.set("status", statusFilter)
-  if (options?.symbol) queryParams.set("symbol", options.symbol)
-  if (options?.automationRunId) queryParams.set("automation_run_id", options.automationRunId)
-  if (options?.asOfDate) queryParams.set("as_of_date", options.asOfDate)
-  if (options?.entryState) queryParams.set("entry_state", options.entryState)
-  if (options?.limit) queryParams.set("limit", String(options.limit))
-
+  const { enabled = true, refetchInterval = 10_000, ...filters } = options
   return useQuery<TradeProposalItem[]>({
-    queryKey: [
-      "trade-proposals",
-      statusFilter,
-      options?.symbol,
-      options?.automationRunId,
-      options?.asOfDate,
-      options?.entryState,
-      options?.limit,
-    ],
+    queryKey: proposalKeys.list({ status: statusFilter, ...filters }),
     queryFn: () =>
       apiRequest<TradeProposalItem[]>(
-        `/automation/proposals?${queryParams.toString()}`,
+        `/automation/proposals?${proposalQueryString(statusFilter, filters)}`,
       ),
-    refetchInterval: 10000,
+    enabled,
+    placeholderData: keepPreviousData,
+    refetchInterval,
+  })
+}
+
+export const HISTORY_PAGE_SIZE = 50
+
+/** Every proposal (newest first) with server-side filters, paged with "load more". */
+export function useProposalHistory(statusFilter: string, filters: Omit<ProposalListFilters, "limit" | "offset">, enabled = true) {
+  return useInfiniteQuery({
+    queryKey: proposalKeys.history({ status: statusFilter, ...filters }),
+    queryFn: ({ pageParam }) =>
+      apiRequest<TradeProposalItem[]>(
+        `/automation/proposals?${proposalQueryString(statusFilter, { ...filters, limit: HISTORY_PAGE_SIZE, offset: pageParam })}`,
+      ),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length === HISTORY_PAGE_SIZE ? allPages.length * HISTORY_PAGE_SIZE : undefined,
+    enabled,
+    placeholderData: keepPreviousData,
+    refetchInterval: 30_000,
   })
 }
 
@@ -643,10 +715,7 @@ export function useTriggerProposalBatch() {
       void queryClient.invalidateQueries({
         queryKey: operationsKeys.proposalBatch(null),
       })
-      void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
-      void queryClient.invalidateQueries({
-        queryKey: ["automation", "proposal-generation-results"],
-      })
+      invalidateProposalData(queryClient)
     },
   })
 }
@@ -666,22 +735,44 @@ export function useTriggerSingleProposal() {
       void queryClient.invalidateQueries({
         queryKey: operationsKeys.proposalBatch(null),
       })
-      void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
-      void queryClient.invalidateQueries({
-        queryKey: ["automation", "proposal-generation-results"],
-      })
+      invalidateProposalData(queryClient)
     },
   })
 }
 
+/** Refresh cadence for an open proposal: live while entry is in play. */
+function detailRefetchInterval(proposal: TradeProposalItem | undefined): number | false {
+  if (!proposal) return false
+  if (proposal.status === "pending_approval") return 15_000
+  if (proposal.status !== "approved") return false
+  const positionOpen = proposal.position !== null && !["closed", "cancelled"].includes(proposal.position.state)
+  return proposal.entry_state === "expired" && !positionOpen ? false : 5_000
+}
+
+/** Find a proposal in any cached list so a detail view can paint before its fetch lands. */
+function cachedListProposal(queryClient: QueryClient, id: string | null): TradeProposalItem | undefined {
+  if (!id) return undefined
+  for (const [, data] of queryClient.getQueriesData<unknown>({ queryKey: proposalKeys.lists })) {
+    const rows = Array.isArray(data)
+      ? (data as TradeProposalItem[])
+      : ((data as { pages?: TradeProposalItem[][] } | undefined)?.pages?.flat() ?? [])
+    const match = rows.find((row) => row.id === id)
+    if (match) return match
+  }
+  return undefined
+}
+
 export function useTradeProposal(id: string | null) {
+  const queryClient = useQueryClient()
   return useQuery<TradeProposalItem>({
-    queryKey: ["trade-proposal", id],
+    queryKey: proposalKeys.detail(id),
     queryFn: () => {
       if (!id) throw new Error("No proposal ID provided")
       return apiRequest<TradeProposalItem>(`/automation/proposals/${id}`)
     },
     enabled: !!id,
+    placeholderData: () => cachedListProposal(queryClient, id),
+    refetchInterval: (query) => detailRefetchInterval(query.state.data),
   })
 }
 
@@ -689,13 +780,15 @@ export function useRecordProposalDecision() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ id, payload }: { id: string; payload: DecisionPayload }) =>
-      apiRequest<TradeProposalItem>(`/automation/proposals/${id}/decision`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["trade-proposals"] })
-      void queryClient.invalidateQueries({ queryKey: ["trade-proposal"] })
+      apiRequest<{ proposal_id: string; status: string; decision_id: string; decided_at: string }>(
+        `/automation/proposals/${id}/decision`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      ),
+    onSettled: () => {
+      invalidateProposalData(queryClient)
       void queryClient.invalidateQueries({ queryKey: ["entry-supervisor-status"] })
     },
   })
@@ -769,33 +862,38 @@ export function useRejectedAttempts(filters?: {
   status?: string | null
   symbol?: string | null
   automationRunId?: string | null
+  includeExisting?: boolean
   limit?: number
+  enabled?: boolean
 }) {
   const queryParams = new URLSearchParams()
   if (filters?.status && filters.status !== "all") queryParams.set("status", filters.status)
   if (filters?.symbol) queryParams.set("symbol", filters.symbol)
   if (filters?.automationRunId) queryParams.set("automation_run_id", filters.automationRunId)
+  if (filters?.includeExisting) queryParams.set("include_existing", "true")
   if (filters?.limit) queryParams.set("limit", String(filters.limit))
 
   const queryString = queryParams.toString() ? `?${queryParams.toString()}` : ""
   return useQuery<ProposalGenerationAttempt[]>({
     queryKey: [
-      "automation",
-      "rejected-attempts",
+      ...proposalKeys.rejected,
       filters?.status,
       filters?.symbol,
       filters?.automationRunId,
+      filters?.includeExisting,
       filters?.limit,
     ],
     queryFn: () =>
       apiRequest<ProposalGenerationAttempt[]>(`/automation/rejected-attempts${queryString}`),
-    refetchInterval: 5000,
+    enabled: filters?.enabled ?? true,
+    placeholderData: keepPreviousData,
+    refetchInterval: 15_000,
   })
 }
 
 export function useProposalAttempt(id: string | null) {
   return useQuery<ProposalGenerationAttempt>({
-    queryKey: ["automation", "proposal-attempt", id],
+    queryKey: proposalKeys.attempt(id),
     queryFn: () => {
       if (!id) throw new Error("No attempt ID provided")
       return apiRequest<ProposalGenerationAttempt>(`/automation/attempts/${id}`)

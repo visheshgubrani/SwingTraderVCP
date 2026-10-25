@@ -10,6 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.services.paper_broker import PaperBrokerError, seed_paper_account
 
+# Note stored on the synthetic decision recorded by paper-only auto-approval
+# (AGENTS.md §5.4). Read APIs use it to tell operator decisions from auto-arm.
+PAPER_AUTO_ARM_DECISION_NOTE = "Auto-armed (paper trading mode)"
+
 RolloutStage = Literal["shadow", "paper", "reduced_live", "full_live"]
 
 STAGE_ORDER: tuple[RolloutStage, ...] = (

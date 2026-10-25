@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import type { CandleData } from "@/features/chart/TradingChart"
 import { apiRequest } from "@/lib/api"
@@ -184,7 +184,8 @@ export function useCancelSync() {
   })
 }
 
-export function useCandles(
+/** Query definition shared by useCandles and neighbour prefetching. */
+export function candlesQueryOptions(
   symbol: string,
   timeframe = "1d",
   limit = 300,
@@ -195,14 +196,24 @@ export function useCandles(
     limit: String(limit),
   })
 
-  return useQuery({
+  return queryOptions({
     queryKey: historicalKeys.candleSeries(symbol, timeframe, limit),
     queryFn: () =>
       apiRequest<CandlesResponse>(
         `/historical/candles?${search.toString()}`,
       ).then(normalizeCandles),
-    enabled: symbol.length > 0,
     staleTime: 5 * 60_000,
     retry: 1,
+  })
+}
+
+export function useCandles(
+  symbol: string,
+  timeframe = "1d",
+  limit = 300,
+) {
+  return useQuery({
+    ...candlesQueryOptions(symbol, timeframe, limit),
+    enabled: symbol.length > 0,
   })
 }

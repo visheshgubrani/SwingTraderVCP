@@ -30,12 +30,12 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
   const currentLineWidth = selectedRecord.style?.lineWidth ?? 2
 
   return (
-    <div className="absolute top-12 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-[#263246] bg-[#101826] px-3 py-1.5 shadow-xl font-mono text-xs text-[#cbd5e1] backdrop-blur-md">
-      <span className="text-[11px] font-semibold text-[#8492a6] uppercase tracking-wider">
+    <div className="absolute top-12 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-border bg-surface px-3 py-1.5 shadow-xl font-mono text-xs text-fg2 backdrop-blur-md">
+      <span className="text-2xs font-semibold text-muted-text uppercase tracking-wider">
         {selectedRecord.type}
       </span>
 
-      <div className="h-4 w-px bg-[#263246]" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Color Palette */}
       <div className="flex items-center gap-1.5">
@@ -45,7 +45,7 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
             aria-label={c.name}
             className={cn(
               "h-4 w-4 rounded-full border border-black/40 transition-transform hover:scale-110",
-              currentColor === c.value && "ring-2 ring-white ring-offset-1 ring-offset-[#101826]",
+              currentColor === c.value && "ring-2 ring-white ring-offset-1 ring-offset-surface",
             )}
             style={{ backgroundColor: c.value }}
             onClick={() => onUpdateStyle({ color: c.value })}
@@ -55,7 +55,7 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
         ))}
       </div>
 
-      <div className="h-4 w-px bg-[#263246]" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Line Width */}
       <div className="flex items-center gap-1">
@@ -63,10 +63,10 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
           <button
             key={w}
             className={cn(
-              "flex h-5 w-5 items-center justify-center rounded border text-[10px] font-bold transition-colors",
+              "flex h-5 w-5 items-center justify-center rounded border text-2xs font-bold transition-colors",
               currentLineWidth === w
-                ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
-                : "border-transparent text-[#8492a6] hover:bg-[#263246] hover:text-[#cbd5e1]",
+                ? "border-accent bg-accent/20 text-accent"
+                : "border-transparent text-muted-text hover:bg-border hover:text-fg2",
             )}
             onClick={() => onUpdateStyle({ lineWidth: w })}
             title={`Line Width ${w}px`}
@@ -77,12 +77,12 @@ export const DrawingPropertiesBar: React.FC<DrawingPropertiesBarProps> = ({
         ))}
       </div>
 
-      <div className="h-4 w-px bg-[#263246]" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Delete Button */}
       <button
         aria-label="Delete drawing"
-        className="inline-flex h-6 w-6 items-center justify-center rounded text-[#8492a6] transition-colors hover:bg-[#ef4444]/20 hover:text-[#ef4444]"
+        className="inline-flex h-6 w-6 items-center justify-center rounded text-muted-text transition-colors hover:bg-ko/20 hover:text-ko"
         onClick={onDelete}
         title="Delete drawing (Delete / Backspace)"
         type="button"

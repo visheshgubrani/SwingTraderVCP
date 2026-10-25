@@ -2,7 +2,9 @@ import { useMemo } from "react"
 
 import { StatusChip, type StatusTone } from "@/components/terminal/bits"
 import { useJournalEntries, useJournalSummary } from "@/features/journal/api"
-import { toneCls } from "@/lib/format"
+import { useTradingAppContext } from "@/features/dashboard/app-context"
+import { fmtDate, fmtMoney, fmtNum, fmtR, toneCls } from "@/lib/format"
+import { shortSymbol } from "@/lib/marketSymbols"
 import { cn } from "@/lib/utils"
 
 export interface ClosedTradeItem {
@@ -35,6 +37,7 @@ function outcomeTone(outcome: string): StatusTone {
 
 /** Tradebook — closed trades reconciled from the journal. */
 export function TradebookView() {
+  const { openChart } = useTradingAppContext()
   const { data: listData, isLoading } = useJournalEntries({
     status: "closed",
     limit: 200,
@@ -94,7 +97,7 @@ export function TradebookView() {
           <div className="netp">
             <span className="lbl">NET REALIZED P&L</span>
             <span className={cn("val", pnlTone)}>
-              {totalPnl >= 0 ? "+" : "-"}₹{Math.abs(totalPnl).toFixed(2)}
+              {fmtMoney(totalPnl, { sign: true })}
             </span>
           </div>
           <span className="note-demo">FROM JOURNAL</span>
@@ -125,26 +128,28 @@ export function TradebookView() {
               </tr>
             )}
             {trades.map((t) => {
-              const isWin = t.realized_pnl >= 0
               const tone = toneCls(t.realized_pnl)
               return (
                 <tr key={t.id}>
                   <td className="l">
-                    {t.closed_at ? new Date(t.closed_at).toLocaleDateString("en-IN") : "—"}
+                    {fmtDate(t.closed_at)}
                   </td>
-                  <td className="l" style={{ fontWeight: 700 }}>{t.symbol}</td>
-                  <td className={cn("l", isWin ? "up" : "down")} style={{ fontWeight: 700 }}>
+                  <td className="l">
+                    <button className="symlink" onClick={() => openChart(t.symbol)} type="button">
+                      {shortSymbol(t.symbol)}
+                    </button>
+                  </td>
+                  <td className="l">
                     {t.side.toUpperCase()}
                   </td>
                   <td>{t.quantity}</td>
-                  <td>{Number.isFinite(t.entry_price) ? `₹${t.entry_price.toFixed(2)}` : "—"}</td>
-                  <td>{Number.isFinite(t.exit_price) ? `₹${t.exit_price.toFixed(2)}` : "—"}</td>
+                  <td>{fmtNum(t.entry_price)}</td>
+                  <td>{fmtNum(t.exit_price)}</td>
                   <td className={tone}>
-                    {t.realized_pnl >= 0 ? "+" : "-"}₹{Math.abs(t.realized_pnl).toFixed(2)}
+                    {fmtMoney(t.realized_pnl, { sign: true })}
                   </td>
                   <td className={tone}>
-                    {t.r_multiple > 0 ? "+" : ""}
-                    {t.r_multiple.toFixed(2)}R
+                    {fmtR(t.r_multiple, { sign: true })}
                   </td>
                   <td>{t.hold_duration_days}d</td>
                   <td className="l">

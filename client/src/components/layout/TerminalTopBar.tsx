@@ -117,7 +117,7 @@ export function TerminalTopBar() {
 
         {/* Fyers auth */}
         <button
-          className="btn btn-ghost !h-[24px] !px-2 !text-[10.5px]"
+          className="btn btn-ghost !h-[24px] !px-2 !text-2xs"
           disabled={authStatus.isLoading || startLogin.isPending}
           onClick={() => startLogin.mutate()}
           title={authStatus.data?.expires_at ? `Token expires ${new Date(authStatus.data.expires_at).toLocaleString("en-IN")}` : "Authenticate with Fyers"}

@@ -64,6 +64,7 @@ from app.services.proposal_generator import (
     proposal_prompt_hash,
 )
 from app.services.execution_engine import publish_tick_subscriptions
+from app.services.p10_rollout import PAPER_AUTO_ARM_DECISION_NOTE
 from app.services.proposal_renderer import render_proposal_charts
 
 
@@ -551,13 +552,14 @@ async def _persist_proposal(
                 INSERT INTO proposal_decisions (
                     proposal_id, decision, expected_proposal_hash, notes
                 ) VALUES (
-                    :proposal_id, 'approved', :expected_hash, 'Auto-armed (paper trading mode)'
+                    :proposal_id, 'approved', :expected_hash, :notes
                 )
                 """
             ),
             {
                 "proposal_id": proposal_id,
                 "expected_hash": proposal["proposal_hash"],
+                "notes": PAPER_AUTO_ARM_DECISION_NOTE,
             },
         )
 

@@ -180,6 +180,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         timeVisible: false,
         secondsVisible: false,
         shiftVisibleRangeOnNewBar: false,
+        // Keep the visible sessions when the pane resizes (sidebar toggle, ticket
+        // panel, first layout) instead of keeping bar spacing and cropping.
+        lockVisibleTimeRangeOnResize: true,
         rightOffset: INITIAL_RIGHT_SLOTS,
       },
       handleScroll: {
@@ -346,7 +349,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         })
       }
     }
-    renderedSymbolRef.current = symbol
+    // Remember the symbol only once its candles are on screen; an empty
+    // in-flight render must not make the real data inherit the old zoom.
+    if (data.length > 0) renderedSymbolRef.current = symbol
   }, [data, symbol])
 
   // Volume visibility — the histogram pane is added/removed on demand without
@@ -607,18 +612,15 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     : null)
 
   return (
-    <div className="relative flex h-full w-full flex-1 flex-col bg-[#070b12] select-none font-mono">
+    <div className="relative flex h-full w-full flex-1 flex-col bg-background select-none font-mono">
       {/* Top Header Bar */}
-      <div className="z-10 flex h-10 shrink-0 items-center justify-between border-b border-[#263246] bg-[#101826] px-3 text-xs">
+      <div className="z-10 flex h-10 shrink-0 items-center justify-between border-b border-border bg-surface px-3 text-xs">
         <div className="flex items-center gap-3">
-          <span className="font-bold text-[#38bdf8] tracking-wide">
-            {symbol}
-          </span>
-          <span className="rounded border border-[#263246] bg-[#070b12] px-2 py-0.5 text-[11px] font-bold text-[#38bdf8]">
+          <span className="rounded border border-border bg-background px-2 py-0.5 text-2xs font-bold text-accent">
             DAILY
           </span>
 
-          <div className="h-4 w-px bg-[#263246]" />
+          <div className="h-4 w-px bg-border" />
 
           {/* Chart Type Toggle Buttons */}
           <div className="flex items-center gap-1">
@@ -627,8 +629,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               className={cn(
                 "inline-flex h-6 w-6 items-center justify-center rounded border transition-colors",
                 chartType === "candlestick"
-                  ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
-                  : "border-transparent text-[#8492a6] hover:border-[#263246] hover:bg-[#070b12] hover:text-[#cbd5e1]",
+                  ? "border-accent bg-accent/20 text-accent"
+                  : "border-transparent text-muted-text hover:border-border hover:bg-background hover:text-fg2",
               )}
               onClick={() => setChartType("candlestick")}
               title="Candlestick Chart"
@@ -641,8 +643,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               className={cn(
                 "inline-flex h-6 w-6 items-center justify-center rounded border transition-colors",
                 chartType === "line"
-                  ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
-                  : "border-transparent text-[#8492a6] hover:border-[#263246] hover:bg-[#070b12] hover:text-[#cbd5e1]",
+                  ? "border-accent bg-accent/20 text-accent"
+                  : "border-transparent text-muted-text hover:border-border hover:bg-background hover:text-fg2",
               )}
               onClick={() => setChartType("line")}
               title="Line Chart"
@@ -652,7 +654,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             </button>
           </div>
 
-          <div className="h-4 w-px bg-[#263246]" />
+          <div className="h-4 w-px bg-border" />
 
           {/* Drawing Tools Palette */}
           <div className="flex items-center gap-1">
@@ -664,8 +666,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 className={cn(
                   "inline-flex h-6.5 w-6.5 items-center justify-center rounded border transition-colors",
                   activeTool === id
-                    ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
-                    : "border-transparent text-[#8492a6] hover:border-[#263246] hover:bg-[#070b12] hover:text-[#cbd5e1]",
+                    ? "border-accent bg-accent/20 text-accent"
+                    : "border-transparent text-muted-text hover:border-border hover:bg-background hover:text-fg2",
                 )}
                 onClick={() => selectTool(id)}
                 title={label}
@@ -676,7 +678,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             ))}
             <button
               aria-label="Clear drawings"
-              className="inline-flex h-6.5 w-6.5 items-center justify-center rounded border border-transparent text-[#8492a6] transition-colors hover:border-[#263246] hover:bg-[#070b12] hover:text-[#ef4444]"
+              className="inline-flex h-6.5 w-6.5 items-center justify-center rounded border border-transparent text-muted-text transition-colors hover:border-border hover:bg-background hover:text-ko"
               onClick={clearDrawings}
               title="Clear all drawings"
               type="button"
@@ -690,10 +692,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         <div className="flex items-center gap-2">
           <button
             className={cn(
-              "inline-flex h-6 px-2 items-center justify-center rounded border text-[11px] font-semibold transition-colors",
+              "inline-flex h-6 px-2 items-center justify-center rounded border text-2xs font-semibold transition-colors",
               showVisionOverlay
-                ? "border-[#eab308] bg-[#eab308]/20 text-[#eab308]"
-                : "border-[#263246] text-[#8492a6] hover:bg-[#070b12] hover:text-[#cbd5e1]",
+                ? "border-wa bg-wa/20 text-wa"
+                : "border-border text-muted-text hover:bg-background hover:text-fg2",
               !visionOverlay && "opacity-40",
             )}
             disabled={!visionOverlay}
@@ -705,10 +707,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </button>
           <button
             className={cn(
-              "inline-flex h-6 px-2 items-center justify-center rounded border text-[11px] font-semibold transition-colors",
+              "inline-flex h-6 px-2 items-center justify-center rounded border text-2xs font-semibold transition-colors",
               isAutoScale
-                ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
-                : "border-[#263246] text-[#8492a6] hover:bg-[#070b12] hover:text-[#cbd5e1]",
+                ? "border-accent bg-accent/20 text-accent"
+                : "border-border text-muted-text hover:bg-background hover:text-fg2",
             )}
             onClick={toggleAutoScale}
             title="Auto Scale"
@@ -718,10 +720,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </button>
           <button
             className={cn(
-              "inline-flex h-6 px-2 items-center justify-center rounded border text-[11px] font-semibold transition-colors",
+              "inline-flex h-6 px-2 items-center justify-center rounded border text-2xs font-semibold transition-colors",
               isLogScale
-                ? "border-[#38bdf8] bg-[#38bdf8]/20 text-[#38bdf8]"
-                : "border-[#263246] text-[#8492a6] hover:bg-[#070b12] hover:text-[#cbd5e1]",
+                ? "border-accent bg-accent/20 text-accent"
+                : "border-border text-muted-text hover:bg-background hover:text-fg2",
             )}
             onClick={toggleLogScale}
             title="Logarithmic Scale"
@@ -731,7 +733,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </button>
           <button
             aria-label="Reset view"
-            className="inline-flex h-6 w-6 items-center justify-center rounded border border-[#263246] text-[#8492a6] transition-colors hover:bg-[#070b12] hover:text-[#cbd5e1]"
+            className="inline-flex h-6 w-6 items-center justify-center rounded border border-border text-muted-text transition-colors hover:bg-background hover:text-fg2"
             onClick={resetZoom}
             title="Reset Zoom (Fit Content)"
             type="button"
@@ -749,38 +751,38 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       />
 
       {/* Interactive OHLCV Legend Overlay (TradingView style) */}
-      <div className="pointer-events-none absolute top-12 left-4 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-[#8492a6]">
-        <span className="font-bold text-[#cbd5e1]">{symbol}</span>
+      <div className="pointer-events-none absolute top-12 left-4 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-2xs text-muted-text">
+        <span className="font-bold text-fg2">{symbol}</span>
         {displayCandle && (
           <>
             <span>
               O:{" "}
-              <strong className="text-[#cbd5e1]">
+              <strong className="text-fg2">
                 {displayCandle.open.toFixed(2)}
               </strong>
             </span>
             <span>
               H:{" "}
-              <strong className="text-[#cbd5e1]">
+              <strong className="text-fg2">
                 {displayCandle.high.toFixed(2)}
               </strong>
             </span>
             <span>
               L:{" "}
-              <strong className="text-[#cbd5e1]">
+              <strong className="text-fg2">
                 {displayCandle.low.toFixed(2)}
               </strong>
             </span>
             <span>
               C:{" "}
-              <strong className="text-[#cbd5e1]">
+              <strong className="text-fg2">
                 {displayCandle.close.toFixed(2)}
               </strong>
             </span>
             <span
               className={cn(
                 "font-semibold",
-                displayCandle.change >= 0 ? "text-[#22c55e]" : "text-[#ef4444]",
+                displayCandle.change >= 0 ? "text-ok" : "text-ko",
               )}
             >
               {displayCandle.change >= 0 ? "+" : ""}
@@ -791,7 +793,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             {displayCandle.volume !== undefined && (
               <span>
                 Vol:{" "}
-                <strong className="text-[#cbd5e1]">
+                <strong className="text-fg2">
                   {(displayCandle.volume / 1000).toFixed(1)}k
                 </strong>
               </span>

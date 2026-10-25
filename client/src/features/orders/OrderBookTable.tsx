@@ -1,4 +1,5 @@
 import { StatusChip, type StatusTone } from "@/components/terminal/bits"
+import { fmtNum, fmtTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
 export interface OrderIntentItem {
@@ -37,12 +38,6 @@ function intentLabel(status: string): string {
   if (s.includes("partial")) return "PARTIAL"
   if (s.includes("acknowledged")) return "ACK"
   return status.toUpperCase()
-}
-
-function fmtTime(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return iso
-  return date.toLocaleTimeString("en-IN", { hour12: false })
 }
 
 /** Order intents — engine execution intents (entries, adds, exits). */
@@ -86,7 +81,7 @@ export const OrderBookTable: React.FC<OrderBookTableProps> = ({ orders, onOpenSy
           <tbody>
             {orders.length === 0 && (
               <tr>
-                <td colSpan={10} className="l" style={{ padding: 26, textAlign: "center" }}>
+                <td colSpan={showMode ? 11 : 10} className="l" style={{ padding: 26, textAlign: "center" }}>
                   No order intents yet — approved entries, adds and exits appear here.
                 </td>
               </tr>
@@ -118,7 +113,7 @@ export const OrderBookTable: React.FC<OrderBookTableProps> = ({ orders, onOpenSy
                   <td>{order.quantity}</td>
                   <td className="l">{order.order_type.toUpperCase()}</td>
                   <td>
-                    {order.limit_price != null ? `₹${Number(order.limit_price).toFixed(2)}` : "MARKET"}
+                    {order.limit_price != null ? fmtNum(Number(order.limit_price)) : "MARKET"}
                   </td>
                   <td className="l">
                     <StatusChip tone={tone}>{intentLabel(order.status)}</StatusChip>

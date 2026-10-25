@@ -93,8 +93,8 @@ describe("JournalView Component", () => {
 
     expect(screen.getAllByText("NSE:TITAN-EQ").length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText("NSE:SBIN-EQ")).toBeInTheDocument()
-    expect(screen.getAllByText("+₹15000.00").length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText("₹-2000.00")).toBeInTheDocument()
+    expect(screen.getAllByText("+₹15,000.00").length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText("-₹2,000.00")).toBeInTheDocument()
     expect(screen.getByText(/\+3\.00R/i)).toBeInTheDocument()
     expect(screen.getAllByText(/confirmed_uptrend/i).length).toBeGreaterThanOrEqual(1)
   })

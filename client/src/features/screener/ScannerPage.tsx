@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import {
   ChevronLeft,
   ChevronRight,
@@ -8,132 +8,219 @@ import {
   LineChart,
   Play,
   Search,
+  SearchX,
   Sparkles,
+  StarIcon,
   XCircle,
 } from "lucide-react"
-import { useNavigate } from "react-router"
 
 import { GradeChip, StatusChip, type StatusTone } from "@/components/terminal/bits"
-import {
-  Alert,
-  AlertAction,
-  AlertDescription,
-  AlertTitle,
-} from "@/components/ui/alert"
+import { EmptyState } from "@/components/terminal/panel"
+import { useToast } from "@/components/terminal/toast"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAuthStatus } from "@/features/auth/api"
+import { useTradingAppContext } from "@/features/dashboard/app-context"
 import { useTriggerSingleProposal } from "@/features/proposals/api"
+import type { ScanResult } from "@/features/screener/api"
 import {
-  defaultScanRunId,
-  productionScanRuns,
-  type ScanResult,
-  type ScanRun,
-  useScanResults,
-  useScanRuns,
-} from "@/features/screener/api"
-import { VcpVisionSheet, VcpVisionStatusBadge } from "@/features/screener/VcpVisionSheet"
+  applyScanListFilters,
+  formatScanRun,
+  resolveSort,
+  SCAN_GRADES,
+  SCAN_LIST_DEFAULTS,
+  SCAN_SORT_DEFAULT_DIR,
+  useScanRunResults,
+  type ScanSortKey,
+} from "@/features/screener/scanList"
 import { useScanWorkflow } from "@/features/screener/useScanWorkflow"
+import { VcpVisionSheet, VcpVisionStatusBadge } from "@/features/screener/VcpVisionSheet"
+import { fmtDate, fmtNum } from "@/lib/format"
+import { useUrlState } from "@/lib/useUrlState"
 import { cn } from "@/lib/utils"
 
-function formatRun(run: ScanRun) {
-  const date = run.as_of_date
-    ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(
-        new Date(`${run.as_of_date}T00:00:00+05:30`),
-      )
-    : new Intl.DateTimeFormat("en-IN", {
-        dateStyle: "medium",
-        timeStyle: "short",
-      }).format(new Date(run.created_at))
-  const version = run.technical_config.pipeline_version
-    ?.replace("vcp_score_", "")
-    .toUpperCase() ?? "LEGACY"
-  return `EOD ${date} · ${version} · ${run.status} · ${run.passing_count} eligible setups`
+const PAGE_SIZES = ["10", "25", "50", "100", "0"] as const
+
+const TREND_CHECKS: [string, string][] = [
+  ["price_above_50_sma", "Close above SMA 50"],
+  ["price_above_150_200_sma", "Close above SMA 150 & 200"],
+  ["sma_50_above_150_200_sma", "SMA 50 above SMA 150 & 200"],
+  ["sma_150_above_200_sma", "SMA 150 above SMA 200"],
+  ["sma_200_trending_up_1m", "SMA 200 rising over 1 month"],
+]
+
+function SortHeader({
+  label,
+  sortKey,
+  active,
+  dir,
+  onSort,
+  className,
+}: {
+  label: string
+  sortKey: ScanSortKey
+  active: boolean
+  dir: "asc" | "desc"
+  onSort: (key: ScanSortKey) => void
+  className?: string
+}) {
+  return (
+    <th
+      aria-sort={active ? (dir === "asc" ? "ascending" : "descending") : "none"}
+      className={cn("srt", active && "on", className)}
+      onClick={() => onSort(sortKey)}
+    >
+      {label}
+      <span className="arr">{active ? (dir === "asc" ? "▲" : "▼") : "↕"}</span>
+    </th>
+  )
+}
+
+function TrendCell({ row }: { row: ScanResult }) {
+  const checks = TREND_CHECKS.filter(([key]) => key in row.core_checks)
+  const passed = checks.filter(([key]) => row.core_checks[key]).length
+  if (checks.length === 0) return <span className="text-muted-text">—</span>
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className="inline-flex cursor-default items-center gap-1" />}>
+        {checks.map(([key]) => (
+          <span
+            aria-hidden="true"
+            className={cn("size-1.5 rounded-full", row.core_checks[key] ? "bg-ok" : "bg-ko")}
+            key={key}
+          />
+        ))}
+        <span className={cn("ml-1", passed === checks.length ? "text-ok" : "text-fg2")}>
+          {passed}/{checks.length}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="flex-col items-start gap-0.5 font-mono" side="bottom">
+        {checks.map(([key, label]) => (
+          <span key={key}>
+            {row.core_checks[key] ? "✓" : "✗"} {label}
+          </span>
+        ))}
+        <span className="mt-1 text-muted-text">
+          SMA 50 {fmtNum(row.sma_50)} · 150 {fmtNum(row.sma_150)} · 200 {fmtNum(row.sma_200)}
+        </span>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function RowAction({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  children: ReactNode
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            aria-label={label}
+            className="ibtn"
+            disabled={disabled}
+            onClick={(event) => {
+              event.stopPropagation()
+              onClick()
+            }}
+            type="button"
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent side="left">{label}</TooltipContent>
+    </Tooltip>
+  )
 }
 
 export function ScannerPage() {
-  const navigate = useNavigate()
+  const { openChart } = useTradingAppContext()
+  const { toast } = useToast()
   const authStatus = useAuthStatus()
-  const scanRuns = useScanRuns()
   const scanWorkflow = useScanWorkflow(authStatus.data)
   const generateProposal = useTriggerSingleProposal()
 
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
-  const [searchQuery, setSearchQuery] = useState("")
-  const [gradeFilter, setGradeFilter] = useState<string>("ALL")
-  const [pageSize, setPageSize] = useState<number>(25)
-  const [currentPage, setCurrentPage] = useState<number>(1)
-  const [selectedResultId, setSelectedResultId] = useState<string | null>(null)
+  const [view, setView] = useUrlState({ ...SCAN_LIST_DEFAULTS, page: "1", size: "25", sel: "" })
   const [visionResult, setVisionResult] = useState<ScanResult | null>(null)
+  const tableRef = useRef<HTMLTableSectionElement>(null)
 
-  const productionRuns = useMemo(
-    () => productionScanRuns(scanRuns.data),
-    [scanRuns.data],
+  const { scanRuns, runs, runId, run: activeRun, resultsQuery } = useScanRunResults(view.run || null)
+  const sort = resolveSort(view.sort, view.dir)
+
+  // A scan started (or re-attached) from here becomes the visible run. The ref
+  // keeps a remount from overriding the run chosen in the URL.
+  const seenScanRunId = useRef(scanWorkflow.scanRunId)
+  useEffect(() => {
+    if (!scanWorkflow.scanRunId || scanWorkflow.scanRunId === seenScanRunId.current) return
+    seenScanRunId.current = scanWorkflow.scanRunId
+    setView({ run: scanWorkflow.scanRunId, page: null, sel: null })
+  }, [scanWorkflow.scanRunId, setView])
+
+  const filtered = useMemo(
+    () => applyScanListFilters(resultsQuery.data ?? [], view),
+    [resultsQuery.data, view],
   )
 
-  const activeRunId =
-    selectedRunId ??
-    defaultScanRunId(productionRuns)
-  const activeRun = productionRuns.find((r) => r.id === activeRunId)
-  const scanResults = useScanResults(activeRunId, activeRun?.status)
-
-  useEffect(() => {
-    if (!scanWorkflow.scanRunId) return
-    setSelectedRunId(scanWorkflow.scanRunId)
-    setCurrentPage(1)
-  }, [scanWorkflow.scanRunId])
-
-  // Filter items based on search and grade
-  const filteredItems = useMemo(() => {
-    const raw = scanResults.data ?? []
-    return raw.filter((item) => {
-      if (gradeFilter !== "ALL" && item.score_grade !== gradeFilter) {
-        return false
-      }
-      if (searchQuery.trim() !== "") {
-        const query = searchQuery.trim().toLowerCase()
-        const matchesSymbol = item.symbol.toLowerCase().includes(query)
-        const matchesName = item.name?.toLowerCase().includes(query)
-        const matchesFyers = item.fyers_symbol.toLowerCase().includes(query)
-        if (!matchesSymbol && !matchesName && !matchesFyers) {
-          return false
-        }
-      }
-      return true
-    })
-  }, [scanResults.data, gradeFilter, searchQuery])
-
-  // Reset pagination when filter/search changes
-  const totalItems = filteredItems.length
+  const pageSize = Number(view.size) || 0
+  const totalItems = filtered.length
   const totalPages = pageSize === 0 ? 1 : Math.max(1, Math.ceil(totalItems / pageSize))
-  const pageIndex = Math.min(currentPage, totalPages)
+  const pageIndex = Math.min(Math.max(1, Number(view.page) || 1), totalPages)
+  const displayed = useMemo(
+    () => (pageSize === 0 ? filtered : filtered.slice((pageIndex - 1) * pageSize, pageIndex * pageSize)),
+    [filtered, pageIndex, pageSize],
+  )
 
-  const displayedItems = useMemo(() => {
-    if (pageSize === 0) return filteredItems
-    const start = (pageIndex - 1) * pageSize
-    return filteredItems.slice(start, start + pageSize)
-  }, [filteredItems, pageIndex, pageSize])
+  const setFilter = (patch: Parameters<typeof setView>[0]) => setView({ ...patch, page: null })
 
-  const handleRunScan = () => {
-    void scanWorkflow.start()
+  const onSort = (key: ScanSortKey) => {
+    const dir = key === sort.key ? (sort.dir === "asc" ? "desc" : "asc") : SCAN_SORT_DEFAULT_DIR[key]
+    setFilter({ sort: key, dir: dir === SCAN_SORT_DEFAULT_DIR[key] ? null : dir })
   }
 
-  const handleSelectStock = (result: ScanResult) => {
-    setSelectedResultId(result.id)
+  const openRowChart = (row: ScanResult) =>
+    openChart(row.fyers_symbol, {
+      list: "scan",
+      run: runId ?? undefined,
+      q: view.q,
+      grade: view.grade === "ALL" ? undefined : view.grade,
+      sort: view.sort === "rank" ? undefined : view.sort,
+      dir: view.dir,
+    })
+
+  const triggerProposal = (row: ScanResult) =>
+    generateProposal.mutate(row.id, {
+      onSuccess: (result) => toast("ok", { title: `Proposal queued · ${row.symbol}`, text: result.message }),
+      onError: (error) =>
+        toast("bad", {
+          title: `Could not queue proposal · ${row.symbol}`,
+          text: error instanceof Error ? error.message : undefined,
+        }),
+    })
+
+  const selectRow = (row: ScanResult) => setView({ sel: row.id })
+
+  // ↑/↓ moves the selection, Enter opens the chart.
+  const onTableKeyDown = (event: KeyboardEvent<HTMLTableSectionElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return
+    event.preventDefault()
+    const current = displayed.findIndex((row) => row.id === view.sel)
+    const nextIndex = event.key === "ArrowDown" ? Math.min(current + 1, displayed.length - 1) : Math.max(current - 1, 0)
+    const next = displayed[nextIndex]
+    if (!next) return
+    selectRow(next)
+    tableRef.current?.querySelector<HTMLElement>(`[data-row-id="${next.id}"]`)?.focus()
   }
 
-  const handleOpenChartInWorkstation = (result: ScanResult) => {
-    // Open the chart workspace on this exact symbol.
-    navigate(`/?symbol=${encodeURIComponent(result.fyers_symbol)}`)
-  }
-
-  const runMetaDate = activeRun
-    ? activeRun.as_of_date
-      ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(
-          new Date(activeRun.as_of_date + "T00:00:00+05:30"),
-        )
-      : ""
-    : ""
   const runTone: StatusTone = !activeRun
     ? "off"
     : activeRun.status === "succeeded"
@@ -143,27 +230,33 @@ export function ScannerPage() {
         : activeRun.status === "cancelled"
           ? "off"
           : "work"
-  const runStateLabel = activeRun
-    ? activeRun.status.toUpperCase()
-    : productionRuns.length > 0
-      ? "IDLE"
-      : "NO RUNS"
+  const runStateLabel = activeRun ? activeRun.status.toUpperCase() : runs.length > 0 ? "IDLE" : "NO RUNS"
+  const scanButtonLabel =
+    scanWorkflow.phase === "syncing"
+      ? "Syncing EOD"
+      : scanWorkflow.phase === "attaching_scan"
+        ? "Opening scan"
+        : scanWorkflow.phase === "queued"
+          ? "Waiting for worker"
+          : scanWorkflow.phase === "scanning"
+            ? "Scoring Nifty 500"
+            : "Run EOD scan"
 
   return (
     <section className="view h-full">
-      {/* VCP Scoreboard header */}
       <div className="vhead">
         <div>
           <h2>
-            VCP Scoreboard <span className="sub">top-ranked contraction setups</span>
+            Scanner <span className="sub">VCP setups ranked by technical score</span>
           </h2>
           <p className="vmeta">
             {activeRun ? (
               <>
-                EOD <b>{runMetaDate}</b> · {runStateLabel} · <b>{activeRun.passing_count}</b> eligible setups
+                EOD <b>{fmtDate(activeRun.as_of_date ?? activeRun.created_at)}</b> · <b>{activeRun.passing_count}</b>{" "}
+                eligible setups
               </>
             ) : scanRuns.data?.length ? (
-              "No completed run yet — run the EOD scanner."
+              "No completed run yet — run the EOD scan."
             ) : (
               "Connect the backend to load scanner runs."
             )}
@@ -171,250 +264,181 @@ export function ScannerPage() {
         </div>
         <div className="vhead-right">
           <StatusChip tone={runTone}>{runStateLabel}</StatusChip>
-          <span className="fsel">
-            <select
-              aria-label="Scanner run history"
-              disabled={productionRuns.length === 0}
-              onChange={(event) => {
-                setSelectedRunId(event.target.value)
-                setCurrentPage(1)
-              }}
-              style={{ minWidth: 300, maxWidth: 340 }}
-              value={activeRunId ?? ""}
-            >
-              {productionRuns.length === 0 && (
-                <option value="">No scanner runs found</option>
-              )}
-              {productionRuns.map((run) => (
-                <option key={run.id} value={run.id}>
-                  {formatRun(run)}
-                </option>
-              ))}
-            </select>
-          </span>
-          <button
-            className="btn btn-primary"
-            disabled={scanWorkflow.isBusy}
-            onClick={handleRunScan}
-            type="button"
+          <select
+            aria-label="Scanner run"
+            className="filter-select min-w-[260px]"
+            disabled={runs.length === 0}
+            onChange={(event) => setView({ run: event.target.value, page: null, sel: null })}
+            value={runId ?? ""}
           >
-            {scanWorkflow.isBusy ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <Play aria-hidden="true" className="btn-ic fill-current" />
-            )}
-            {scanWorkflow.phase === "syncing"
-              ? "SYNCING EOD"
-              : scanWorkflow.phase === "attaching_scan"
-                ? "OPENING SCAN"
-                : scanWorkflow.phase === "queued"
-                  ? "WAITING FOR WORKER"
-                  : scanWorkflow.phase === "scanning"
-                    ? "SCORING NIFTY 500"
-                    : "RUN EOD SCAN"}
+            {runs.length === 0 && <option value="">No scanner runs found</option>}
+            {runs.map((run) => (
+              <option key={run.id} value={run.id}>
+                {formatScanRun(run)}
+              </option>
+            ))}
+          </select>
+          <button className="btn btn-primary" disabled={scanWorkflow.isBusy} onClick={() => void scanWorkflow.start()} type="button">
+            {scanWorkflow.isBusy ? <Spinner data-icon="inline-start" /> : <Play aria-hidden="true" className="btn-ic fill-current" />}
+            {scanButtonLabel}
           </button>
         </div>
       </div>
 
-      {/* Proposal generation feedback strip */}
-      {(generateProposal.isError || generateProposal.isSuccess) && (
-        <div
-          className={cn(
-            "flex-none border-b px-5 py-1.5 font-mono text-[11px]",
-            generateProposal.isError
-              ? "border-ko-soft bg-ko-soft text-ko"
-              : "border-border-soft text-muted-text",
-          )}
-        >
-          {generateProposal.isError
-            ? generateProposal.error instanceof Error
-              ? generateProposal.error.message
-              : "Could not queue proposal generation."
-            : generateProposal.data?.message}
-        </div>
-      )}
-
-      {/* Filter row */}
       <div className="sfilter">
         <label className="fsearch">
           <Search aria-hidden="true" className="ic" />
           <input
-            onChange={(event) => {
-              setSearchQuery(event.target.value)
-              setCurrentPage(1)
-            }}
+            aria-label="Search symbol or name"
+            onChange={(event) => setFilter({ q: event.target.value })}
             placeholder="Search symbol or name"
             type="text"
-            value={searchQuery}
+            value={view.q}
           />
         </label>
-        <span className="fsel">
-          <select
-            aria-label="Filter by grade"
-            onChange={(event) => {
-              setGradeFilter(event.target.value)
-              setCurrentPage(1)
-            }}
-            value={gradeFilter}
-          >
-            <option value="ALL">Grade: Any</option>
-            <option value="A">Grade: A</option>
-            <option value="B">Grade: B</option>
-            <option value="C">Grade: C</option>
-            <option value="D">Grade: D</option>
-          </select>
-        </span>
-        <span className="fsel">
-          <select
-            aria-label="Rows per page"
-            onChange={(event) => {
-              setPageSize(Number(event.target.value))
-              setCurrentPage(1)
-            }}
-            value={pageSize}
-          >
-            <option value={10}>Rows: 10</option>
-            <option value={25}>Rows: 25</option>
-            <option value={50}>Rows: 50</option>
-            <option value={100}>Rows: 100</option>
-            <option value={0}>Rows: All</option>
-          </select>
-        </span>
+        <select
+          aria-label="Filter by grade"
+          className="filter-select"
+          onChange={(event) => setFilter({ grade: event.target.value })}
+          value={view.grade}
+        >
+          {SCAN_GRADES.map((grade) => (
+            <option key={grade} value={grade}>
+              {grade === "ALL" ? "Grade: any" : `Grade: ${grade}`}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Rows per page"
+          className="filter-select"
+          onChange={(event) => setFilter({ size: event.target.value })}
+          value={view.size}
+        >
+          {PAGE_SIZES.map((size) => (
+            <option key={size} value={size}>
+              Rows: {size === "0" ? "all" : size}
+            </option>
+          ))}
+        </select>
+        {(view.q || view.grade !== "ALL") && (
+          <button className="sf-clear" onClick={() => setFilter({ q: null, grade: null })} type="button">
+            Clear filters
+          </button>
+        )}
         <span className="sfmeta">
-          <b>{totalItems}</b> of {activeRun?.passing_count ?? totalItems} shown
+          <b>{totalItems}</b> of {activeRun?.passing_count ?? totalItems} · double-click or Enter opens the chart
         </span>
       </div>
 
-      {/* Table area */}
       <div className="tscroll">
-        {scanResults.isLoading ? (
-          <div className="flex h-full items-center justify-center gap-2 text-muted-foreground">
+        {resultsQuery.isLoading ? (
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-text">
             <Spinner />
             Loading technical setups…
           </div>
-        ) : scanResults.isError ? (
-          <div className="flex h-full items-center justify-center p-6">
-            <Alert className="max-w-xl" variant="destructive">
-              <XCircle aria-hidden="true" />
-              <AlertTitle>Could not load scanner results</AlertTitle>
-              <AlertDescription>
-                {scanResults.error instanceof Error
-                  ? scanResults.error.message
-                  : "The scanner results API is unavailable."}
-              </AlertDescription>
-              <AlertAction>
-                <Button
-                  onClick={() => void scanResults.refetch()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Retry
-                </Button>
-              </AlertAction>
-            </Alert>
-          </div>
+        ) : resultsQuery.isError ? (
+          <EmptyState
+            action={
+              <Button onClick={() => void resultsQuery.refetch()} size="sm" type="button" variant="outline">
+                Retry
+              </Button>
+            }
+            className="h-full"
+            icon={XCircle}
+            title="Could not load scanner results"
+            tone="bad"
+          >
+            {resultsQuery.error instanceof Error ? resultsQuery.error.message : "The scanner results API is unavailable."}
+          </EmptyState>
         ) : activeRun?.status === "failed" ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
-            <XCircle aria-hidden="true" className="text-ko" />
-            <strong>Scanner run failed</strong>
-            <span className="max-w-xl text-muted-foreground">
-              {activeRun.error_message ?? "The worker did not provide an error message."}
-            </span>
-          </div>
+          <EmptyState className="h-full" icon={XCircle} title="Scanner run failed" tone="bad">
+            {activeRun.error_message ?? "The worker did not provide an error message."}
+          </EmptyState>
         ) : activeRun?.status === "queued" || activeRun?.status === "running" ? (
-          <div className="flex h-full items-center justify-center gap-2 text-muted-foreground">
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-text">
             <Spinner />
             {activeRun.status === "queued"
               ? "Personal scan is waiting for the scanner worker…"
               : "Technical scoring is running across the Nifty 500…"}
           </div>
-        ) : displayedItems.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-muted-foreground">
-            <Search aria-hidden="true" className="size-8 stroke-1 text-muted-text/50" />
-            <strong>No matching setups found</strong>
-            <span>
-              {searchQuery || gradeFilter !== "ALL"
-                ? "Try clearing your search or grade filters."
-                : "Run an EOD scan to generate setups across the Nifty 500 universe."}
-            </span>
-          </div>
+        ) : displayed.length === 0 ? (
+          <EmptyState className="h-full" icon={SearchX} title="No matching setups">
+            {view.q || view.grade !== "ALL"
+              ? "Try clearing the search or grade filter."
+              : "Run an EOD scan to generate setups across the Nifty 500."}
+          </EmptyState>
         ) : (
-          <table className="tbl tbl-scan">
+          <table className="tbl">
             <thead>
               <tr>
-                <th className="l" style={{ minWidth: 48 }}>RANK</th>
-                <th style={{ minWidth: 60 }}>SCORE</th>
-                <th className="l" style={{ minWidth: 52 }}>GRADE</th>
-                <th className="l" style={{ minWidth: 128 }}>SYMBOL</th>
-                <th style={{ minWidth: 80 }}>CLOSE</th>
-                <th style={{ minWidth: 80 }}>SMA 50</th>
-                <th style={{ minWidth: 80 }}>SMA 150</th>
-                <th style={{ minWidth: 80 }}>SMA 200</th>
-                <th style={{ minWidth: 84 }}>BELOW 52W</th>
-                <th style={{ minWidth: 56 }}>RS</th>
-                <th className="l" style={{ minWidth: 74 }}>SETUP</th>
-                <th className="l" style={{ minWidth: 100 }}>FUNDA</th>
-                <th className="l" style={{ minWidth: 96 }}>VISION</th>
-                <th className="l" style={{ minWidth: 240 }}>ACTIONS</th>
+                <SortHeader active={sort.key === "rank"} className="l" dir={sort.dir} label="RANK" onSort={onSort} sortKey="rank" />
+                <th className="l">SYMBOL</th>
+                <SortHeader active={sort.key === "score"} dir={sort.dir} label="SCORE" onSort={onSort} sortKey="score" />
+                <th>CLOSE</th>
+                <th className="l">TREND</th>
+                <SortHeader active={sort.key === "off52w"} dir={sort.dir} label="OFF HIGH" onSort={onSort} sortKey="off52w" />
+                <SortHeader active={sort.key === "rs"} dir={sort.dir} label="RS" onSort={onSort} sortKey="rs" />
+                <SortHeader active={sort.key === "adtv"} dir={sort.dir} label="ADTV ₹CR" onSort={onSort} sortKey="adtv" />
+                <th className="l">SHORTLIST</th>
+                <th className="l">VISION</th>
+                <th>ACTIONS</th>
               </tr>
             </thead>
-            <tbody>
-              {displayedItems.map((row) => {
-                const selected = selectedResultId === row.id
+            <tbody onKeyDown={onTableKeyDown} ref={tableRef}>
+              {displayed.map((row) => {
+                const selected = view.sel === row.id
+                const proposalPending = generateProposal.isPending && generateProposal.variables === row.id
                 return (
                   <tr
-                    className={cn("cursor-pointer", selected && "bg-accent-soft")}
+                    aria-selected={selected}
+                    className={cn("cursor-pointer outline-none focus-visible:bg-hl", selected && "!bg-accent-soft")}
+                    data-row-id={row.id}
                     key={row.id}
-                    onClick={() => handleSelectStock(row)}
+                    onClick={() => selectRow(row)}
+                    onDoubleClick={() => openRowChart(row)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") openRowChart(row)
+                    }}
+                    tabIndex={0}
                   >
                     <td className="l rank">#{row.rank}</td>
-                    <td style={{ fontWeight: 700, color: "var(--fg)" }}>
-                      {row.technical_score?.toFixed(2) ?? "—"}
-                    </td>
                     <td className="l">
-                      {row.score_grade ? (
-                        <GradeChip grade={row.score_grade} />
-                      ) : (
-                        <span className="sc-chip off"><i />LEGACY</span>
-                      )}
-                    </td>
-                    <td className="l">
-                      <strong style={{ color: "var(--fg)", fontSize: 12 }}>
-                        {row.symbol}
-                      </strong>
-                      <span
-                        className="block"
-                        style={{
-                          color: "var(--muted-text)",
-                          fontSize: 10,
-                          fontFamily: "var(--font-sans)",
-                          maxWidth: 190,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
+                      <button
+                        className="symlink"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          openRowChart(row)
                         }}
+                        type="button"
                       >
+                        {row.symbol}
+                      </button>
+                      <span className="block max-w-[200px] truncate font-sans text-2xs text-muted-text">
                         {row.name ?? row.fyers_symbol}
                       </span>
                     </td>
-                    <td>₹{row.close_price.toFixed(2)}</td>
-                    <td>₹{row.sma_50.toFixed(2)}</td>
-                    <td>₹{(row.sma_150 ?? 0).toFixed(2)}</td>
-                    <td>₹{row.sma_200.toFixed(2)}</td>
-                    <td>{(row.pct_from_52w_high * 100).toFixed(2)}%</td>
-                    <td style={{ fontWeight: 700 }}>{row.rs_rating}</td>
-                    <td className="l">
-                      <span className={cn("sc-chip", row.technical_score === null ? "off" : "work")}>
-                        <i />
-                        {row.technical_score === null ? "Legacy" : "Scored"}
+                    <td>
+                      <span className="inline-flex items-center gap-1.5">
+                        <b className="text-foreground">{row.technical_score?.toFixed(1) ?? "—"}</b>
+                        {row.score_grade ? <GradeChip grade={row.score_grade} /> : <span className="gchip g-D">LEGACY</span>}
                       </span>
                     </td>
+                    <td>{fmtNum(row.close_price)}</td>
                     <td className="l">
-                      <span className={cn("sc-chip", row.fundamental_selected ? "fill" : "off")}>
-                        <i />
-                        {row.fundamental_selected ? "Top 20" : "Technical only"}
-                      </span>
+                      <TrendCell row={row} />
+                    </td>
+                    <td>{Number.isFinite(row.pct_from_52w_high) ? `${Math.abs(row.pct_from_52w_high * 100).toFixed(1)}%` : "—"}</td>
+                    <td className="font-semibold text-foreground">{row.rs_rating}</td>
+                    <td>{fmtNum(row.adtv_crore, 1)}</td>
+                    <td className="l">
+                      {row.fundamental_selected ? (
+                        <span className="inline-flex items-center gap-1 text-wa">
+                          <StarIcon aria-hidden="true" className="size-3 fill-current" />
+                          Top 20{row.fundamental_selection_rank ? ` · #${row.fundamental_selection_rank}` : ""}
+                        </span>
+                      ) : (
+                        <span className="text-muted-text">—</span>
+                      )}
                     </td>
                     <td className="l">
                       <VcpVisionStatusBadge
@@ -423,57 +447,32 @@ export function ScannerPage() {
                         status={row.vcp_vision?.status ?? null}
                       />
                     </td>
-                    <td className="l">
-                      <span className="act">
-                        <button
-                          aria-label={row.vcp_vision ? "Review VCP vision analysis" : "Analyze VCP with vision"}
-                          className="btn btn-line plan"
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            setVisionResult(row)
-                          }}
-                          type="button"
+                    <td>
+                      <span className="inline-flex items-center gap-0.5">
+                        <RowAction label="Open chart" onClick={() => openRowChart(row)}>
+                          <LineChart aria-hidden="true" className="size-3.5" />
+                        </RowAction>
+                        <RowAction
+                          label={row.vcp_vision ? "Review VCP vision analysis" : "Analyze VCP with vision"}
+                          onClick={() => setVisionResult(row)}
                         >
-                          <FlaskConical aria-hidden="true" className="btn-ic" />
-                          {row.vcp_vision ? "Review VCP" : "Analyze VCP"}
-                        </button>
-                        <button
-                          aria-label="Generate a proposal for this stock"
-                          className="btn btn-line plan"
-                          disabled={
-                            !row.fundamental_selected ||
-                            (generateProposal.isPending && generateProposal.variables === row.id)
-                          }
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            generateProposal.mutate(row.id)
-                          }}
-                          title={
+                          <FlaskConical aria-hidden="true" className="size-3.5" />
+                        </RowAction>
+                        <RowAction
+                          disabled={!row.fundamental_selected || proposalPending}
+                          label={
                             row.fundamental_selected
-                              ? "Generate a proposal for this stock only"
-                              : "Only the shortlist (Top 20) can generate a proposal"
+                              ? "Generate a proposal for this stock"
+                              : "Only the fundamental shortlist (Top 20) can generate a proposal"
                           }
-                          type="button"
+                          onClick={() => triggerProposal(row)}
                         >
-                          {generateProposal.isPending && generateProposal.variables === row.id ? (
-                            <Spinner data-icon="inline-start" />
+                          {proposalPending ? (
+                            <Spinner className="size-3.5" />
                           ) : (
-                            <Sparkles aria-hidden="true" className="btn-ic" />
+                            <Sparkles aria-hidden="true" className={cn("size-3.5", !row.fundamental_selected && "opacity-30")} />
                           )}
-                          Proposal
-                        </button>
-                        <button
-                          aria-label="Open chart for this symbol"
-                          className="btn btn-line plan"
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            handleOpenChartInWorkstation(row)
-                          }}
-                          type="button"
-                        >
-                          <LineChart aria-hidden="true" className="btn-ic" />
-                          Chart
-                        </button>
+                        </RowAction>
                       </span>
                     </td>
                   </tr>
@@ -484,49 +483,34 @@ export function ScannerPage() {
         )}
       </div>
 
-      {/* Pagination footer */}
-      <div className="flex flex-none flex-wrap items-center justify-between gap-3 border-t border-border bg-surface px-4 py-1.5 font-mono text-[11px] text-muted-text">
+      <div className="flex flex-none flex-wrap items-center justify-between gap-3 border-t border-border bg-surface px-4 py-1.5 font-mono text-2xs text-muted-text">
         <span>
-          Showing{" "}
-          <b style={{ color: "var(--fg-2)" }}>
-            {totalItems === 0 ? 0 : (pageIndex - 1) * (pageSize || totalItems) + 1}
-          </b>{" "}
-          to{" "}
-          <b style={{ color: "var(--fg-2)" }}>
-            {pageSize === 0 ? totalItems : Math.min(pageIndex * pageSize, totalItems)}
-          </b>{" "}
-          of <b style={{ color: "var(--fg-2)" }}>{totalItems}</b> filtered setups
+          Showing <b className="text-fg2">{totalItems === 0 ? 0 : (pageIndex - 1) * (pageSize || totalItems) + 1}</b>–
+          <b className="text-fg2">{pageSize === 0 ? totalItems : Math.min(pageIndex * pageSize, totalItems)}</b> of{" "}
+          <b className="text-fg2">{totalItems}</b>
         </span>
         {pageSize > 0 && totalPages > 1 && (
           <span className="flex items-center gap-1.5">
-            <Button
-              aria-label="First page"
-              disabled={pageIndex <= 1}
-              onClick={() => setCurrentPage(1)}
-              size="icon-xs"
-              type="button"
-              variant="outline"
-            >
+            <Button aria-label="First page" disabled={pageIndex <= 1} onClick={() => setView({ page: null })} size="icon-xs" type="button" variant="outline">
               <ChevronsLeft className="size-3.5" />
             </Button>
             <Button
               aria-label="Previous page"
               disabled={pageIndex <= 1}
-              onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+              onClick={() => setView({ page: String(pageIndex - 1) })}
               size="icon-xs"
               type="button"
               variant="outline"
             >
               <ChevronLeft className="size-3.5" />
             </Button>
-            <span className="px-2 text-muted-text">
-              Page <b style={{ color: "var(--fg-2)" }}>{pageIndex}</b> of{" "}
-              <b style={{ color: "var(--fg-2)" }}>{totalPages}</b>
+            <span className="px-2">
+              Page <b className="text-fg2">{pageIndex}</b> of <b className="text-fg2">{totalPages}</b>
             </span>
             <Button
               aria-label="Next page"
               disabled={pageIndex >= totalPages}
-              onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+              onClick={() => setView({ page: String(pageIndex + 1) })}
               size="icon-xs"
               type="button"
               variant="outline"
@@ -536,7 +520,7 @@ export function ScannerPage() {
             <Button
               aria-label="Last page"
               disabled={pageIndex >= totalPages}
-              onClick={() => setCurrentPage(totalPages)}
+              onClick={() => setView({ page: String(totalPages) })}
               size="icon-xs"
               type="button"
               variant="outline"

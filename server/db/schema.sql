@@ -1101,14 +1101,14 @@ CREATE TABLE vcp_visual_analyses (
     input_hash text,
     result jsonb,
     ai_verdict text CHECK (
-        ai_verdict IS NULL OR ai_verdict IN ('valid', 'invalid', 'uncertain')
+        ai_verdict IS NULL OR ai_verdict IN ('valid', 'forming', 'invalid', 'uncertain')
     ),
     error_code text,
     error_message text,
     usage jsonb NOT NULL DEFAULT '{}'::jsonb,
     cost numeric(18, 8) NOT NULL DEFAULT 0 CHECK (cost >= 0),
     human_verdict text CHECK (
-        human_verdict IS NULL OR human_verdict IN ('valid', 'invalid', 'uncertain')
+        human_verdict IS NULL OR human_verdict IN ('valid', 'forming', 'invalid', 'uncertain')
     ),
     human_note text,
     human_reviewed_at timestamptz,

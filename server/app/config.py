@@ -277,11 +277,11 @@ class Settings(BaseSettings):
     vcp_vision_reasoning_effort: Literal[
         "low", "medium", "high", "xhigh"
     ] = "medium"
-    vcp_vision_prompt_version: Literal["vcp_visual_validator_v1"] = (
-        "vcp_visual_validator_v1"
+    vcp_vision_prompt_version: Literal["vcp_visual_validator_v2"] = (
+        "vcp_visual_validator_v2"
     )
-    vcp_vision_schema_version: Literal["vcp_visual_validator_result_v1"] = (
-        "vcp_visual_validator_result_v1"
+    vcp_vision_schema_version: Literal["vcp_visual_validator_result_v2"] = (
+        "vcp_visual_validator_result_v2"
     )
     vcp_vision_renderer_version: Literal[
         "lightweight_charts_v5_log_1280x720_v1"

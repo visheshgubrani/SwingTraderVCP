@@ -92,28 +92,30 @@ class GeminiVcpProposalOutput(BaseModel):
     """Strict JSON schema for serial Gemini VCP pattern audit.
 
     Contains NO pivot, stop, target, entry, template, or free contraction_count.
-    Confidence is display/template-scorer input only.
+    Confidence is display/template-scorer input only. Field order is the
+    emitted JSON order: evidence and candidate audit come before the
+    classification so the model decides from what it has written.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    classification: ClassificationType
-    forming_state: FormingStateType | None = None
-    progressive_tightening: YesNoType
-    volume_dry_up: VolumeDryUpType
-    base_quality: GeminiBaseQuality
-    pattern_type: PatternType
-    primary_reason: PrimaryReasonType
+    evidence_summary: str = Field(min_length=1, max_length=600)
+    red_flags: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        max_length=8,
+    )
     candidate_assessments: list[GeminiCandidateAssessment] = Field(
         min_length=1,
         max_length=6,
     )
     extra_windows: list[GeminiExtraWindow] = Field(default_factory=list, max_length=6)
+    base_quality: GeminiBaseQuality
+    progressive_tightening: YesNoType
+    volume_dry_up: VolumeDryUpType
+    pattern_type: PatternType
+    primary_reason: PrimaryReasonType
+    classification: ClassificationType
+    forming_state: FormingStateType | None = None
     confidence: int = Field(ge=0, le=100)
-    red_flags: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
-        max_length=8,
-    )
-    evidence_summary: str = Field(min_length=1, max_length=600)
 
     @model_validator(mode="after")
     def validate_consistency(self) -> "GeminiVcpProposalOutput":

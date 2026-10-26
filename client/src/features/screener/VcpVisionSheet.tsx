@@ -48,6 +48,7 @@ import { cn } from "@/lib/utils"
 function verdictClass(verdict: VcpVisionVerdict) {
   if (verdict === "valid") return "bg-ok/15 text-ok border-ok/40"
   if (verdict === "invalid") return "bg-ko/15 text-ko border-ko/40"
+  if (verdict === "forming") return "bg-accent/15 text-accent border-accent/40"
   return "bg-wa/15 text-wa border-wa/40"
 }
 
@@ -581,7 +582,7 @@ export function VcpVisionSheet({
                   Human review
                 </span>
                 <div className="flex items-center gap-2">
-                  {(["valid", "invalid", "uncertain"] as const).map((option) => (
+                  {(["valid", "forming", "invalid", "uncertain"] as const).map((option) => (
                     <button
                       className={cn(
                         "h-7 rounded border px-3 text-2xs font-semibold transition-colors",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export deployed P10 proposal evidence for offline evaluation (read-only).
 
-Pulls every prompt-v5/v6 proposal attempt (metadata, structured output,
+Pulls every P10 proposal attempt (all prompt versions) (metadata, structured output,
 error details, both chart PNGs) plus the exact 252-session frozen candle
 windows those attempts used, from the deployed Postgres.
 
@@ -70,7 +70,7 @@ SELECT encode(convert_to(json_build_object(
 FROM proposal_attempts pa
 JOIN automation_runs ar ON ar.id = pa.automation_run_id
 JOIN scan_runs sr ON sr.id = ar.scan_run_id
-WHERE pa.prompt_version IN ('p10_vcp_proposal_v5', 'p10_vcp_proposal_v6')
+WHERE pa.prompt_version LIKE 'p10_vcp_proposal_v%'
   AND pa.status <> 'running'
 ORDER BY pa.started_at, pa.id
 """
@@ -81,7 +81,7 @@ WITH pair AS (
   FROM proposal_attempts pa
   JOIN automation_runs ar ON ar.id = pa.automation_run_id
   JOIN scan_runs sr ON sr.id = ar.scan_run_id
-  WHERE pa.prompt_version IN ('p10_vcp_proposal_v5', 'p10_vcp_proposal_v6')
+  WHERE pa.prompt_version LIKE 'p10_vcp_proposal_v%'
     AND pa.status <> 'running'
 )
 SELECT encode(convert_to(json_build_object(

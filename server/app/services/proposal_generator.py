@@ -56,13 +56,14 @@ from app.services.openrouter_content import (
 )
 from app.services.openrouter_schema import gemini_compatible_json_schema
 from app.services.proposal_renderer import RenderedProposalCharts
+from app.services.vcp_rubric import VCP_RUBRIC
 
 
 logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
-PROMPT_VERSION = "p10_vcp_proposal_v8"
-SCHEMA_VERSION = "gemini_vcp_proposal_output_v8"
-GEOMETRY_VERSION = "p10_python_owned_levels_v7"
+PROMPT_VERSION = "p10_vcp_proposal_v9"
+SCHEMA_VERSION = "gemini_vcp_proposal_output_v9"
+GEOMETRY_VERSION = "p10_python_owned_levels_v8"
 ENTRY_TRIGGER_POLICY_VERSION = BALANCED_BREAKOUT_POLICY_V3
 PROPOSAL_INVALID_PROVIDER_JSON = "proposal_invalid_provider_json"
 PROPOSAL_STRUCTURAL_FORMING = "proposal_structural_forming"
@@ -123,41 +124,46 @@ class ProposalProviderError(RuntimeError):
         self.details = details or {}
 
 
-GEMINI_PROPOSAL_SYSTEM_PROMPT = """You are a strict technical analyst applying Mark Minervini's Volatility Contraction Pattern (VCP) methodology to Indian equities.
+GEMINI_PROPOSAL_SYSTEM_PROMPT = f"""You are a strict technical analyst applying Mark Minervini's Volatility Contraction Pattern (VCP) methodology to Indian equities.
 
-You audit ONE standardized 126-session stock chart (log price, volume pane, EMA21/SMA50/150/200) together with short deterministic text: a numbered list of Python swing-detector hypotheses and Python-computed structure facts. Every number in that text is computed from real OHLCV by Python — never re-estimate depths, dates, session counts, or volume ratios from pixels.
+You audit ONE standardized 126-session daily chart (log price, volume pane, EMA21/SMA50/150/200; the symbol is withheld) together with short deterministic text: numbered Python swing-detector hypotheses, Python-computed structure facts, and base context computed from a 252-session freeze. Every number in that text is computed from real OHLCV by Python — never re-estimate depths, dates, session counts, or volume ratios from pixels.
+
+{VCP_RUBRIC}
+
+How to use the Python facts. Each fact is exact within its stated scope, and each check names its scope (for example "final pullback only" or "pivot day only"). Do not contradict a fact inside its scope — for example, do not claim a lower low when the undercut check passed. A passed check says nothing outside its scope: earlier distribution or climax days, overhead supply between the pivot and the base high, a V-shaped recovery, and where the pivot sits in the base are yours to judge from the chart and the base-context facts. A FAILED check is already decided; your answer must reflect it.
 
 The numbered candidates are algorithmic hypotheses, NOT proven contractions. Your job is the qualitative audit an algorithm cannot do: judge whether the visual pattern forms a completed, tradeable VCP and which hypotheses are real contractions.
 
 1. Classification. Classify on the evidence; no class is the default.
-   Hard disqualifiers — ANY one means not_vcp (primary_reason names it):
-   - latest pullback low undercuts the prior pullback floor (lower lows), or price closed through the final pullback low / the base is breaking down with closes sagging near the daily low;
-   - the final pullback printed expanding volume (distribution);
-   - the pivot day printed a volume climax that reversed;
-   - no Stage 2 uptrend context (the move is a downtrend bounce or the stock is below its key averages);
-   - price action is wide, choppy, or swinging in widening ranges.
-   Charts reach you only after Python's undercut, tightening, distribution and climax checks; their statuses are in the facts. Do not assert a disqualifier from pixels that a Python fact says is absent. Do choose not_vcp for a visible disqualifier the facts do not capture.
-   Choose forming (forming_state=developing) when the structure is intact but not yet complete: base younger than about 15 completed sessions (use the stated base age), only ONE genuine contraction so far, or the last close is still in the lower part of the final contraction / searching for a floor. Choose forming_state=breaking_down when a developing base is now undercutting or failing.
-   Two genuine contractions are enough. Choose valid when: at least two genuine, discrete contractions; a base of at least about 15 completed sessions; lows rising or equal; each significant contraction shallower than the one before; a quiet final pullback; and price in the upper part of the final contraction, coiling toward its pivot. Being below the pivot is expected before a breakout and is never by itself a reason for forming.
+   not_vcp when ANY of these holds (primary_reason names the main one):
+   - lower lows: the latest pullback low undercuts the prior pullback floor, or the base is breaking down with closes sagging near the daily low (lower_low_or_breakdown);
+   - heavy-volume distribution inside the base that later price action has not absorbed: wide high-volume down days, a climax reversal at the base high, expanding volume in the final pullback, or a pivot-day climax that reversed (distribution_or_climax);
+   - no Stage 2 context: a downtrend bounce, or price below its key averages (not_stage2);
+   - successive pullbacks of nearly identical depth (flat_or_high_tight_shelf or not_progressively_tightening);
+   - wide, choppy, or widening swings (choppy_or_other).
+   forming (forming_state=developing, primary_reason=immature_base) when the structure is intact but not complete: a base younger than about 15 completed sessions (use the stated base age); only ONE genuine contraction so far; the pivot in the lower or middle part of the base with prior highs stacked above it (incomplete right side); a V-shaped recovery off the base low with no contraction near the highs yet; or the last close still in the lower part of the final contraction, searching for a floor. Use forming_state=breaking_down when a developing base is now undercutting or failing.
+   valid only when ALL of these hold: Stage 2 context; at least two genuine contractions from flat-to-descending highs, each significant one shallower than the one before, with lows holding or rising; a base of at least about 15 completed sessions; the final contraction in the upper part of the base, near the base high; a quiet final pullback; no unabsorbed heavy distribution in the base; and price in the upper part of the final contraction, coiling toward its pivot.
 
 2. Pattern shape (pattern_type and primary_reason). A high-tight shelf or flat base (successive pullbacks of nearly identical depth, price oscillating between a flat ceiling and floor) is NOT a valid VCP here. Name it pattern_type=high_tight_shelf or flat_base with primary_reason=flat_or_high_tight_shelf or not_progressively_tightening, and classify not_vcp or forming according to the rules above. A completed contraction sequence is pattern_type=vcp with primary_reason=mature_vcp and classification=valid.
 
 3. Candidate audit. Python already folded raw zigzag swings into the numbered candidates. For every numbered candidate return exactly one assessment row, judging each on its own:
-   - confirm: a genuine discrete contraction pullback;
+   - confirm: a genuine contraction — a pullback from a swing high at or below the previous contraction's high;
    - merge: two candidates describe the same contraction; merge_with_index names the sibling index;
-   - reject: the dip is noise inside a larger move, a single-day flush, or not part of the base.
+   - reject: noise inside a larger move, a single-day flush, a dip inside a rally whose highs keep rising, or not part of the base.
 
 4. extra_windows: only add a real contraction you can see on the chart that the candidates missed (date ranges only, no prices).
 
-5. Volume: read the volume pane AND the deterministic facts together. volume_dry_up=clearly only when pullback volume is visibly quiet against recent averages; somewhat when partially dried; not_really when the last pullback prints heavy volume.
+5. Volume: read the volume pane AND the deterministic facts together. volume_dry_up=clearly only when pullback volume is visibly quiet against recent averages; somewhat when partially dried; not_really when the last pullback prints heavy volume. climax_or_gap_violation=yes for an unabsorbed climax, a heavy-volume reversal or breakdown day inside the base, or a gap that broke the base.
 
-6. Consistency (mandatory): your answers must agree with each other. classification=valid is impossible when pattern_type is not vcp, primary_reason is not mature_vcp, progressive_tightening=no, volume_dry_up=not_really, stage2_context=no, or climax_or_gap_violation=yes. If the chart supports valid, every field must say so; otherwise classify forming/not_vcp instead of contradicting yourself.
+6. Answer order: write evidence_summary, red_flags and the candidate assessments first, from the chart and the facts; decide classification last, from that evidence.
 
-7. Confidence: report 0-100 for how clearly the chart supports the class you chose. It is a display field and never selects the class.
+7. Consistency (mandatory): your answers must agree with each other. classification=valid is impossible when pattern_type is not vcp, primary_reason is not mature_vcp, progressive_tightening=no, volume_dry_up=not_really, stage2_context=no, or climax_or_gap_violation=yes. If the chart supports valid, every field must say so; otherwise classify forming/not_vcp instead of contradicting yourself.
+
+8. Confidence: report 0-100 for how clearly the chart supports the class you chose — 90+ textbook, 70-89 clear with minor flaws, 50-69 arguable, below 50 weak. It is a display field and never selects the class.
 
 Length: evidence_summary at most 500 characters; each candidate note at most 160 characters; at most 6 red_flags.
 
-Evidence discipline: your evidence_summary and red_flags must be specific to this chart's right edge, contractions, and volume facts. Do not reuse stock phrases.
+Evidence discipline: your evidence_summary and red_flags must be specific to this chart — its base position, contractions, right edge, and volume facts (cite dates). Do not reuse stock phrases.
 
 Do NOT output a pivot, stop, target, entry, quantity, risk, template, absolute price level, or a free contraction_count — Python derives counts from your confirm/merge/reject/extra actions. Return only the strict JSON schema.
 """
@@ -204,6 +210,10 @@ _STRUCTURAL_CODE_PHRASES = {
     ),
     "structural_base_immature": "the base is immature (younger than the maturity floor)",
     "structural_single_contraction": "only a single pullback has formed so far",
+    "structural_pivot_low_in_base": (
+        "the pivot sits low in the base, well below the base high "
+        "(incomplete right side under overhead supply)"
+    ),
 }
 
 
@@ -677,9 +687,10 @@ def _proposal_user_text(*, tick_size: Decimal, candidate_summary: str) -> str:
         f"Instrument tick size is {tick_size} (for your orientation only — do not emit prices). "
         "IMAGE 1 is the 126-session window (log price, volume, EMA21/SMA50/150/200). "
         "Below are the numbered Python swing-detector hypotheses (algorithmic "
-        "hypotheses, not proven contractions) and the deterministic structure "
-        "facts computed from the same frozen OHLCV. Treat the facts as "
-        "authoritative; they cannot be argued with pixels.\n"
+        "hypotheses, not proven contractions), the deterministic structure "
+        "facts, and the base context, all computed from the same frozen OHLCV. "
+        "Each fact is exact within its stated scope; anything outside those "
+        "scopes is yours to judge from the chart.\n"
         f"{candidate_summary}\n"
         "Confirm, merge, or reject each numbered candidate. Add extra_windows only "
         "for contractions the algorithm missed. Return classification, pattern_type, "

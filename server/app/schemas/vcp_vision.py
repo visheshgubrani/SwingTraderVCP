@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 VcpVisionAnalysisStatus = Literal[
     "awaiting_capture", "queued", "running", "succeeded", "failed"
 ]
-VcpVisionVerdict = Literal["valid", "invalid", "uncertain"]
+VcpVisionVerdict = Literal["valid", "forming", "invalid", "uncertain"]
 
 
 class VcpVisionStatusResponse(BaseModel):

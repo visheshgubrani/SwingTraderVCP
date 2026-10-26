@@ -751,7 +751,8 @@ def format_candidate_summary(
     pb = facts.final_pullback
     if pb is not None:
         seg_txt = (
-            f"Final pullback (distribution check: "
+            f"Final pullback only, {pb.segment_start_date}→{pb.segment_end_date} "
+            f"(final-pullback volume check: "
             f"{status('structural_final_pullback_distribution')}): {pb.segment_days} session(s), "
             f"{pb.down_days} down day(s)"
         )
@@ -762,7 +763,10 @@ def format_candidate_summary(
         lines.append(seg_txt + ".")
     pd = facts.pivot_day
     if pd is not None:
-        pivot_txt = f"Final pivot day (climax check: {status('structural_pivot_climax_fade')}):"
+        pivot_txt = (
+            f"Final pivot day only, {pd.pivot_date} "
+            f"(pivot-day climax check: {status('structural_pivot_climax_fade')}):"
+        )
         if pd.vol_ratio is not None:
             pivot_txt += f" volume {pd.vol_ratio:.2f}x its prior-20-day ADV"
         if pd.upper_wick_frac is not None:
@@ -771,7 +775,83 @@ def format_candidate_summary(
             held = "broke below" if pd.retention_failed else "held inside or above"
             pivot_txt += f"; the next session {held} the pivot-day range"
         lines.append(pivot_txt + ".")
+    lines.extend(_base_context_lines(facts))
     return "\n".join(lines)
+
+
+def _base_context_lines(facts: "StructuralFacts") -> list[str]:
+    """Base-context block for the Gemini summary (percentages/dates only)."""
+    bc = facts.base_context
+    if bc is None or bc.base_high_date is None:
+        return []
+    lines = ["— Base context (Python-computed from the frozen 252-session window):"]
+    if bc.prior_advance_pct is not None:
+        lines.append(
+            f"Prior advance into the base high ({bc.base_high_date}): "
+            f"{bc.prior_advance_pct:+.1f}% over {bc.prior_advance_sessions} sessions."
+        )
+    if bc.base_depth_pct is not None:
+        lines.append(
+            f"Base depth: the deepest low ({bc.deepest_low_date}) is "
+            f"{bc.base_depth_pct:.1f}% below the base high, {bc.sessions_high_to_low} "
+            f"sessions after it; {bc.sessions_since_low} sessions since that low."
+        )
+    if bc.pivot_position_in_base is not None and bc.pivot_vs_base_high_pct is not None:
+        check = "FAILED" if pivot_low_in_base(facts) else "passed"
+        lines.append(
+            f"Pivot position (base-position check: {check}): the pivot candidate sits at "
+            f"{bc.pivot_position_in_base * 100:.0f}% of the base's low-to-high range, "
+            f"{bc.pivot_vs_base_high_pct:+.1f}% vs the base high."
+        )
+    closes = []
+    if bc.close_vs_base_high_pct is not None:
+        closes.append(f"{bc.close_vs_base_high_pct:+.1f}% vs the base high")
+    if bc.close_vs_52w_high_pct is not None:
+        closes.append(f"{bc.close_vs_52w_high_pct:+.1f}% vs the 52-week high")
+    if closes:
+        lines.append(f"Last close: {', '.join(closes)}.")
+    trend = [
+        f"{value:+.1f}% vs {name}"
+        for name, value in (
+            ("SMA50", bc.close_vs_sma50_pct),
+            ("SMA150", bc.close_vs_sma150_pct),
+            ("SMA200", bc.close_vs_sma200_pct),
+        )
+        if value is not None
+    ]
+    if bc.sma200_slope_20_pct is not None:
+        trend.append(f"SMA200 20-session change {bc.sma200_slope_20_pct:+.2f}%")
+    if bc.ma_stack_aligned is not None:
+        trend.append(f"SMA50 > SMA150 > SMA200: {'yes' if bc.ma_stack_aligned else 'no'}")
+    if trend:
+        lines.append(f"Trend: last close {'; '.join(trend)}.")
+    if bc.volume_anomalies:
+        heaviest = "; ".join(
+            f"{a.date} {a.vol_vs_adv50:.1f}x, {a.direction} day"
+            + (
+                f", closed at {a.close_location * 100:.0f}% of its range"
+                if a.close_location is not None
+                else ""
+            )
+            for a in bc.volume_anomalies
+        )
+        vol_txt = (
+            f"Heaviest-volume sessions since the base high (volume / prior 50-session "
+            f"ADV): {heaviest}"
+        )
+        if bc.base_high_day_vol_vs_adv50 is not None:
+            vol_txt += f". Base-high day: {bc.base_high_day_vol_vs_adv50:.1f}x"
+        lines.append(
+            vol_txt
+            + f". Heavy (>= {HEAVY_VOLUME_ADV50_RATIO:.1f}x) sessions since the base high: "
+            f"{bc.heavy_down_days} down, {bc.heavy_up_days} up."
+        )
+    lines.append(
+        "Not checked by Python — judge these from the chart and the context above: "
+        "heavy-volume distribution or climax days earlier in the base, overhead supply "
+        "between the pivot and the base high, and a V-shaped recovery off the base low."
+    )
+    return lines
 
 
 def resolve_surviving_contractions(
@@ -1491,8 +1571,20 @@ POST_PIVOT_FOLLOW_SESSIONS = 3  # follow closes recorded for audit/sweeps
 # low undercuts the running leg low by more than max(tick, this x ATR14) is a
 # continuation of the same decline, not a new contraction.
 FOLD_CONTINUATION_TOLERANCE_ATR = Decimal("0.10")
+# A candidate whose high is later cleared by more than max(tick, this x ATR14)
+# is a dip inside the rally to that higher high, not a contraction. Near-equal
+# (flat) highs stay separate contractions.
+ADVANCE_DIP_TOLERANCE_ATR = Decimal("0.50")
 MAX_GEMINI_CANDIDATES = 6  # the strict schema allows at most 6 assessment rows
-STRUCTURAL_GATE_POLICY_VERSION = "p10_structural_gates_v2"
+# Base position (forming, never invalid): a pivot below the upper third of the
+# base's low-to-high range AND more than this % below the base high is an
+# incomplete right side under overhead supply. Provisional defaults; the gate
+# sweep (scripts/p10_gate_sweep.py) owns calibration.
+PIVOT_BASE_POSITION_MIN = Decimal("0.67")
+PIVOT_BELOW_BASE_HIGH_MIN_PCT = Decimal("8.0")
+HEAVY_VOLUME_ADV50_RATIO = Decimal("2.0")  # context fact only, never gated
+VOLUME_ANOMALY_TOP_N = 3
+STRUCTURAL_GATE_POLICY_VERSION = "p10_structural_gates_v3"
 
 # Dispositions the structural gates return (see AGENTS.md lifecycle).
 StructuralDisposition = str  # 'ok' | 'forming' | 'invalid'
@@ -1548,6 +1640,45 @@ class PivotDayFacts:
 
 
 @dataclass(frozen=True)
+class VolumeAnomaly:
+    date: str
+    vol_vs_adv50: Decimal
+    direction: str  # 'up' | 'down' | 'flat' (close vs previous close)
+    close_location: Decimal | None  # 0 = closed at the day's low, 1 = at its high
+
+
+@dataclass(frozen=True)
+class BaseContextFacts:
+    """Where the pattern sits in its base and trend (percentages/dates only).
+
+    Base high = highest raw swing high (the left side of the base); deepest
+    low = lowest raw swing low after it. Every baseline uses sessions on or
+    before as-of; volume baselines use strictly earlier sessions.
+    """
+
+    base_high_date: str | None
+    base_depth_pct: Decimal | None = None
+    deepest_low_date: str | None = None
+    sessions_high_to_low: int | None = None
+    sessions_since_low: int | None = None
+    pivot_position_in_base: Decimal | None = None  # 0 = deepest low, 1 = base high
+    pivot_vs_base_high_pct: Decimal | None = None
+    close_vs_base_high_pct: Decimal | None = None
+    prior_advance_pct: Decimal | None = None
+    prior_advance_sessions: int | None = None
+    close_vs_52w_high_pct: Decimal | None = None
+    close_vs_sma50_pct: Decimal | None = None
+    close_vs_sma150_pct: Decimal | None = None
+    close_vs_sma200_pct: Decimal | None = None
+    sma200_slope_20_pct: Decimal | None = None
+    ma_stack_aligned: bool | None = None  # SMA50 > SMA150 > SMA200
+    volume_anomalies: tuple[VolumeAnomaly, ...] = ()
+    heavy_down_days: int = 0
+    heavy_up_days: int = 0
+    base_high_day_vol_vs_adv50: Decimal | None = None
+
+
+@dataclass(frozen=True)
 class StructuralFacts:
     as_of_date: str | None
     tick_size: Decimal
@@ -1576,6 +1707,7 @@ class StructuralFacts:
     staircase_indices: tuple[int, ...] = ()
     raw_depth_steps: tuple[DepthStep, ...] = ()  # audit only, never gated
     right_edge_position_pct: Decimal | None = None  # close within final leg, 0=low 100=pivot
+    base_context: BaseContextFacts | None = None
 
 
 @dataclass(frozen=True)
@@ -1665,6 +1797,7 @@ def fold_contraction_candidates(
     noise_depth_pct: Decimal = NOISE_DEPTH_PCT,
     tolerance_atr: Decimal = FOLD_CONTINUATION_TOLERANCE_ATR,
     cap: int = MAX_GEMINI_CANDIDATES,
+    advance_dip_tolerance_atr: Decimal | None = ADVANCE_DIP_TOLERANCE_ATR,
 ) -> tuple[tuple[VcpContractionWave, ...], tuple[tuple[int, ...], ...]]:
     """Fold noisy fractal swings into discrete contraction legs (pure).
 
@@ -1672,6 +1805,10 @@ def fold_contraction_candidates(
       ``max(tick, tolerance_atr x ATR14)`` continues that decline and merges
       into it (a bounce inside one larger pullback is not a contraction).
     - A non-final swing shallower than the noise floor is dropped.
+    - A non-final leg whose high a later leg clears by more than
+      ``max(tick, advance_dip_tolerance_atr x ATR14)`` is a dip inside the
+      rally to that higher high, not a contraction, and is dropped
+      (``None`` disables this rule for sweeps).
     - The final raw swing is always kept (the right edge is never lost).
     - Beyond ``cap`` legs the oldest two merge, so the strict 6-row Gemini
       schema is always satisfiable.
@@ -1693,6 +1830,16 @@ def fold_contraction_candidates(
         if not merged and not final and current.depth_pct < noise_depth_pct:
             continue
         stack.append((current, members))
+    if advance_dip_tolerance_atr is not None and len(stack) > 1:
+        dip_tolerance = max(tick_size, atr14 * advance_dip_tolerance_atr)
+        kept = [stack[-1]]
+        later_high = stack[-1][0].high_price
+        for entry in reversed(stack[:-1]):
+            if entry[0].high_price + dip_tolerance < later_high:
+                continue
+            kept.append(entry)
+            later_high = max(later_high, entry[0].high_price)
+        stack = list(reversed(kept))
     while len(stack) > max(1, cap):
         (first, m1), (second, m2) = stack[0], stack[1]
         stack[0:2] = [(_merge_waves(first, second), m1 + m2)]
@@ -1754,6 +1901,159 @@ def _depth_step(prev: VcpContractionWave, curr: VcpContractionWave) -> DepthStep
     )
 
 
+def _pct_change(value: Decimal, reference: Decimal) -> Decimal | None:
+    if reference <= 0:
+        return None
+    return (value - reference) / reference * Decimal("100")
+
+
+def _sma_at(closes: Sequence[Decimal], window: int, end: int) -> Decimal | None:
+    """Simple average of ``window`` closes ending at index ``end`` inclusive."""
+    start = end - window + 1
+    if start < 0 or end >= len(closes):
+        return None
+    return sum(closes[start : end + 1], Decimal("0")) / Decimal(window)
+
+
+def compute_base_context(
+    candles: Sequence[CandleData],
+    raw: Sequence[VcpContractionWave],
+    *,
+    pivot_price: Decimal | None,
+    adv_window: int = 50,
+    min_adv_sessions: int = 20,
+    heavy_ratio: Decimal = HEAVY_VOLUME_ADV50_RATIO,
+    top_n: int = VOLUME_ANOMALY_TOP_N,
+) -> BaseContextFacts | None:
+    """Base position, prior advance, trend and volume anomalies (pure).
+
+    Uses only sessions through the freeze's as-of date; each session's
+    volume ratio uses the ``adv_window`` sessions strictly before it.
+    """
+    dated = [c for c in candles if c.date is not None]
+    if not raw or not dated:
+        return None
+    dates = [c.date for c in dated]
+    as_of = dates[-1]
+    closes = [Decimal(str(c.close)) for c in dated]
+    last_close = closes[-1]
+
+    base_wave = raw[0]
+    for wave in raw[1:]:
+        if wave.high_price > base_wave.high_price:
+            base_wave = wave
+    base_high = Decimal(str(base_wave.high_price))
+    base_high_date = base_wave.high_date
+    base_idx = next((i for i, d in enumerate(dates) if d >= base_high_date), None)
+
+    lows_after = [w for w in raw if w.low_date and w.low_date >= base_high_date]
+    deepest = min(lows_after, key=lambda w: w.low_price) if lows_after else None
+    depth = position = pivot_vs_high = None
+    deepest_date = None
+    high_to_low = since_low = None
+    if deepest is not None:
+        deepest_low = Decimal(str(deepest.low_price))
+        deepest_date = deepest.low_date
+        if base_high > 0:
+            depth = (base_high - deepest_low) / base_high * Decimal("100")
+        high_to_low = len(_dates_between(dates, after=base_high_date, through=deepest_date))
+        since_low = len(_dates_between(dates, after=deepest_date, through=as_of))
+        if pivot_price is not None and base_high > deepest_low:
+            position = (pivot_price - deepest_low) / (base_high - deepest_low)
+    if pivot_price is not None:
+        pivot_vs_high = _pct_change(pivot_price, base_high)
+
+    prior_pct = prior_sessions = None
+    earlier = [c for c in dated if c.date < base_high_date]
+    if len(earlier) >= 2:
+        trough = min(earlier, key=lambda c: c.low)
+        prior_pct = _pct_change(base_high, Decimal(str(trough.low)))
+        prior_sessions = len(_dates_between(dates, after=trough.date, through=base_high_date))
+
+    year = dated[-252:]
+    high_52w = max(Decimal(str(c.high)) for c in year)
+
+    last = len(closes) - 1
+    sma50 = _sma_at(closes, 50, last)
+    sma150 = _sma_at(closes, 150, last)
+    sma200 = _sma_at(closes, 200, last)
+    sma200_prior = _sma_at(closes, 200, last - 20)
+
+    anomalies: list[VolumeAnomaly] = []
+    heavy_down = heavy_up = 0
+    base_day_ratio = None
+    if base_idx is not None:
+        for idx in range(base_idx, len(dated)):
+            prior = dated[max(0, idx - adv_window) : idx]
+            if len(prior) < min_adv_sessions:
+                continue
+            adv = _mean_decimal([Decimal(str(c.volume)) for c in prior])
+            if not adv:
+                continue
+            candle = dated[idx]
+            ratio = Decimal(str(candle.volume)) / adv
+            close = closes[idx]
+            direction = "flat"
+            if idx > 0 and close < closes[idx - 1]:
+                direction = "down"
+            elif idx > 0 and close > closes[idx - 1]:
+                direction = "up"
+            span = Decimal(str(candle.high)) - Decimal(str(candle.low))
+            location = (close - Decimal(str(candle.low))) / span if span > 0 else None
+            if idx == base_idx:
+                base_day_ratio = ratio
+            if ratio >= heavy_ratio:
+                if direction == "down":
+                    heavy_down += 1
+                elif direction == "up":
+                    heavy_up += 1
+            anomalies.append(VolumeAnomaly(candle.date, ratio, direction, location))
+    anomalies.sort(key=lambda a: (-a.vol_vs_adv50, a.date))
+
+    return BaseContextFacts(
+        base_high_date=base_high_date,
+        base_depth_pct=depth,
+        deepest_low_date=deepest_date,
+        sessions_high_to_low=high_to_low,
+        sessions_since_low=since_low,
+        pivot_position_in_base=position,
+        pivot_vs_base_high_pct=pivot_vs_high,
+        close_vs_base_high_pct=_pct_change(last_close, base_high),
+        prior_advance_pct=prior_pct,
+        prior_advance_sessions=prior_sessions,
+        close_vs_52w_high_pct=_pct_change(last_close, high_52w),
+        close_vs_sma50_pct=_pct_change(last_close, sma50) if sma50 else None,
+        close_vs_sma150_pct=_pct_change(last_close, sma150) if sma150 else None,
+        close_vs_sma200_pct=_pct_change(last_close, sma200) if sma200 else None,
+        sma200_slope_20_pct=(
+            _pct_change(sma200, sma200_prior) if sma200 and sma200_prior else None
+        ),
+        ma_stack_aligned=(
+            sma50 > sma150 > sma200 if sma50 and sma150 and sma200 else None
+        ),
+        volume_anomalies=tuple(anomalies[:top_n]),
+        heavy_down_days=heavy_down,
+        heavy_up_days=heavy_up,
+        base_high_day_vol_vs_adv50=base_day_ratio,
+    )
+
+
+def pivot_low_in_base(
+    facts: "StructuralFacts",
+    *,
+    position_min: Decimal = PIVOT_BASE_POSITION_MIN,
+    below_high_min_pct: Decimal = PIVOT_BELOW_BASE_HIGH_MIN_PCT,
+) -> bool:
+    """True when the pivot sits low in the base, well under the base high."""
+    bc = facts.base_context
+    if bc is None or bc.pivot_position_in_base is None or bc.pivot_vs_base_high_pct is None:
+        return False
+    return (
+        bc.pivot_position_in_base < position_min
+        and -bc.pivot_vs_base_high_pct > below_high_min_pct
+    )
+
+
 def compute_structural_facts(
     candles: Sequence[CandleData],
     contractions: Sequence[VcpContractionWave],
@@ -1761,6 +2061,7 @@ def compute_structural_facts(
     tick_size: Decimal = DEFAULT_TICK_SIZE,
     fold_tolerance_atr: Decimal = FOLD_CONTINUATION_TOLERANCE_ATR,
     noise_depth_pct: Decimal = NOISE_DEPTH_PCT,
+    advance_dip_tolerance_atr: Decimal | None = ADVANCE_DIP_TOLERANCE_ATR,
 ) -> StructuralFacts:
     """Facts over the Python geometry. Uses only candles ending at the
     freeze's as-of date; every baseline comes strictly from earlier sessions.
@@ -1796,6 +2097,7 @@ def compute_structural_facts(
         tick_size=tick_size,
         noise_depth_pct=noise_depth_pct,
         tolerance_atr=fold_tolerance_atr,
+        advance_dip_tolerance_atr=advance_dip_tolerance_atr,
     )
     folded = annotate_contraction_volume(candles, folded)
     staircase = significant_staircase(folded, noise_depth_pct=noise_depth_pct)
@@ -1994,6 +2296,7 @@ def compute_structural_facts(
         staircase_indices=tuple(w.index for w in staircase),
         raw_depth_steps=tuple(raw_steps),
         right_edge_position_pct=right_edge,
+        base_context=compute_base_context(candles, raw, pivot_price=pivot_price),
     )
 
 
@@ -2009,6 +2312,8 @@ def evaluate_structural_gates(
     pullback_min_adv_ratio: Decimal = PULLBACK_MIN_ADV_RATIO,
     pivot_climax_vol_ratio: Decimal = PIVOT_CLIMAX_VOL_RATIO,
     pivot_fade_atr: Decimal = PIVOT_FADE_ATR,
+    pivot_base_position_min: Decimal = PIVOT_BASE_POSITION_MIN,
+    pivot_below_base_high_min_pct: Decimal = PIVOT_BELOW_BASE_HIGH_MIN_PCT,
 ) -> StructuralGateVerdict:
     """Structural gates over RAW geometry. Invalid beats forming; forming
     (never a permanent rejection) beats ok. Returns codes + evidence."""
@@ -2118,6 +2423,23 @@ def evaluate_structural_gates(
         if climax and (wick or pd.retention_failed):
             codes.append("structural_pivot_climax_fade")
 
+    bc = facts.base_context
+    if bc is not None:
+        details["base_position"] = {
+            "pivot_position_in_base": (
+                str(bc.pivot_position_in_base)
+                if bc.pivot_position_in_base is not None
+                else None
+            ),
+            "pivot_vs_base_high_pct": (
+                str(bc.pivot_vs_base_high_pct)
+                if bc.pivot_vs_base_high_pct is not None
+                else None
+            ),
+            "position_min": str(pivot_base_position_min),
+            "below_high_min_pct": str(pivot_below_base_high_min_pct),
+        }
+
     invalid = bool(codes)
     details["gate_codes"] = list(codes)
 
@@ -2130,6 +2452,15 @@ def evaluate_structural_gates(
             and facts.base_age_sessions < maturity_floor_sessions
         ):
             forming_codes.append("structural_base_immature")
+        # 5. Base position: the right side has not recovered into the upper
+        #    part of the base, so a breakout would run into overhead supply.
+        #    Forming (rechecked later), never a permanent rejection.
+        if pivot_low_in_base(
+            facts,
+            position_min=pivot_base_position_min,
+            below_high_min_pct=pivot_below_base_high_min_pct,
+        ):
+            forming_codes.append("structural_pivot_low_in_base")
         details["forming_codes"] = list(forming_codes)
         if forming_codes:
             return StructuralGateVerdict(
@@ -2290,4 +2621,45 @@ def structural_facts_to_dict(facts: StructuralFacts) -> dict[str, Any]:
             if facts.right_edge_position_pct is not None
             else None
         ),
+        "base_context": (
+            _base_context_to_dict(facts.base_context)
+            if facts.base_context is not None
+            else None
+        ),
+    }
+
+
+def _base_context_to_dict(bc: BaseContextFacts) -> dict[str, Any]:
+    def dec(value: Decimal | None) -> str | None:
+        return str(value) if value is not None else None
+
+    return {
+        "base_high_date": bc.base_high_date,
+        "base_depth_pct": dec(bc.base_depth_pct),
+        "deepest_low_date": bc.deepest_low_date,
+        "sessions_high_to_low": bc.sessions_high_to_low,
+        "sessions_since_low": bc.sessions_since_low,
+        "pivot_position_in_base": dec(bc.pivot_position_in_base),
+        "pivot_vs_base_high_pct": dec(bc.pivot_vs_base_high_pct),
+        "close_vs_base_high_pct": dec(bc.close_vs_base_high_pct),
+        "prior_advance_pct": dec(bc.prior_advance_pct),
+        "prior_advance_sessions": bc.prior_advance_sessions,
+        "close_vs_52w_high_pct": dec(bc.close_vs_52w_high_pct),
+        "close_vs_sma50_pct": dec(bc.close_vs_sma50_pct),
+        "close_vs_sma150_pct": dec(bc.close_vs_sma150_pct),
+        "close_vs_sma200_pct": dec(bc.close_vs_sma200_pct),
+        "sma200_slope_20_pct": dec(bc.sma200_slope_20_pct),
+        "ma_stack_aligned": bc.ma_stack_aligned,
+        "volume_anomalies": [
+            {
+                "date": a.date,
+                "vol_vs_adv50": str(a.vol_vs_adv50),
+                "direction": a.direction,
+                "close_location": dec(a.close_location),
+            }
+            for a in bc.volume_anomalies
+        ],
+        "heavy_down_days": bc.heavy_down_days,
+        "heavy_up_days": bc.heavy_up_days,
+        "base_high_day_vol_vs_adv50": dec(bc.base_high_day_vol_vs_adv50),
     }

@@ -7,7 +7,7 @@ from app.services.vcp_vision import (
     VcpPivotZone,
     VcpPriorUptrend,
     VcpVolumeAssessment,
-    VcpVisionResultV1,
+    VcpVisionResultV2,
     VisionSchemaError,
     derive_contraction_metrics,
     enrich_stored_result,
@@ -44,8 +44,8 @@ def frozen_candles():
     }
 
 
-def valid_result() -> VcpVisionResultV1:
-    return VcpVisionResultV1(
+def valid_result() -> VcpVisionResultV2:
+    return VcpVisionResultV2(
         verdict="valid",
         confidence=80,
         summary="Coherent nested contractions on strong prior uptrend.",
@@ -160,13 +160,51 @@ class ValidateAndSnapTests(unittest.TestCase):
         self.assertNotIn("default", schema["properties"]["schema_version"])
         self.assertEqual(
             schema["properties"]["schema_version"]["enum"],
-            ["vcp_visual_validator_result_v1"],
+            ["vcp_visual_validator_result_v2"],
         )
         self.assertIn(
             "three peaks",
             schema["properties"]["contraction_anchors"]["description"],
         )
-        self.assertEqual(schema["properties"]["contraction_anchors"]["minItems"], 2)
+        # v2: a non-VCP chart may return no anchors instead of forced ones.
+        self.assertNotIn("minItems", schema["properties"]["contraction_anchors"])
+        self.assertIn("forming", schema["properties"]["verdict"]["enum"])
+
+    def test_invalid_verdict_with_no_anchors_is_accepted(self) -> None:
+        result = valid_result()
+        result.verdict = "invalid"
+        result.contraction_anchors = []
+        result.pivot_zone = None
+        cleaned = validate_and_snap_result(result, TRADING_DATES)
+        self.assertEqual(cleaned["verdict"], "invalid")
+        stored = enrich_stored_result(cleaned, frozen_candles())
+        self.assertEqual(stored["derived"]["contractions"], [])
+        self.assertIsNone(stored["derived"]["pivot_price"])
+
+    def test_forming_verdict_is_kept(self) -> None:
+        result = valid_result()
+        result.verdict = "forming"
+        result.contraction_anchors = result.contraction_anchors[:1]
+        result.pivot_zone = None
+        cleaned = validate_and_snap_result(result, TRADING_DATES)
+        self.assertEqual(cleaned["verdict"], "forming")
+
+    def test_valid_without_prior_uptrend_is_downgraded(self) -> None:
+        result = valid_result()
+        result.prior_uptrend = VcpPriorUptrend(assessment="weak", note="Downtrend bounce.")
+        cleaned = validate_and_snap_result(result, TRADING_DATES)
+        self.assertEqual(cleaned["verdict"], "uncertain")
+        self.assertTrue(
+            any("prior uptrend" in note for note in cleaned["human_review_focus"])
+        )
+
+    def test_prompt_embeds_shared_rubric(self) -> None:
+        from app.services.vcp_rubric import VCP_RUBRIC
+        from app.services.vcp_vision import SYSTEM_PROMPT_V2
+
+        self.assertIn(VCP_RUBRIC, SYSTEM_PROMPT_V2)
+        self.assertIn("'forming'", SYSTEM_PROMPT_V2)
+        self.assertNotIn("Apply your learned VCP expertise", SYSTEM_PROMPT_V2)
 
     def test_snaps_anchors_and_derives_after_enrichment(self) -> None:
         cleaned = validate_and_snap_result(valid_result(), TRADING_DATES)

@@ -31,6 +31,7 @@ from app.services.canonical_ohlcv import compact_ohlcv_table
 from app.services.fundamental_llm import sanitize_provider_payload
 from app.services.openrouter_content import parse_openrouter_structured_content
 from app.services.screener import candle_trading_date
+from app.services.vcp_rubric import VCP_RUBRIC
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ EXPECTED_CHART_HEIGHT = 720
 MAX_DATE_DRIFT_DAYS = 3
 MAX_RETRYABLE_ATTEMPTS = 2
 
-Verdict = Literal["valid", "invalid", "uncertain"]
+Verdict = Literal["valid", "forming", "invalid", "uncertain"]
 
 
 class VisionLLMError(RuntimeError):
@@ -118,13 +119,13 @@ class VcpPivotZone(BaseModel):
     rationale: str = Field(min_length=1, max_length=240)
 
 
-class VcpVisionResultV1(BaseModel):
-    """Strict output contract for the VCP validator (prompt/schema v1)."""
+class VcpVisionResultV2(BaseModel):
+    """Strict output contract for the VCP validator (prompt/schema v2)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["vcp_visual_validator_result_v1"] = (
-        "vcp_visual_validator_result_v1"
+    schema_version: Literal["vcp_visual_validator_result_v2"] = (
+        "vcp_visual_validator_result_v2"
     )
     verdict: Verdict
     confidence: int = Field(ge=0, le=100)
@@ -133,14 +134,14 @@ class VcpVisionResultV1(BaseModel):
     volume: VcpVolumeAssessment
     bases: list[VcpBaseWindow] = Field(default_factory=list, max_length=5)
     contraction_anchors: list[VcpContractionAnchor] = Field(
-        min_length=2,
         max_length=8,
         description=(
             "Ordered swing-peak dates that bound contraction windows. Two nested "
             "contractions need three peaks: C1 start, C2 start, and the final peak "
             "that completes C2 (often the left edge of the pivot zone). Verdict "
             "valid requires at least three peaks, or two start-peaks plus a later "
-            "pivot_zone that closes the last window."
+            "pivot_zone that closes the last window. Empty when no genuine "
+            "contraction is visible."
         ),
     )
     pivot_zone: VcpPivotZone | None = None
@@ -175,7 +176,7 @@ class FrozenOhlcv:
 
 @dataclass(frozen=True)
 class VisionLLMResult:
-    result: VcpVisionResultV1
+    result: VcpVisionResultV2
     request_id: str | None
     usage: dict[str, Any]
     input_hash: str
@@ -495,7 +496,7 @@ def _append_review_focus(items: list[str], note: str) -> list[str]:
 
 
 def validate_and_snap_result(
-    result: VcpVisionResultV1,
+    result: VcpVisionResultV2,
     valid_dates: set[dt.date],
 ) -> dict[str, Any]:
     """Validate all returned dates against the frozen packet and snap them."""
@@ -560,6 +561,15 @@ def validate_and_snap_result(
             review_focus,
             "Labeled valid, but fewer than two contraction windows could be "
             "derived from the returned anchors and pivot zone.",
+        )
+    if verdict == "valid" and result.prior_uptrend.assessment in {"weak", "unclear"}:
+        # A VCP needs a prior Stage 2 advance; a valid label without one is
+        # self-contradictory, so downgrade instead of failing the analysis.
+        verdict = "uncertain"
+        review_focus = _append_review_focus(
+            review_focus,
+            "Labeled valid, but the prior uptrend was assessed as "
+            f"{result.prior_uptrend.assessment}.",
         )
 
     return {
@@ -654,35 +664,22 @@ def enrich_stored_result(
 # OpenRouter vision client
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT_V1 = (
-    "You are an expert equity chart analyst applying the Minervini / SEPA "
-    "Volatility Contraction Pattern (VCP) methodology to Indian equities.\n"
-    "A trader supplies two standardized daily candlestick-and-volume charts "
-    "(a long context view and a shorter detail view on a logarithmic price "
-    "scale) plus a canonical OHLCV table with exact trading dates.\n"
-    "Apply your learned VCP expertise: assess the prior uptrend, base "
-    "formation quality, the contraction sequence, volume behavior, and "
-    "proximity to a potential pivot.\n"
-    "Rules:\n"
-    "1. Verdict 'valid' only when the chart coherently shows the classic VCP "
-    "sequence (prior uptrend, at least two nested contractions with declining "
-    "depth and drying-up volume, tight price action near a pivot). Verdict "
-    "'invalid' when the pattern is clearly absent or the base is broken. "
-    "Verdict 'uncertain' when the evidence is ambiguous or data is sparse.\n"
-    "2. Every date you cite must exist exactly in the supplied OHLCV table; "
-    "never invent dates, and keep evidence concise and grounded in the "
-    "visible chart.\n"
-    "3. This is an advisory second opinion only. Never recommend entry, stop, "
-    "target, position size, or any execution action.\n"
-    "4. contraction_anchors are ordered swing peaks that BOUND contraction "
-    "windows. Two nested contractions require three strictly ordered peaks: "
-    "the start of C1, the start of C2, and the final swing peak that completes "
-    "C2 (often the left edge of the pivot zone). Verdict 'valid' requires "
-    "those three peaks plus a pivot_zone. If you only see one clear "
-    "contraction, use 'uncertain' or 'invalid' — never 'valid' with two peaks."
-)
+SYSTEM_PROMPT_V2 = f"""You are an expert equity chart analyst giving a blind second opinion on whether a chart shows a Minervini / SEPA Volatility Contraction Pattern (VCP) in an Indian equity.
+A trader supplies two standardized daily candlestick-and-volume charts (a long context view and a shorter detail view, logarithmic price scale) plus a canonical OHLCV table with exact trading dates and each session's volume relative to its prior 50-session average.
 
-USER_PROMPT_V1 = (
+{VCP_RUBRIC}
+
+Rules:
+1. Verdict:
+   - 'valid' only when every part of the definition holds: a prior Stage 2 advance; at least two genuine contractions from flat-to-descending highs with declining depth and holding or rising lows; the final contraction in the upper part of the base, near the base high; volume drying up; and tight price action near a pivot.
+   - 'forming' when the structure is intact but incomplete: only one genuine contraction so far, a base younger than about 15 sessions, the pivot in the lower or middle part of the base under overhead supply, or a V-shaped recovery with no contraction near the highs yet.
+   - 'invalid' when the pattern is absent or broken: lower lows or a breakdown, unabsorbed heavy-volume distribution or a climax reversal inside the base, no Stage 2 context, flat or widening pullbacks, or wide choppy action.
+   - 'uncertain' only when the evidence is genuinely ambiguous or the data is too sparse to judge.
+2. Use the OHLCV table for exact dates and volume ratios and cite them. Every date you cite must exist exactly in the table; never invent dates. Keep evidence concise and grounded in the visible chart.
+3. contraction_anchors are ordered swing peaks that BOUND contraction windows: the start of C1, the start of C2, and so on, plus the final swing peak that completes the last contraction (often the left edge of the pivot zone). Verdict 'valid' requires at least three such peaks (or two plus a later pivot_zone) and a pivot_zone. For 'forming', list the contractions that exist so far. For 'invalid' or 'uncertain', list anchors only for genuine contractions you can see; return an empty list rather than forcing a pattern.
+4. This is an advisory second opinion only. Never recommend entry, stop, target, position size, or any execution action."""
+
+USER_PROMPT_V2 = (
     "Frozen EOD window ending {as_of_date}. Context chart: last "
     "{context_sessions} sessions. Detail chart: final {detail_sessions} "
     "sessions (logarithmic price scale). The compact OHLCV table below is the "
@@ -703,8 +700,8 @@ class OpenRouterVisionClient:
         api_url: str = "https://openrouter.ai/api/v1/chat/completions",
         model: str = "google/gemini-3.7-flash",
         reasoning_effort: str = "high",
-        prompt_version: str = "vcp_visual_validator_v1",
-        schema_version: str = "vcp_visual_validator_result_v1",
+        prompt_version: str = "vcp_visual_validator_v2",
+        schema_version: str = "vcp_visual_validator_result_v2",
         app_title: str = "SwingTraderVCP",
         http_referer: str = "",
         timeout_seconds: float = 60.0,
@@ -743,7 +740,7 @@ class OpenRouterVisionClient:
 
     @staticmethod
     def _response_schema() -> dict[str, Any]:
-        schema = VcpVisionResultV1.model_json_schema()
+        schema = VcpVisionResultV2.model_json_schema()
 
         def make_strict(node: Any) -> None:
             if isinstance(node, dict):
@@ -771,7 +768,7 @@ class OpenRouterVisionClient:
         context_png_b64: str,
         detail_png_b64: str,
     ) -> dict[str, Any]:
-        user_text = USER_PROMPT_V1.format(
+        user_text = USER_PROMPT_V2.format(
             as_of_date=frozen.as_of_date.isoformat(),
             context_sessions=frozen.context_sessions,
             detail_sessions=frozen.detail_sessions,
@@ -780,7 +777,7 @@ class OpenRouterVisionClient:
         request: dict[str, Any] = {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT_V1},
+                {"role": "system", "content": SYSTEM_PROMPT_V2},
                 {
                     "role": "user",
                     "content": [
@@ -818,7 +815,7 @@ class OpenRouterVisionClient:
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "vcp_visual_validator_v1",
+                    "name": "vcp_visual_validator_v2",
                     "strict": True,
                     "schema": self._response_schema(),
                 },
@@ -906,7 +903,7 @@ class OpenRouterVisionClient:
                     f"provider error: {choice_error.get('message') or choice_error.get('code')}"
                 )
             parsed = parse_openrouter_structured_content(choices[0], usage=usage)
-            result = VcpVisionResultV1.model_validate(parsed)
+            result = VcpVisionResultV2.model_validate(parsed)
         except (ValueError, KeyError, TypeError, ValidationError) as exc:
             raise VisionLLMError(
                 f"OpenRouter structured response was invalid: {exc}",

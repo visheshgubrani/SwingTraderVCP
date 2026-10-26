@@ -62,10 +62,10 @@ def in_range_result():
         VcpPivotZone,
         VcpPriorUptrend,
         VcpVolumeAssessment,
-        VcpVisionResultV1,
+        VcpVisionResultV2,
     )
 
-    return VcpVisionResultV1(
+    return VcpVisionResultV2(
         verdict="valid",
         confidence=80,
         summary="Coherent nested contractions on strong prior uptrend.",

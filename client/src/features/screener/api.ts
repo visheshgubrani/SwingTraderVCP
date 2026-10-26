@@ -171,8 +171,8 @@ export interface ScanResult {
   vcp_vision: {
     id: string
     status: "awaiting_capture" | "queued" | "running" | "succeeded" | "failed"
-    ai_verdict: "valid" | "invalid" | "uncertain" | null
-    human_verdict: "valid" | "invalid" | "uncertain" | null
+    ai_verdict: "valid" | "forming" | "invalid" | "uncertain" | null
+    human_verdict: "valid" | "forming" | "invalid" | "uncertain" | null
     created_at: string | null
     error_code: string | null
   } | null

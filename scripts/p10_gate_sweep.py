@@ -36,45 +36,36 @@ ANCHORS = {
     "NSE:SYRMA-EQ": "not_vcp (breaking down)",
     "NSE:LALPATHLAB-EQ": "not_vcp or breaking down",
     "NSE:TORNTPHARM-EQ": "valid",
+    "NSE:GESHIP-EQ": "forming or not_vcp (no proposal)",
+}
+
+DEFAULTS = {
+    "maturity": 15, "undercut_atr": "0.10", "ratio": "0.90", "step_pp": "0.75",
+    "max_down": "1.75", "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75",
+    "pos_min": "0.67", "below_pct": "8.0", "advance_dip": True,
 }
 
 VARIANTS = [
-    {"name": "defaults", "maturity": 15, "undercut_atr": "0.10",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "1.75",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "maturity_12", "maturity": 12, "undercut_atr": "0.10",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "1.75",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "maturity_18", "maturity": 18, "undercut_atr": "0.10",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "1.75",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "undercut_005", "maturity": 15, "undercut_atr": "0.05",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "1.75",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "undercut_020", "maturity": 15, "undercut_atr": "0.20",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "1.75",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "tighten_095_075", "maturity": 15, "undercut_atr": "0.10",
-     "ratio": "0.95", "step_pp": "0.75", "max_down": "1.75",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "tighten_090_050", "maturity": 15, "undercut_atr": "0.10",
-     "ratio": "0.90", "step_pp": "0.50", "max_down": "1.75",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "pb_maxdown_150", "maturity": 15, "undercut_atr": "0.10",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "1.50",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "pb_maxdown_200", "maturity": 15, "undercut_atr": "0.10",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "2.00",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "pb_mean_125", "maturity": 15, "undercut_atr": "0.10",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "1.75",
-     "mean_prev": "1.25", "min_adv": "0.75", "climax": "1.75"},
-    {"name": "climax_200", "maturity": 15, "undercut_atr": "0.10",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "1.75",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "2.00"},
-    {"name": "climax_150", "maturity": 15, "undercut_atr": "0.10",
-     "ratio": "0.90", "step_pp": "0.75", "max_down": "1.75",
-     "mean_prev": "1.10", "min_adv": "0.75", "climax": "1.50"},
+    {**DEFAULTS, "name": "defaults"},
+    {**DEFAULTS, "name": "maturity_12", "maturity": 12},
+    {**DEFAULTS, "name": "maturity_18", "maturity": 18},
+    {**DEFAULTS, "name": "undercut_005", "undercut_atr": "0.05"},
+    {**DEFAULTS, "name": "undercut_020", "undercut_atr": "0.20"},
+    {**DEFAULTS, "name": "tighten_095_075", "ratio": "0.95"},
+    {**DEFAULTS, "name": "tighten_090_050", "step_pp": "0.50"},
+    {**DEFAULTS, "name": "pb_maxdown_150", "max_down": "1.50"},
+    {**DEFAULTS, "name": "pb_maxdown_200", "max_down": "2.00"},
+    {**DEFAULTS, "name": "pb_mean_125", "mean_prev": "1.25"},
+    {**DEFAULTS, "name": "climax_200", "climax": "2.00"},
+    {**DEFAULTS, "name": "climax_150", "climax": "1.50"},
+    # Gates v3: advance-dip folding off, base-position gate off, and its grid.
+    {**DEFAULTS, "name": "no_advance_dip", "advance_dip": False},
+    {**DEFAULTS, "name": "base_pos_off", "pos_min": "0"},
+    *(
+        {**DEFAULTS, "name": f"base_pos_{pos}_{below}", "pos_min": pos, "below_pct": below}
+        for pos in ("0.50", "0.60", "0.67", "0.75")
+        for below in ("5.0", "8.0", "10.0", "12.0")
+    ),
 ]
 
 # Factors: deep (non-noise) waves set by the facts cache computed in analytics
@@ -82,8 +73,8 @@ VARIANTS = [
 from app.domain.p10_geometry import structural_facts_to_dict  # noqa: E402
 
 
-def cached_facts_by_key() -> dict[tuple, dict]:
-    """Recompute facts per (instrument_id, as_of) once."""
+def cached_facts_by_key(*, advance_dip: bool = True) -> dict[tuple, dict]:
+    """Recompute facts per (instrument_id, as_of) once per folding mode."""
     import json as _json
 
     facts_cache: dict[tuple, dict] = {}
@@ -110,7 +101,10 @@ def cached_facts_by_key() -> dict[tuple, dict]:
         tick = Decimal(str(row["tick_size"]))
         ann = derive_chart_geometry(cds, tick_size=tick)
         facts_cache[key] = compute_structural_facts(
-            cds, ann.contractions, tick_size=tick
+            cds,
+            ann.contractions,
+            tick_size=tick,
+            **({} if advance_dip else {"advance_dip_tolerance_atr": None}),
         )
     return facts_cache
 
@@ -120,13 +114,17 @@ def main() -> int:
         json.loads(line)
         for line in (REPO / "evidence" / "p10" / "unique_inputs.jsonl").open()
     ]
-    facts_cache = cached_facts_by_key()
-    print(f"rows={len(rows)} facts_cached={len(facts_cache)}")
+    caches = {
+        True: cached_facts_by_key(advance_dip=True),
+        False: cached_facts_by_key(advance_dip=False),
+    }
+    print(f"rows={len(rows)} facts_cached={len(caches[True])}")
 
     results = []
     for variant in VARIANTS:
         verdicts = []
         anchor_out: dict[str, str] = {}
+        facts_cache = caches[variant["advance_dip"]]
         for row in rows:
             key = (row.get("instrument_id"), row.get("as_of_date"))
             facts = facts_cache.get(key)
@@ -143,6 +141,8 @@ def main() -> int:
                 pullback_mean_prev_ratio=Decimal(variant["mean_prev"]),
                 pullback_min_adv_ratio=Decimal(variant["min_adv"]),
                 pivot_climax_vol_ratio=Decimal(variant["climax"]),
+                pivot_base_position_min=Decimal(variant["pos_min"]),
+                pivot_below_base_high_min_pct=Decimal(variant["below_pct"]),
             )
             verdicts.append(v.disposition)
             if row["symbol"] in ANCHORS:
@@ -161,7 +161,7 @@ def main() -> int:
             for s, d in sorted(res["anchors"].items())
         )
         lines.append(
-            f"{res['variant']:<12} | {counts.get('ok',0):<4} | {counts.get('forming',0):<7} "
+            f"{res['variant']:<20} | {counts.get('ok',0):<4} | {counts.get('forming',0):<7} "
             f"| {counts.get('invalid',0):<7} | {anchor_txt}"
         )
 

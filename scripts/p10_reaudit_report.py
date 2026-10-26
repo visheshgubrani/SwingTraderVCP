@@ -28,7 +28,18 @@ ANCHOR_EXPECTED = {
     "NSE:SYRMA-EQ": "not_vcp",
     "NSE:LALPATHLAB-EQ": "not_vcp",
     "NSE:TORNTPHARM-EQ": "valid",
+    # Deep V-recovery with the pivot mid-base and heavy distribution: any
+    # non-valid class is correct; the pipeline must not produce a proposal.
+    "NSE:GESHIP-EQ": ("forming", "not_vcp"),
 }
+
+CROSSTAB_PAIRS = (
+    ("flash_base", "flash_v9"),
+    ("flash_v9", "strong_v9"),
+    ("flash_v9", "validator_v2"),
+    ("flash_base", "validator_v2"),
+)
+CLASSES = ("valid", "forming", "not_vcp", "uncertain")
 
 STRUCTURAL_CODES_FOR_ANCHORS = {
     "NSE:NEULANDLAB-EQ": {"structural_flat_shelf_not_tightening"},
@@ -136,7 +147,7 @@ def main() -> int:
             f"invalid={struct_invalid}"
         )
 
-    # agreement crosstab flash_v7 vs strong_v7
+    # agreement crosstabs between arms
     def by_arm(arm: str) -> dict[str, str]:
         out = {}
         for c in calls:
@@ -144,17 +155,19 @@ def main() -> int:
                 out[c["key"]] = c.get("classification")
         return out
 
-    a, b = by_arm("flash_v7"), by_arm("strong_v7")
-    shared = sorted(set(a) & set(b))
-    if shared:
+    for arm_a, arm_b in CROSSTAB_PAIRS:
+        a, b = by_arm(arm_a), by_arm(arm_b)
+        shared = sorted(set(a) & set(b))
+        if not shared:
+            continue
         agree = sum(1 for k in shared if a[k] == b[k])
-        print(f"\nflash_v7 vs strong_v7 (dev, n={len(shared)}): agreement={agree} "
+        print(f"\n{arm_a} vs {arm_b} (n={len(shared)}): agreement={agree} "
               f"({agree/len(shared):.0%})")
-        for cls_a in ("valid", "forming", "not_vcp"):
-            for cls_b in ("valid", "forming", "not_vcp"):
+        for cls_a in CLASSES:
+            for cls_b in CLASSES:
                 n = sum(1 for k in shared if a[k] == cls_a and b[k] == cls_b)
                 if n:
-                    print(f"  flash_v7={cls_a:<8} x strong_v7={cls_b:<8}: {n}")
+                    print(f"  {arm_a}={cls_a:<9} x {arm_b}={cls_b:<9}: {n}")
 
     # named anchors
     print("\n=== named anchors (expected in parentheses) ===")
@@ -167,9 +180,10 @@ def main() -> int:
                 continue
             counts = Counter(c.get("classification") for c in got)
             top = counts.most_common(1)[0][0]
-            mark = "OK " if top == expected else "xx "
+            accepted = expected if isinstance(expected, tuple) else (expected,)
+            mark = "OK " if top in accepted else "xx "
             row_out.append(f"{mark}{symbol.replace('NSE:','').replace('-EQ','')}:{top}")
-        print(f"{arm:<10} " + " ".join(row_out))
+        print(f"{arm:<12} " + " ".join(row_out))
 
     # structural gate agreement vs deterministic codes on anchor invalids
     print("\nstructural gates on named invalids (expect invalid):")

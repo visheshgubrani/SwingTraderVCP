@@ -27,7 +27,7 @@ import pandas as pd
 from app.domain.p10_geometry import CandleData
 
 
-RENDERER_VERSION = "p10_mplfinance_v4"
+RENDERER_VERSION = "p10_mplfinance_v5"
 CHART_WIDTH = 1280
 CHART_HEIGHT = 720
 CHART_DPI = 100
@@ -136,11 +136,13 @@ def render_detail_chart(
     symbol: str,
     averages: dict[str, pd.Series] | None = None,
 ) -> bytes:
-    """Render the clean 126-session LLM chart. No contraction overlays.
+    """Render the clean 126-session LLM chart. No contraction overlays and
+    no symbol in the title (``symbol`` is accepted for call-site compatibility).
 
     Moving averages should be computed on the 252-session freeze and sliced
     to the visible 126 sessions so SMA150/200 are defined.
     """
+    del symbol
     df = df_126.copy()
     if averages is None:
         averages = _moving_averages(df)
@@ -178,7 +180,8 @@ def render_detail_chart(
         returnfig=True,
         panel_ratios=(4, 1),
         tight_layout=True,
-        title=f"{symbol} — 126-Session VCP Window (Log Scale)",
+        # The model-facing chart is blind: no symbol or company identity.
+        title="126-Session VCP Window (Log Scale)",
     )
     del axes
     fig.savefig(

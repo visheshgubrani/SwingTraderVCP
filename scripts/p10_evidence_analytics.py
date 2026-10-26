@@ -2,34 +2,34 @@
 """P10 evidence analytics: chain-of-custody, dedupe, split, structural replay.
 
 Reads `evidence/p10/` output from export_proposal_evidence.py and:
-  1. Verifies each prompt-v6 attempt's stored `prompt_hash` against a
-     recomputation from the exported frozen candles + the exact v6 prompt
-     (materialized from git HEAD), proving the A/B replay arm uses inputs
-     identical to production.
+  1. Verifies each corpus attempt's stored `prompt_hash` against a
+     recomputation from the exported frozen candles + the exact prompt,
+     schema and geometry of --baseline-ref (the deployed code), proving the
+     A/B baseline arm uses inputs identical to production.
   2. Deduplicates by (source_hash, detail_image_hash, prompt_hash).
-  3. Recomputes StructuralFacts + structural gates (v7 policy) per unique
-     input and reports dispositions.
+  3. Recomputes StructuralFacts + structural gates (working-tree policy) per
+     unique input and reports dispositions.
   4. Produces a symbol-grouped dev/holdout split and a labels skeleton.
 
+The corpus is every attempt with --prompt-version (default: the baseline
+ref's PROMPT_VERSION).
+
 Writes under evidence/p10/:
-  unique_inputs.jsonl      one row per unique v6 input
+  unique_inputs.jsonl      one row per unique corpus input
   recomputed.jsonl         per-unique structural facts + verdict + old status
   split_dev.jsonl / split_holdout.jsonl
   labels.yaml              skeleton for human labels
   label_sheet.html         contact sheet of every unique chart
 
 Run from the repo root with the server venv:
-  cd server && ../server/.venv/bin/python ../scripts/p10_evidence_analytics.py
+  cd server && ../server/.venv/bin/python ../scripts/p10_evidence_analytics.py \
+      [--baseline-ref <deployed commit>] [--prompt-version p10_vcp_proposal_v8]
 """
 
 from __future__ import annotations
 
-import base64
-import datetime as dt
-import hashlib
-import importlib.util
+import argparse
 import json
-import subprocess
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -37,6 +37,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 SERVER = REPO / "server"
 sys.path.insert(0, str(SERVER))
+sys.path.insert(0, str(REPO / "scripts"))
+
+from p10_ref_modules import RefP10  # noqa: E402
 
 from app.domain.p10_geometry import (  # noqa: E402
     CandleData,
@@ -66,25 +69,6 @@ def load_candles_map() -> dict[tuple[str, str], dict]:
         row = json.loads(line)
         out[(row["instrument_id"], row["as_of_date"])] = row
     return out
-
-
-def load_v6_module() -> object:
-    """Import the exact v6 proposal_generator from git HEAD (deployed code)."""
-    text = subprocess.run(
-        ["git", "-C", str(REPO), "show", "HEAD:server/app/services/proposal_generator.py"],
-        capture_output=True,
-        check=True,
-        text=True,
-    ).stdout
-    target = REPO / ".git" / "v6_proposal_generator_probe.py"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text)
-    spec = importlib.util.spec_from_file_location("v6gen_probe", target)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["v6gen_probe"] = module
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
 
 
 def structural_replay(candles_map, attempts):
@@ -118,26 +102,29 @@ def structural_replay(candles_map, attempts):
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--baseline-ref", default="HEAD", help="git ref of the deployed code")
+    ap.add_argument("--prompt-version", default=None)
+    args = ap.parse_args()
+
     attempts = [json.loads(line) for line in (EVIDENCE / "attempts.jsonl").open()]
     candles_map = load_candles_map()
-    v6 = load_v6_module()
-    v6_hash_fn = getattr(v6, "proposal_prompt_hash")
+    baseline = RefP10(args.baseline_ref)
+    prompt_version = args.prompt_version or baseline.prompt_version
+    print(f"baseline ref={args.baseline_ref} corpus prompt_version={prompt_version}")
 
-    # 1) chain of custody for v6 rows
-    v6_rows = [a for a in attempts if a.get("prompt_version") == "p10_vcp_proposal_v6"]
+    # 1) chain of custody for corpus rows
+    corpus_rows = [a for a in attempts if a.get("prompt_version") == prompt_version]
     mismatch = 0
     checked = 0
-    for attempt in v6_rows:
+    for attempt in corpus_rows:
         key = (attempt.get("instrument_id"), attempt.get("as_of_date"))
         candle_row = candles_map.get(key)
         if candle_row is None:
             continue
-        candles = [candle_data(c) for c in candle_row["candles"]]
         tick = Decimal(str(candle_row["tick_size"]))
         try:
-            annotations = derive_chart_geometry(candles, tick_size=tick)
-            summary = v6_module_summary(v6, annotations.contractions)
-            recomputed = v6_hash_fn(tick_size=tick, candidate_summary=summary)
+            recomputed = baseline.prompt_hash(candle_row["candles"], tick)
         except Exception as exc:  # noqa: BLE001
             attempt["chain_of_custody"] = {"ok": False, "error": str(exc)[:300]}
             mismatch += 1
@@ -152,7 +139,7 @@ def main() -> int:
             mismatch += 1
     print(f"chain-of-custody: checked={checked} mismatches={mismatch}")
 
-    # 2) dedupe unique inputs (v6 only for the primary corpus)
+    # 2) dedupe unique inputs (corpus prompt version only)
     def dedupe_key(a: dict) -> tuple[str, str, str]:
         return (
             a.get("source_hash", ""),
@@ -161,18 +148,18 @@ def main() -> int:
         )
 
     unique: dict[tuple, dict] = {}
-    for attempt in sorted(v6_rows, key=lambda a: a.get("started_at", "")):
+    for attempt in sorted(corpus_rows, key=lambda a: a.get("started_at", "")):
         key = dedupe_key(attempt)
         current = unique.get(key)
         if current is None or attempt["started_at"] > current["started_at"]:
             unique[key] = attempt
 
     uniq_rows = list(unique.values())
-    print(f"unique v6 inputs: {len(uniq_rows)} (rows {len(v6_rows)})")
+    print(f"unique {prompt_version} inputs: {len(uniq_rows)} (rows {len(corpus_rows)})")
 
     # per-unique status aggregation
     per_key_status: dict[tuple, list[str]] = {}
-    for attempt in v6_rows:
+    for attempt in corpus_rows:
         per_key_status.setdefault(dedupe_key(attempt), []).append(attempt["status"])
     for row in uniq_rows:
         statuses = per_key_status[dedupe_key(row)]
@@ -267,7 +254,7 @@ def main() -> int:
     html = [
         "<!doctype html><html><head><meta charset='utf-8'><title>P10 label sheet</title></head>",
         "<body style='font-family:sans-serif'>",
-        "<h1>P10 unique v6 inputs</h1>",
+        f"<h1>P10 unique {prompt_version} inputs</h1>",
     ]
     for row in out_rows:
         html.append(
@@ -288,11 +275,6 @@ def main() -> int:
     print("old classifications:", dict(old_cls))
     print("structural dispositions:", dict(struct))
     return 0
-
-
-def v6_module_summary(v6_module, contractions) -> str:
-    """The v6 summary formatter (module imported from git HEAD)."""
-    return v6_module.format_candidate_summary(contractions)
 
 
 if __name__ == "__main__":

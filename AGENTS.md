@@ -108,7 +108,7 @@ Do not substitute these without an explicit instruction from the user.
 | Market data          | `MARKET_DATA_PROVIDER`: Fyers (REST + market WS, default) or Upstox (read-only Analytics Token: v3 historical REST + v3 LTP REST polling, no Upstox WS) | Upstox needs no daily 2FA, so paper mode on Upstox data needs no Fyers session. One provider at a time, owned by `services/upstox_market_data.py` / the Fyers clients |
 | Fundamentals         | Upstox Company Fundamentals API + official NSE corporate filings | Upstox remains primary; official NSE shareholding and integrated-filing XBRL are read-only risk enrichment for technical survivors only; never prices, sockets, or orders |
 | Fundamental LLM inference | OpenRouter (`openai/gpt-5.6-luna-pro`)      | Blind structured second opinion over normalized snapshots; Python's deterministic fit remains authoritative. No tools or money-path access. Overridable via `OPENROUTER_MODEL` env (server/.env)       |
-| VCP vision inference | OpenRouter (`google/gemini-3.7-flash`)            | P10 proposal reader: serial audit of Python swing candidates over a standardized 126-session chart plus a short candidate summary (not a raw OHLCV table). Advisory screener VCP still sends frozen OHLCV. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
+| VCP vision inference | OpenRouter (`google/gemini-3.7-flash`)            | P10 proposal reader: serial audit of Python swing candidates over a standardized 126-session chart plus a short candidate summary (not a raw OHLCV table). Advisory screener VCP still sends frozen OHLCV. Both surfaces embed one shared VCP definition (`services/vcp_rubric.py`) so they classify on the same rubric. Strict JSON; no tools, broker/account context, or money-path access. Overridable via `VCP_VISION_MODEL` env (`server/.env`) |
 
 ### 2.1 Locked Fyers / trading product decisions
 
@@ -317,7 +317,8 @@ freeze 252 EOD OHLCV + Python swing detection on the 126-session window
         │
         ▼
 StructuralFacts on the RAW geometry (base age, low progression, right edge,
-final-pullback + pivot-day volume) → structural gate dispositions
+final-pullback + pivot-day volume, base position/context) → structural gate
+dispositions
         │
         ▼
 clean 126-session chart + enriched short candidate summary (252 context is human-only)
@@ -361,8 +362,10 @@ story; hard structural invalidation skips the provider call entirely.
   below the running leg low by more than `max(one tick, 0.10×ATR14)`
   continues that decline and merges into it (max high, min low — the same
   semantics as a Gemini merge); a non-final swing shallower than the 1.25%
-  noise floor is dropped; the final raw swing is always kept; beyond 6 the
-  oldest merge. At most 6 candidates are sent, so the 6-row schema is always
+  noise floor is dropped; a non-final leg whose high a later leg clears by
+  more than `max(one tick, 0.50×ATR14)` is a dip inside that rally (not a
+  contraction) and is dropped, while near-equal flat highs stay separate;
+  the final raw swing is always kept; beyond 6 the oldest merge. At most 6 candidates are sent, so the 6-row schema is always
   satisfiable. `python_count` is the folded count; the raw fractal count is
   audit-only (`raw_count`). Each candidate includes exact high/low dates, `%`
   depth, and volume vs ADV20/ADV50. Gemini receives that short text summary
@@ -372,17 +375,31 @@ story; hard structural invalidation skips the provider call entirely.
   the same freeze: base age in completed sessions, low progression and any
   undercut, the significant-contraction staircase, right-edge position
   inside the final contraction, final-pullback/pivot-day volume ratios, and
-  each structural gate's pass/fail status. It never carries the post-pivot
-  drawdown through as-of. Facts are percentages, session
-  counts, and statuses only — never absolute prices — and Gemini must treat
-  them as authoritative rather than re-estimating them from pixels.
+  each structural gate's pass/fail status. Each check is labelled with its
+  scope (for example "final pullback only", "pivot day only"), and the
+  summary names what Python does not check (earlier distribution or climax
+  days, overhead supply, a V-shaped recovery) so a passed scoped check is
+  never read as a global all-clear. It also carries base context computed
+  from the 252 freeze: prior advance into the base high, base depth and the
+  deepest-low date, the pivot's position in the base and its distance below
+  the base high, the last close vs the base high / 52-week high /
+  SMA50/150/200, SMA200 slope and MA stack, and the heaviest-volume sessions
+  since the base high (volume vs the prior 50 sessions, direction, close
+  location) with heavy up/down-day counts. It never carries the post-pivot
+  drawdown through as-of. Facts are percentages, ratios, dates, session
+  counts, and statuses only — never absolute prices. Gemini treats each fact
+  as exact within its stated scope rather than re-estimating it from
+  pixels; outside those scopes it judges the chart and context itself.
+  The 126-session model chart carries no symbol or company name.
 - Missing/stale candles, failed survivor resolution, hash/render mismatch,
   invalid schema, provider failure, numeric-gate failure, or timeout produces
   an audited non-proposal state.
 
 ### 5.2 Gemini contract
 
-Gemini must return strict JSON (`additionalProperties: false`) containing only:
+Gemini must return strict JSON (`additionalProperties: false`) containing
+only the fields below. The schema emits evidence, red flags, and candidate
+assessments before `classification`, so the class is decided last:
 
 - `classification`: `valid | forming | not_vcp`
 - `forming_state`: `developing | breaking_down | null` (required when `forming`)
@@ -474,8 +491,8 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
   - Persist which formula landed in which slot.
 - 52-week high is informational (`near_52w_high`, `fresh_high_breakout`,
   `level_to_watch`). It is never a rejection.
-- **Structural gates (policy `p10_structural_gates_v2`, carried by
-  `GEOMETRY_VERSION = p10_python_owned_levels_v7`)** run on the Python
+- **Structural gates (policy `p10_structural_gates_v3`, carried by
+  `GEOMETRY_VERSION = p10_python_owned_levels_v8`)** run on the Python
   geometry before inference (undercut and base age on unfolded raw swings;
   tightening, pullback volume and pivot on the folded candidates) and are independent of Gemini survivor
   resolution. Dispositions: `ok` (proceed), `forming` (watch — never a
@@ -509,6 +526,13 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
     invalid (`structural_pivot_climax_fade`). Elevated pivot volume alone
     never rejects (healthy institutional accumulation), and the final
     contraction's own pullback depth is never a climax signal.
+  - **Base position**: the pivot (final folded high) sits below 0.67 of the
+    base's deepest-low-to-base-high range **and** more than 8% below the base
+    high (base high = highest raw swing high; deepest low = lowest raw swing
+    low after it) ⇒ `forming` (`structural_pivot_low_in_base`): an
+    incomplete right side under overhead supply, rechecked on later EODs.
+    Both conditions are required so a shallow base never trips it.
+    Provisional defaults; swept 0.50–0.75 × 5–12% on development data.
   No structural rule may use a session after as-of; baselines use strictly
   earlier sessions (unit-tested no-lookahead).
 - Independent numeric gates (any failure → audited non-proposal):
@@ -582,7 +606,8 @@ proof. No template may create more than three entry legs.
 computes pivot, entry, stop, or targets. The proposal worker upserts
 `p10_forming_patterns` (`watching | promoted | broken_down | expired`) and
 does not write LTP `watchlists`. Structural immaturity (base younger than
-the maturity floor, or fewer than two folded candidates so far) routes into this watch
+the maturity floor, fewer than two folded candidates so far, or a pivot low
+in the base) routes into this watch
 even when Gemini says `valid` — the attempt is recorded `partial` with
 `proposal_structural_forming` and the pattern is rechecked on later EODs
 instead of being killed.
@@ -1125,7 +1150,7 @@ Do not reorder phases without asking. Status tags: `[done]`, `[next]`,
 | **P6** | Reconciliation cron | `[done]` |
 | **P7** | LLM fundamental pass on technical survivors | `[done]` — cached Upstox snapshots, deterministic normalization, strict OpenRouter verdicts, and manual-review UI |
 | **P8** | Journal + AI coach (read-only) | `[done]` — future-fill outbox, frozen entry snapshots, regime tag at first fill, CNC charge estimates, chart PNG capture, period summaries, tradebook from journal, async AI coach with input-hash reuse |
-| **VCP vision** | On-demand VCP validator (advisory screening/manual-review extension) | `[done]` — frozen EOD candle snapshot + reuse key, standardized 1280×720 capture, blind strict structured OpenRouter verdict with date-anchor validation, attempt audit trail, sheet UI with read-only overlay + source images, human review, and workstation overlay toggle |
+| **VCP vision** | On-demand VCP validator (advisory screening/manual-review extension) | `[done]` — frozen EOD candle snapshot + reuse key, standardized 1280×720 capture, blind strict structured OpenRouter verdict with date-anchor validation, attempt audit trail, sheet UI with read-only overlay + source images, human review, and workstation overlay toggle. Validator v2 embeds the shared VCP rubric, adds a `forming` verdict (`valid | forming | invalid | uncertain`), and allows zero anchors on non-VCP charts |
 | **P9** | Deterministic Nifty/sector context, shadow-first P10 entry/add gates | `[done]` — implementation is complete; replay review and owner-controlled shadow→enforced rollout remain operational gates |
 | **P10** | Automated proposal generation → immutable approval → deterministic multi-leg entry/risk/exit automation | `[done]` — implementation and review hardening are complete; operational rollout remains gated and starts at Shadow |
 
@@ -1181,7 +1206,12 @@ the phase table above is authoritative going forward.
   on noisy synthetic bases (noisy two-contraction VCP ⇒ ok; high-volume
   pivot plus quiet pullback ⇒ not climax; flat shelf with rising lows ⇒
   invalid); folding never hides an undercut; retention ignores sessions
-  after pivot+K.
+  after pivot+K. Gates v3: rally dips with rising highs are dropped while
+  flat highs stay; a deep V-recovery with the pivot mid-base ⇒ forming
+  (`structural_pivot_low_in_base`) and a shallow base never trips it;
+  base-context volume ratios use only strictly earlier sessions; the
+  summary scopes every check, carries no absolute prices, and names what
+  Python does not check.
 - Market-data provider: Upstox history/LTP adapter returns the Fyers-shaped
   response in the stored timestamp convention; every index literal maps to a
   verified Upstox key; Upstox ticks have the Fyers tick shape; 401/403 never

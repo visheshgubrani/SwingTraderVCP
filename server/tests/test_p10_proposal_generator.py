@@ -89,10 +89,10 @@ class TestProposalGenerator(unittest.TestCase):
             VcpContractionWave(
                 index=1,
                 high_date=c1_high.date,
-                high_price=Decimal("120.00"),
+                high_price=Decimal("125.00"),
                 low_date=c1_low.date,
                 low_price=Decimal("100.00"),
-                depth_pct=Decimal("16.67"),
+                depth_pct=Decimal("20.00"),
                 vol_adv20=Decimal("1.20"),
                 vol_adv50=Decimal("1.10"),
             ),
@@ -184,13 +184,13 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(locked["geometry"]["planned_entry"], str(locked["geometry"]["calculation_basis"]["entry_chase"]["planned_entry"]))
         self.assertEqual(len(locked["proposal_hash"]), 64)
         self.assertEqual(locked["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v8")
+        self.assertEqual(SCHEMA_VERSION, "gemini_vcp_proposal_output_v9")
         self.assertEqual(locked["geometry_version"], GEOMETRY_VERSION)
         self.assertEqual(
             locked["entry_trigger_policy_version"],
             "balanced_breakout_v3",
         )
-        self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v7")
+        self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v8")
         self.assertEqual(len(locked["geometry"]["target_slots"]), 3)
 
     def test_proposal_generated_after_d1_deadline_starts_expired(self):
@@ -539,3 +539,39 @@ class PromptV8NeutralityTest(unittest.TestCase):
             self.assertNotIn(phrase, prompt)
         self.assertIn("Two genuine contractions", prompt)
         self.assertIn("no class is the default", prompt)
+
+
+class PromptV9ScopedFactsTest(unittest.TestCase):
+    def test_prompt_scopes_python_facts_instead_of_deferring(self):
+        from app.services.proposal_generator import (
+            GEMINI_PROPOSAL_SYSTEM_PROMPT as prompt,
+            _proposal_user_text,
+        )
+        from app.services.vcp_rubric import VCP_RUBRIC
+
+        user_text = _proposal_user_text(tick_size=Decimal("0.05"), candidate_summary="")
+        for phrase in (
+            "Do not assert a disqualifier from pixels",
+            "they cannot be argued with pixels",
+            "Charts reach you only after",
+        ):
+            self.assertNotIn(phrase, prompt)
+            self.assertNotIn(phrase, user_text)
+        self.assertIn(VCP_RUBRIC, prompt)
+        self.assertIn("exact within its stated scope", prompt)
+        self.assertIn("exact within its stated scope", user_text)
+        self.assertIn("upper part of the base", prompt)
+        self.assertIn("dip inside a rally whose highs keep rising", prompt)
+        self.assertIn("decide classification last", prompt)
+
+    def test_schema_emits_evidence_before_classification(self):
+        from app.services.openrouter_schema import gemini_compatible_json_schema
+
+        schema = gemini_compatible_json_schema(GeminiVcpProposalOutput.model_json_schema())
+        order = list(schema["properties"])
+        self.assertEqual(order[0], "evidence_summary")
+        self.assertLess(order.index("candidate_assessments"), order.index("classification"))
+        self.assertLess(order.index("red_flags"), order.index("classification"))
+        self.assertEqual(schema["required"], order)
+        for forbidden in ("pivot", "stop", "target", "entry", "quantity", "template", "contraction_count"):
+            self.assertFalse(_contains_key(schema, forbidden), forbidden)

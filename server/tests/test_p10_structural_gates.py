@@ -1,5 +1,5 @@
 """Structural gates, schema-consistency, and provider-taxonomy tests for the
-P10 audit reliability machinery (p10_structural_gates_v2 / schema v8)."""
+P10 audit reliability machinery (p10_structural_gates_v3 / schema v9)."""
 
 import datetime as dt
 import unittest
@@ -613,3 +613,123 @@ class FoldAndStaircaseTest(unittest.TestCase):
 
         self.assertEqual([w.index for w in significant_staircase([wv(1, 15), wv(2, 6), wv(3, 9), wv(4, 4)])], [1, 3, 4])
         self.assertEqual([w.index for w in significant_staircase([wv(1, 8.0), wv(2, 3), wv(3, 8.05)])], [1, 3])
+
+
+# ---------------------------------------------------------------------------
+# Gates v3: advance-dip folding, base context, and the base-position gate.
+# ---------------------------------------------------------------------------
+
+# GESHIP-shaped: prior advance into a climax top, a ~30% first leg with a
+# heavy-volume down day, a V-shaped recovery whose dips have rising highs,
+# then a small wiggle at ~50% of the base range, ~15% under the base high.
+V_RECOVERY_LOW_IN_BASE = [
+    (110, 0), (112, 57), (108, 15), (150, 50), (145, 6), (179.8, 20),
+    (150, 15), (160, 8), (126.1, 25),
+    (133, 6), (129, 4), (142, 8), (138, 4), (158.3, 12),
+    (146, 8), (153.06, 6), (148, 5), (149.66, 2),
+]
+V_TOP_INDEX = 148
+V_DISTRIBUTION_INDEX = 185
+
+
+def v_recovery_candles(vols=None):
+    return path_to_candles(
+        V_RECOVERY_LOW_IN_BASE,
+        vols={V_TOP_INDEX: 900_000, V_DISTRIBUTION_INDEX: 1_350_000, **(vols or {})},
+    )
+
+
+class BasePositionGateTest(unittest.TestCase):
+    def test_v_recovery_low_in_base_is_forming_not_valid(self):
+        _, facts, verdict = real_detector(v_recovery_candles())
+        # Rally dips are dropped: C1 (the 30% leg) + two right-side legs.
+        self.assertEqual(facts.candidate_count, 3)
+        self.assertEqual(verdict.disposition, "forming")
+        self.assertEqual(verdict.codes, ("structural_pivot_low_in_base",))
+        bc = facts.base_context
+        self.assertGreater(bc.base_depth_pct, Decimal("28"))
+        self.assertTrue(Decimal("0.45") < bc.pivot_position_in_base < Decimal("0.55"))
+        self.assertLess(bc.pivot_vs_base_high_pct, Decimal("-8"))
+        top = bc.volume_anomalies[0]
+        self.assertEqual(top.date, v_recovery_candles()[V_DISTRIBUTION_INDEX].date)
+        self.assertEqual(top.direction, "down")
+        self.assertEqual(bc.heavy_down_days, 1)
+
+    def test_summary_scopes_checks_and_carries_base_context_without_prices(self):
+        candles = v_recovery_candles()
+        _, facts, _ = real_detector(candles)
+        summary = format_candidate_summary(facts.candidates, facts=facts)
+        self.assertIn("Final pullback only", summary)
+        self.assertIn("Final pivot day only", summary)
+        self.assertNotIn("(distribution check:", summary)
+        self.assertIn("Pivot position (base-position check: FAILED)", summary)
+        self.assertIn(candles[V_DISTRIBUTION_INDEX].date, summary)
+        self.assertIn("Not checked by Python", summary)
+        self.assertIn("SMA50 > SMA150 > SMA200", summary)
+        self.assertNotIn("₹", summary)
+        for token in ("180.2", "179.8", "153.46", "153.06", "125.7", "126.1"):
+            self.assertNotIn(token, summary)
+        self.assertIn("base_context", structural_facts_to_dict(facts))
+
+    def test_advance_dip_rule_is_what_drops_the_rally_dips(self):
+        candles = v_recovery_candles()
+        geometry, facts, _ = real_detector(candles)
+        without = compute_structural_facts(
+            candles,
+            geometry.contractions,
+            tick_size=Decimal("0.05"),
+            advance_dip_tolerance_atr=None,
+        )
+        self.assertGreater(without.candidate_count, facts.candidate_count)
+        # Low progression is read from raw swings either way.
+        self.assertEqual(without.undercut_gap, facts.undercut_gap)
+
+    def test_volume_baseline_uses_only_earlier_sessions(self):
+        base = v_recovery_candles()
+        later = v_recovery_candles(vols={V_DISTRIBUTION_INDEX + 1: 5_000_000})
+        own = v_recovery_candles(vols={V_DISTRIBUTION_INDEX: 2_700_000})
+
+        def ratio(candles):
+            geometry = derive_chart_geometry(candles, tick_size=Decimal("0.05"))
+            facts = compute_structural_facts(candles, geometry.contractions, tick_size=Decimal("0.05"))
+            date = candles[V_DISTRIBUTION_INDEX].date
+            return next(a.vol_vs_adv50 for a in facts.base_context.volume_anomalies if a.date == date)
+
+        self.assertEqual(ratio(base), ratio(later))
+        self.assertEqual(ratio(own), ratio(base) * 2)
+
+    def test_pivot_near_base_high_passes_base_position(self):
+        _, facts, verdict = real_detector(path_to_candles(NOISY_TWO_CONTRACTION))
+        self.assertGreaterEqual(facts.base_context.pivot_position_in_base, Decimal("0.67"))
+        self.assertNotIn("structural_pivot_low_in_base", verdict.codes)
+
+    def test_shallow_base_never_trips_base_position(self):
+        # Low in a shallow base is not overhead supply: both conditions must hold.
+        facts = compute_structural_facts(
+            synth_candles(n=200, step=0.05, overrides={
+                170: (150.0, 152.0, 147.0, 148.0, 120_000),
+                182: (149.0, 149.6, 148.2, 149.0, 120_000),
+            }),
+            (wave(1, 160, 152.0, 170, 147.0), wave(2, 178, 149.6, 182, 148.2)),
+            tick_size=Decimal("0.05"),
+        )
+        self.assertLess(facts.base_context.pivot_position_in_base, Decimal("0.67"))
+        self.assertNotIn("structural_pivot_low_in_base", evaluate_structural_gates(facts).codes)
+
+
+class AdvanceDipFoldTest(unittest.TestCase):
+    ATR = Decimal("2")
+
+    def test_rally_dip_dropped_flat_high_kept(self):
+        folded, members = fold_contraction_candidates(
+            [wave(1, 10, 100.0, 15, 85.0), wave(2, 18, 92.0, 20, 88.0),
+             wave(3, 25, 97.0, 28, 90.0), wave(4, 31, 96.0, 33, 93.0)],
+            atr14=self.ATR,
+        )
+        # 92 is cleared by 97 (a dip inside that rally); 97 vs 96 is a lower high.
+        self.assertEqual(members, ((1,), (3,), (4,)))
+        flat, _ = fold_contraction_candidates(
+            [wave(1, 10, 100.0, 15, 90.0), wave(2, 18, 100.8, 20, 94.0)],
+            atr14=self.ATR,
+        )
+        self.assertEqual(len(flat), 2)  # within 0.5 x ATR: flat highs stay separate

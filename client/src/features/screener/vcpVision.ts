@@ -10,7 +10,7 @@ export type VcpVisionStatus =
   | "succeeded"
   | "failed"
 
-export type VcpVisionVerdict = "valid" | "invalid" | "uncertain"
+export type VcpVisionVerdict = "valid" | "forming" | "invalid" | "uncertain"
 
 export interface VcpVisionCandle {
   date: string

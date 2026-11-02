@@ -163,6 +163,16 @@ def _daily_row(candle: list[Any]) -> list[Any]:
     return [epoch, candle[1], candle[2], candle[3], candle[4], int(candle[5] or 0)]
 
 
+def _only_weekends_before(start: dt.date, today: dt.date) -> bool:
+    """True when every date in ``[start, today)`` is a Saturday or Sunday."""
+    day = start
+    while day < today:
+        if day.weekday() < 5:
+            return False
+        day += dt.timedelta(days=1)
+    return True
+
+
 def _intraday_row(candle: list[Any]) -> list[Any]:
     epoch = int(_parse_ts(candle[0]).timestamp())
     return [epoch, candle[1], candle[2], candle[3], candle[4], int(candle[5] or 0)]
@@ -242,6 +252,7 @@ class UpstoxMarketDataClient:
         heartbeat: Callable[[], Awaitable[None]] | None = None,
         on_wait: Callable[[str | None, str | None], Awaitable[None]] | None = None,
         max_wait_seconds: float | None = None,
+        window_wait_seconds: float = 0,
     ) -> dict[str, Any]:
         try:
             response = await paced_request(
@@ -251,6 +262,7 @@ class UpstoxMarketDataClient:
                 heartbeat=heartbeat,
                 on_wait=on_wait,
                 max_wait_seconds=max_wait_seconds,
+                window_wait_seconds=window_wait_seconds,
             )
         except UpstoxMarketDataAuthError as exc:
             await record_upstox_auth_failure(redis, str(exc))
@@ -264,6 +276,7 @@ class UpstoxMarketDataClient:
         *,
         heartbeat: Callable[[], Awaitable[None]] | None = None,
         on_wait: Callable[[str | None, str | None], Awaitable[None]] | None = None,
+        window_wait_seconds: float = 0,
     ) -> dict[str, Any]:
         symbol = str(payload.get("symbol") or "")
         key = self.key_map.get(symbol)
@@ -276,31 +289,44 @@ class UpstoxMarketDataClient:
         end = dt.date.fromisoformat(str(payload["range_to"]))
         resolution = str(payload.get("resolution"))
         enc = encode_key(key)
-        kwargs = {"budget": bulk_budget(), "heartbeat": heartbeat, "on_wait": on_wait}
+        kwargs = {
+            "budget": bulk_budget(),
+            "heartbeat": heartbeat,
+            "on_wait": on_wait,
+            "window_wait_seconds": window_wait_seconds,
+        }
 
         if resolution == "D":
-            response = await self._paced(
-                redis,
-                f"/v3/historical-candle/{enc}/days/1/{end.isoformat()}/{start.isoformat()}",
-                **kwargs,
-            )
-            if response["s"] != "ok":
-                return response
-            rows = {r[0]: r for r in map(_daily_row, response["data"].get("candles") or [])}
             now = self._clock()
             today = _ist_today(now)
             today_epoch = int(dt.datetime.combine(today, dt.time(), dt.timezone.utc).timestamp())
-            # The historical endpoint can lag the close; after 16:00 IST the
+            # The historical endpoint lags the close; after 16:00 IST the
             # intraday day-candle carries today's completed session.
-            if (
+            needs_today = (
                 end >= today
-                and today_epoch not in rows
                 and now.astimezone(IST).time() >= dt.time(16, 0)
                 and today.weekday() < 5
-            ):
+            )
+            rows: dict[int, list[Any]] = {}
+            # Skip the historical call when the only possible session in range
+            # is today (every earlier date is a weekend). Weekday holidays are
+            # deliberately not skipped: a wrong holiday entry must never leave
+            # a permanent gap, since later syncs resume from the latest candle.
+            if not (needs_today and _only_weekends_before(start, today)):
+                response = await self._paced(
+                    redis,
+                    f"/v3/historical-candle/{enc}/days/1/{end.isoformat()}/{start.isoformat()}",
+                    **kwargs,
+                )
+                if response["s"] != "ok":
+                    return response
+                rows = {r[0]: r for r in map(_daily_row, response["data"].get("candles") or [])}
+            if needs_today and today_epoch not in rows:
                 intraday = await self._paced(
                     redis, f"/v3/historical-candle/intraday/{enc}/days/1", **kwargs
                 )
+                if intraday["s"] != "ok" and not rows:
+                    return intraday
                 if intraday["s"] == "ok":
                     for candle in intraday["data"].get("candles") or []:
                         row = _daily_row(candle)

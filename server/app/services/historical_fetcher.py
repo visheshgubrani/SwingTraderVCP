@@ -35,6 +35,10 @@ SYNC_LOCK_KEY = "historical:eod_sync:lock"
 SYNC_CANCEL_KEY = "historical:eod_sync:cancel"
 SYNC_LOCK_SECONDS = 60 * 60
 SYNC_STATUS_TTL_SECONDS = 60 * 60 * 2
+# The nightly sync may wait out one full Upstox 30-minute window (with margin)
+# instead of aborting; the job timeout is 2 hours. Fyers' daily window still
+# fails fast because fetch_history only forwards this to the Upstox adapter.
+SYNC_WINDOW_WAIT_SECONDS = 35 * 60
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
 EOD_AVAILABLE_AFTER = datetime.time(hour=18, minute=0)
 
@@ -469,6 +473,11 @@ async def run_historical_sync(
                     f"{provider_label} rate limit: waiting until {retry_at} "
                     "for one recovery request."
                 )
+            elif reason == "window_quota":
+                progress.log(
+                    f"{provider_label} rolling request window is full: waiting "
+                    f"until {retry_at} before continuing."
+                )
             await save_sync_status(redis, progress)
 
         for index, instrument in enumerate(instruments, start=1):
@@ -527,7 +536,12 @@ async def run_historical_sync(
                 }
                 try:
                     response = await fetch_history(
-                        redis, fyers, payload, heartbeat=heartbeat, on_wait=on_wait
+                        redis,
+                        fyers,
+                        payload,
+                        heartbeat=heartbeat,
+                        on_wait=on_wait,
+                        window_wait_seconds=SYNC_WINDOW_WAIT_SECONDS,
                     )
                     if response.get("s") != "ok":
                         if is_prefix and history_response_has_no_data(response):

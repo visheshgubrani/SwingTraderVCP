@@ -58,6 +58,51 @@ class WrapperTests(unittest.IsolatedAsyncioTestCase):
             )
         broker.history.assert_not_awaited()
 
+    async def test_full_window_raises_without_window_wait(self):
+        call = AsyncMock(return_value={"s": "ok"})
+        redis = SimpleNamespace(eval=AsyncMock(return_value=[4, 1]))
+        with self.assertRaises(h.HistoryUnavailable):
+            await h.paced_request(redis, h.fyers_budget(), call)
+        call.assert_not_awaited()
+
+    async def test_full_window_waits_when_window_wait_allows(self):
+        now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+        redis = SimpleNamespace(
+            eval=AsyncMock(side_effect=[[4, now_ms + 2000], [4, now_ms + 2000], [0, 0], 1])
+        )
+        call = AsyncMock(return_value={"s": "ok"})
+        wait = AsyncMock()
+        heartbeat = AsyncMock()
+        with patch.object(h.asyncio, "sleep", new=AsyncMock()):
+            result = await h.paced_request(
+                redis,
+                h.fyers_budget(),
+                call,
+                heartbeat=heartbeat,
+                on_wait=wait,
+                window_wait_seconds=60,
+            )
+        self.assertEqual(result, {"s": "ok"})
+        call.assert_awaited_once()
+        self.assertEqual(wait.await_args_list[0].args[0], "window_quota")
+        self.assertEqual(wait.await_args_list[-1].args, (None, None))
+        self.assertEqual(heartbeat.await_count, 3)
+
+    async def test_full_window_longer_than_window_wait_raises(self):
+        now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+        redis = SimpleNamespace(eval=AsyncMock(return_value=[4, now_ms + 3_600_000]))
+        call = AsyncMock()
+        with self.assertRaises(h.HistoryUnavailable):
+            await h.paced_request(redis, h.fyers_budget(), call, window_wait_seconds=60)
+        call.assert_not_awaited()
+
+    async def test_fyers_client_never_receives_window_wait(self):
+        redis = SimpleNamespace(eval=AsyncMock(return_value=[4, 1]))
+        broker = SimpleNamespace(history=AsyncMock())
+        with self.assertRaises(h.HistoryUnavailable):
+            await h.fetch_history(redis, broker, {}, window_wait_seconds=600)
+        broker.history.assert_not_awaited()
+
     def test_codes(self):
         for code in [429, -429, -360, "-360"]:
             self.assertEqual(h.rate_restriction({"code": code}), (True, False))

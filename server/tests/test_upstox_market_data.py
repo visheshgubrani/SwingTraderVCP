@@ -114,6 +114,60 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(response["candles"]), 1)
         self.assertEqual(response["candles"][0][5], 99)
 
+    async def test_monday_close_after_friday_skips_historical_call(self):
+        paths = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(unquote(request.url.path))
+            return httpx.Response(200, json={"status": "success", "data": {"candles": [
+                ["2026-11-02T00:00:00+05:30", 1, 2, 0.5, 1.5, 77, 0]]}})
+
+        # Latest stored candle is Fri 30-Oct; range is Sat 31-Oct..Mon 02-Nov.
+        client = client_with(handler, now=dt.datetime(2026, 11, 2, 18, 30, tzinfo=IST))
+        response = await h.fetch_history(budget_redis(), client, {
+            "symbol": "NSE:RELIANCE-EQ", "resolution": "D",
+            "range_from": "2026-10-31", "range_to": "2026-11-02",
+        })
+        await client.close()
+        self.assertEqual(paths, ["/v3/historical-candle/intraday/NSE_EQ|INE002A01018/days/1"])
+        self.assertEqual(response["s"], "ok")
+        self.assertEqual([c[5] for c in response["candles"]], [77])
+
+    async def test_missing_weekday_still_calls_historical_then_intraday(self):
+        paths = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = unquote(request.url.path)
+            paths.append(path)
+            if "/intraday/" in path:
+                candles = [["2026-11-02T00:00:00+05:30", 1, 2, 0.5, 1.5, 77, 0]]
+            else:
+                candles = [["2026-10-30T00:00:00+05:30", 1, 2, 0.5, 1.5, 55, 0]]
+            return httpx.Response(200, json={"status": "success", "data": {"candles": candles}})
+
+        client = client_with(handler, now=dt.datetime(2026, 11, 2, 18, 30, tzinfo=IST))
+        response = await h.fetch_history(budget_redis(), client, {
+            "symbol": "NSE:RELIANCE-EQ", "resolution": "D",
+            "range_from": "2026-10-30", "range_to": "2026-11-02",
+        })
+        await client.close()
+        self.assertEqual(len(paths), 2)
+        self.assertIn("/days/1/2026-11-02/2026-10-30", paths[0])
+        self.assertIn("/intraday/", paths[1])
+        self.assertEqual([c[5] for c in response["candles"]], [55, 77])
+
+    async def test_intraday_only_failure_is_reported_as_error(self):
+        client = client_with(
+            lambda r: httpx.Response(400, json={"status": "error", "errors": [{"message": "bad"}]}),
+            now=dt.datetime(2026, 11, 2, 18, 30, tzinfo=IST),
+        )
+        response = await h.fetch_history(budget_redis(), client, {
+            "symbol": "NSE:RELIANCE-EQ", "resolution": "D",
+            "range_from": "2026-11-02", "range_to": "2026-11-02",
+        })
+        await client.close()
+        self.assertEqual(response["s"], "error")
+
     async def test_five_minute_splits_windows_merges_today_and_keeps_bar_start(self):
         paths = []
 

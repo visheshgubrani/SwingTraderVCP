@@ -151,15 +151,23 @@ async def fetch_history(
     *,
     heartbeat: Callable[[], Awaitable[None]] | None = None,
     on_wait: Callable[[str | None, str | None], Awaitable[None]] | None = None,
+    window_wait_seconds: float = 0,
 ) -> dict[str, Any]:
     """Pace every attempt; allow one shared recovery probe after a restriction.
 
     Clients that pace their own sub-requests (the Upstox adapter) expose
     ``paced_history`` and keep the same Fyers-shaped response contract.
+    ``window_wait_seconds`` lets a long-running batch wait out a full rolling
+    window; it only applies to the Upstox adapter's short (30-minute) window.
+    The Fyers daily window always fails fast.
     """
     if getattr(type(fyers), "paced_history", None) is not None:
         return await fyers.paced_history(
-            redis, payload, heartbeat=heartbeat, on_wait=on_wait
+            redis,
+            payload,
+            heartbeat=heartbeat,
+            on_wait=on_wait,
+            window_wait_seconds=window_wait_seconds,
         )
     return await paced_request(
         redis,
@@ -178,10 +186,17 @@ async def paced_request(
     heartbeat: Callable[[], Awaitable[None]] | None = None,
     on_wait: Callable[[str | None, str | None], Awaitable[None]] | None = None,
     max_wait_seconds: float | None = None,
+    window_wait_seconds: float = 0,
 ) -> dict[str, Any]:
-    """Admit one request through ``budget``; ``call`` returns a Fyers-shaped dict."""
+    """Admit one request through ``budget``; ``call`` returns a Fyers-shaped dict.
+
+    A full rolling window (ADMIT state 4) raises unless ``window_wait_seconds``
+    covers the time until the oldest request ages out; then it waits like
+    pacing, still heartbeating every slice.
+    """
     previous_wait = None
     waited = 0.0
+    window_waited = 0.0
     while True:
         if heartbeat:
             try:
@@ -210,6 +225,18 @@ async def paced_request(
             raise HistoryUnavailable(
                 f"{budget.label} paused: Redis request budget is unavailable."
             ) from exc
+        if state == 4 and window_wait_seconds > 0:
+            now = dt.datetime.now(dt.timezone.utc).timestamp() * 1000
+            remaining = max(0.0, (until - now) / 1000)
+            if window_waited + remaining <= window_wait_seconds:
+                wait = ("window_quota", timestamp(until))
+                if on_wait and wait != previous_wait:
+                    await on_wait(*wait)
+                previous_wait = wait
+                delay = min(1.0, max(0.01, remaining))
+                window_waited += delay
+                await asyncio.sleep(delay)
+                continue
         if state in {3, 4}:
             reason = (
                 f"{budget.label} is restricted after a failed recovery probe."

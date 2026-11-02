@@ -102,6 +102,55 @@ async def record_upstox_auth_failure(redis: Any, detail: str) -> None:
         logger.warning("Upstox auth-failure event could not be persisted", exc_info=True)
 
 
+INVALID_INSTRUMENT_KEY_CODE = "UDAPI100011"
+
+
+def is_invalid_instrument_key(response: dict[str, Any]) -> bool:
+    """Upstox no longer recognises the key: usually an ISIN change or delisting."""
+    if response.get("s") == "ok":
+        return False
+    if response.get("error_code") == INVALID_INSTRUMENT_KEY_CODE:
+        return True
+    return "invalid instrument key" in str(response.get("message") or "").lower()
+
+
+async def record_invalid_instrument_keys(symbols: list[dict[str, Any]]) -> None:
+    """One warning per sync run naming every instrument Upstox rejected.
+
+    Universe drift (index rebalance, ISIN change) otherwise only shows up as a
+    stock silently going stale. Never touches the money path.
+    """
+    if not symbols:
+        return
+    try:
+        from app.database import async_session
+
+        async with async_session() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO system_events (component, severity, event_type, payload)
+                    VALUES ('market_data', 'warning', 'upstox_instrument_key_invalid',
+                            CAST(:payload AS jsonb))
+                    """
+                ),
+                {
+                    "payload": json.dumps(
+                        {
+                            "count": len(symbols),
+                            "instruments": symbols[:50],
+                            "hint": "Refresh server/ind_nifty500list.csv from NSE and "
+                            "re-run scripts/import_nifty500_instruments.py, or set "
+                            "metadata.upstox_instrument_key.",
+                        }
+                    )
+                },
+            )
+            await session.commit()
+    except Exception:
+        logger.warning("Upstox invalid-key event could not be persisted", exc_info=True)
+
+
 async def clear_upstox_auth_failure(redis: Any) -> None:
     try:
         await redis.delete(UPSTOX_AUTH_FAILED_KEY)
@@ -234,11 +283,14 @@ class UpstoxMarketDataClient:
                 body = {}
             if response.status_code >= 400 or body.get("status") != "success":
                 errors = body.get("errors") if isinstance(body, dict) else None
-                message = (
-                    (errors[0].get("message") if errors and isinstance(errors[0], dict) else None)
-                    or f"Upstox HTTP {response.status_code}"
-                )
-                return {"s": "error", "code": str(response.status_code), "message": message}
+                first = errors[0] if errors and isinstance(errors[0], dict) else {}
+                message = first.get("message") or f"Upstox HTTP {response.status_code}"
+                return {
+                    "s": "error",
+                    "code": str(response.status_code),
+                    "message": message,
+                    "error_code": first.get("errorCode") or first.get("error_code"),
+                }
             return {"s": "ok", "data": body.get("data") or {}}
         return {"s": "error", "code": "5xx", "message": last_error}
 

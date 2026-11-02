@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -26,6 +27,12 @@ DEFAULT_CSV_PATH = POTENTIAL_CSV_PATHS[0]
 DEFAULT_UNIVERSE_CODE = "NIFTY500"
 DEFAULT_SOURCE = "nse_ind_nifty500_csv"
 REQUIRED_HEADERS = {"Company Name", "Industry", "Symbol", "Series", "ISIN Code"}
+# Equity shares only: EQ (rolling) and BE (trade-for-trade). NSE's Nifty 500
+# file also lists REIT/InvIT units (series RR/IV), which are out of scope.
+SCANNABLE_SERIES = frozenset({"EQ", "BE"})
+# NSE publishes corporate-action placeholders (e.g. DUMMYHEG, ISIN DUM...)
+# that never trade and have no market-data key; a real ISIN starts with IN.
+VALID_ISIN = re.compile(r"^IN[A-Z0-9]{10}$")
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,14 @@ def read_nifty500_csv(csv_path: Path) -> list[Nifty500Row]:
             if symbol in seen_symbols:
                 raise ValueError(f"CSV row {line_number} duplicates symbol {symbol}.")
             seen_symbols.add(symbol)
+            if series not in SCANNABLE_SERIES or not VALID_ISIN.match(isin):
+                logger.info(
+                    "Skipping non-equity/placeholder Nifty 500 row %s (series=%s, isin=%s)",
+                    symbol,
+                    series,
+                    isin,
+                )
+                continue
 
             rows.append(
                 Nifty500Row(

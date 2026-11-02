@@ -21,7 +21,9 @@ from app.services.fyers_history import (
 from app.services.scan_readiness import load_scan_readiness
 from app.services.upstox_market_data import (
     UpstoxMarketDataAuthError,
+    is_invalid_instrument_key,
     open_upstox_client,
+    record_invalid_instrument_keys,
 )
 from app.services.screening_config import TechnicalScreeningConfig
 from arq.connections import ArqRedis
@@ -480,6 +482,7 @@ async def run_historical_sync(
                 )
             await save_sync_status(redis, progress)
 
+        invalid_keys: list[dict[str, Any]] = []
         for index, instrument in enumerate(instruments, start=1):
             if await redis.get(SYNC_CANCEL_KEY):
                 progress.finish("cancelled", "Sync cancelled by the user.")
@@ -552,6 +555,18 @@ async def run_historical_sync(
                             )
                         else:
                             symbol_failed = True
+                            if use_upstox and is_invalid_instrument_key(response):
+                                invalid_keys.append(
+                                    {
+                                        "symbol": instrument.symbol,
+                                        "fyers_symbol": instrument.fyers_symbol,
+                                        "latest_candle_date": (
+                                            instrument.latest_candle_date.isoformat()
+                                            if instrument.latest_candle_date
+                                            else None
+                                        ),
+                                    }
+                                )
                             progress.add_error(
                                 instrument.symbol,
                                 response.get(
@@ -614,6 +629,15 @@ async def run_historical_sync(
                 await save_sync_status(redis, progress)
                 return {"status": "lock_lost"}
             await save_sync_status(redis, progress)
+
+        if invalid_keys:
+            progress.log(
+                f"WARNING: {provider_label} rejected the instrument key for "
+                f"{len(invalid_keys)} instrument(s) (ISIN change or index drift): "
+                + ", ".join(item["symbol"] for item in invalid_keys)
+                + ". Refresh ind_nifty500list.csv from NSE and re-import."
+            )
+            await record_invalid_instrument_keys(invalid_keys)
 
         final_state = "partial" if progress.error_count else "succeeded"
         progress.finish(

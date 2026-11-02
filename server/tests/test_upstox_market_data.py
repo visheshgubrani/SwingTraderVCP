@@ -168,6 +168,23 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         await client.close()
         self.assertEqual(response["s"], "error")
 
+    async def test_invalid_instrument_key_is_detectable(self):
+        client = client_with(
+            lambda r: httpx.Response(400, json={"status": "error", "errors": [
+                {"errorCode": "UDAPI100011", "message": "Invalid Instrument key"}]}),
+            now=dt.datetime(2026, 11, 3, 10, tzinfo=IST),
+        )
+        response = await h.fetch_history(budget_redis(), client, {
+            "symbol": "NSE:RELIANCE-EQ", "resolution": "D",
+            "range_from": "2026-10-27", "range_to": "2026-11-02",
+        })
+        await client.close()
+        self.assertEqual(response["error_code"], "UDAPI100011")
+        self.assertTrue(um.is_invalid_instrument_key(response))
+        self.assertTrue(um.is_invalid_instrument_key({"s": "error", "message": "Invalid Instrument key"}))
+        self.assertFalse(um.is_invalid_instrument_key({"s": "error", "message": "Upstox HTTP 500"}))
+        self.assertFalse(um.is_invalid_instrument_key({"s": "ok"}))
+
     async def test_five_minute_splits_windows_merges_today_and_keeps_bar_start(self):
         paths = []
 

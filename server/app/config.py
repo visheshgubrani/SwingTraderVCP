@@ -168,6 +168,15 @@ class Settings(BaseSettings):
     saas_standard_scan_fallback_enabled: bool = True
     saas_standard_scan_fallback_hour: int = Field(default=19, ge=0, le=23)
     saas_standard_scan_fallback_minute: int = Field(default=0, ge=0, le=59)
+    # Evening catch-up: when no personal scan exists for the EOD date yet,
+    # rerun the incremental sync (which re-queues P9 -> personal scan once the
+    # readiness gate passes). Upstox's intraday endpoint serves the day's
+    # candle only until midnight IST, so slots stay in the same evening.
+    eod_catch_up_enabled: bool = True
+    eod_catch_up_hours: list[int] = Field(
+        default_factory=lambda: [19, 20, 21, 22, 23]
+    )
+    eod_catch_up_minute: int = Field(default=15, ge=0, le=59)
     # A running personal scan with no corresponding ARQ job is only recovered
     # after this grace period, avoiding false recovery during worker transitions.
     personal_scan_running_stale_seconds: int = Field(default=3600, ge=300, le=21600)
@@ -344,6 +353,16 @@ class Settings(BaseSettings):
         for hour in v:
             if not 0 <= int(hour) <= 23:
                 raise ValueError("AUTH_GUARD_HOURS entries must be 0-23")
+        return sorted({int(hour) for hour in v})
+
+    @field_validator("eod_catch_up_hours", mode="after")
+    @classmethod
+    def validate_eod_catch_up_hours(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("EOD_CATCH_UP_HOURS must contain at least one hour")
+        for hour in v:
+            if not 0 <= int(hour) <= 23:
+                raise ValueError("EOD_CATCH_UP_HOURS entries must be 0-23")
         return sorted({int(hour) for hour in v})
 
     @field_validator("auth_guard_minutes", mode="after")

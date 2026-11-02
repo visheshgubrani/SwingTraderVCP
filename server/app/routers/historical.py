@@ -198,6 +198,9 @@ async def get_sync_status(
     status["required_scoreable_instruments"] = (
         readiness.required_scoreable_instruments
     )
+    status["listing_limited_instruments"] = (
+        readiness.listing_limited_instruments
+    )
     status["minimum_history_days"] = readiness.minimum_history_days
     status["db_metrics"] = {
         "total_candles": candles_count,

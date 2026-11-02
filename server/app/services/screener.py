@@ -287,7 +287,7 @@ async def run_technical_scan(ctx: Dict[str, Any], scan_run_id: str) -> None:
         if len(prepared_stocks) < readiness.required_scoreable_instruments:
             raise ValueError(
                 "Indicator preparation reduced the scoreable Nifty 500 universe "
-                f"to {len(prepared_stocks)}/{readiness.active_instruments}; "
+                f"to {len(prepared_stocks)}/{readiness.eligible_instruments}; "
                 f"{readiness.required_scoreable_instruments} required (95%)."
             )
 

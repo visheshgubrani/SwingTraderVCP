@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.database import async_session
+from app.services import telegram_service
+from app.services.auth_readiness import is_nse_session
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.services.distributed_lease import (
     acquire_distributed_lease,
@@ -18,7 +20,8 @@ from app.services.fyers_history import (
     HistoryUnavailable,
     fetch_history,
 )
-from app.services.scan_readiness import load_scan_readiness
+from app.services.personal_scan import canonical_config_payload
+from app.services.scan_readiness import ScanReadiness, load_scan_readiness
 from app.services.upstox_market_data import (
     UpstoxMarketDataAuthError,
     is_invalid_instrument_key,
@@ -43,6 +46,11 @@ SYNC_STATUS_TTL_SECONDS = 60 * 60 * 2
 SYNC_WINDOW_WAIT_SECONDS = 35 * 60
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
 EOD_AVAILABLE_AFTER = datetime.time(hour=18, minute=0)
+# Unattended runs that should end in a queued scan chain; a blocked chain on
+# one of these alerts the owner. Manual/repair syncs report in the UI only.
+CHAIN_TRIGGERS = {"scheduled", "catch_up", "catch_up_final"}
+BLOCKED_ALERT_KEY_PREFIX = "eod_chain:blocked_alert:"
+BLOCKED_ALERT_TTL_SECONDS = 24 * 60 * 60
 
 
 @dataclass
@@ -311,6 +319,173 @@ async def enqueue_eod_scans(
             "Failed to enqueue SaaS Standard scan after EOD sync for %s",
             target_date.isoformat(),
         )
+
+
+async def personal_scan_exists(target_date: datetime.date) -> bool:
+    """Whether the EOD chain already produced (or is producing) its scan."""
+    config_json, _ = canonical_config_payload(TechnicalScreeningConfig())
+    async with async_session() as session:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM scan_runs
+                    WHERE visibility = 'personal'
+                      AND as_of_date = :as_of_date
+                      AND technical_config = CAST(:technical_config AS jsonb)
+                      AND status IN ('queued', 'running', 'succeeded')
+                    LIMIT 1
+                    """
+                ),
+                {"as_of_date": target_date, "technical_config": config_json},
+            )
+        ).first()
+    return row is not None
+
+
+async def run_eod_chain_catch_up(
+    ctx: dict[str, Any],
+    now: datetime.datetime | None = None,
+) -> dict[str, Any]:
+    """Rerun the incremental sync when tonight's personal scan is missing.
+
+    The sync only calls the provider for names that are still behind, and it
+    re-queues P9 -> personal scan itself once the readiness gate passes. Every
+    downstream step reuses same-date runs, so a retry never duplicates work.
+    """
+    redis: ArqRedis = ctx["redis"]
+    current = (now or datetime.datetime.now(INDIA_TZ)).astimezone(INDIA_TZ)
+    target_date = latest_completed_eod_date(current)
+    result: dict[str, Any] = {"target_date": target_date.isoformat()}
+    if not is_nse_session(target_date):
+        return {**result, "status": "not_a_session"}
+    if await personal_scan_exists(target_date):
+        return {**result, "status": "chain_present"}
+    if await redis.get(SYNC_LOCK_KEY):
+        return {**result, "status": "sync_running"}
+
+    final = current.hour >= max(settings.eod_catch_up_hours)
+    triggered_by = "catch_up_final" if final else "catch_up"
+    job = await redis.enqueue_job(
+        "run_historical_sync",
+        triggered_by,
+        _job_id=f"eod-catch-up:{target_date.isoformat()}:{current:%H%M}",
+    )
+    logger.warning(
+        "No personal scan for %s yet; queued %s EOD sync (job accepted=%s)",
+        target_date.isoformat(),
+        triggered_by,
+        job is not None,
+    )
+    return {**result, "status": "sync_enqueued", "triggered_by": triggered_by}
+
+
+def scan_chain_blocked_reasons(
+    progress: SyncProgress,
+    target_date: datetime.date,
+    readiness: ScanReadiness,
+    date_coverage_ready: bool,
+) -> list[str]:
+    reasons: list[str] = []
+    if not date_coverage_ready:
+        tolerated = max(1, progress.total_symbols // 100)
+        reasons.append(
+            f"the sync is not current for {target_date.isoformat()} "
+            f"({progress.successful_symbols}/{progress.total_symbols} symbols, "
+            f"{progress.error_count} errors; at most {tolerated} allowed)"
+        )
+    if not readiness.scanner_ready:
+        excluded = (
+            f" ({readiness.listing_limited_instruments} recent listings excluded)"
+            if readiness.listing_limited_instruments
+            else ""
+        )
+        reasons.append(
+            f"{readiness.scoreable_instruments}/{readiness.eligible_instruments} "
+            f"instruments are scoreable{excluded}; "
+            f"{readiness.required_scoreable_instruments} required"
+        )
+    return reasons
+
+
+async def record_scan_chain_blocked(
+    redis: ArqRedis,
+    progress: SyncProgress,
+    target_date: datetime.date,
+    readiness: ScanReadiness,
+    reasons: list[str],
+) -> None:
+    """Persist one system event per blocked run; Telegram on first and final.
+
+    Never raises: a reporting failure must not turn into a failed sync.
+    """
+    final = progress.triggered_by == "catch_up_final"
+    severity = "critical" if final else "warning"
+    payload = {
+        "target_date": target_date.isoformat(),
+        "triggered_by": progress.triggered_by,
+        "run_id": progress.run_id,
+        "reasons": reasons,
+        "scoreable_instruments": readiness.scoreable_instruments,
+        "required_scoreable_instruments": readiness.required_scoreable_instruments,
+        "listing_limited_instruments": readiness.listing_limited_instruments,
+        "active_instruments": readiness.active_instruments,
+        "successful_symbols": progress.successful_symbols,
+        "total_symbols": progress.total_symbols,
+        "error_count": progress.error_count,
+    }
+    try:
+        async with async_session() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO system_events (component, severity, event_type, payload)
+                    VALUES ('scheduler', :severity, 'eod_scan_chain_blocked',
+                            CAST(:payload AS jsonb))
+                    """
+                ),
+                {"severity": severity, "payload": json.dumps(payload)},
+            )
+            await session.commit()
+    except Exception:
+        logger.warning("EOD chain-blocked event could not be persisted", exc_info=True)
+
+    kind = "final" if final else "first"
+    try:
+        should_notify = await redis.set(
+            f"{BLOCKED_ALERT_KEY_PREFIX}{target_date.isoformat()}:{kind}",
+            "1",
+            ex=BLOCKED_ALERT_TTL_SECONDS,
+            nx=True,
+        )
+    except Exception:
+        logger.warning("EOD chain-blocked alert cooldown unavailable", exc_info=True)
+        should_notify = False
+    if not should_notify:
+        return
+
+    if final:
+        headline = "EOD scan did not run tonight"
+        follow_up = "No more automatic retries tonight; no proposals for the next session."
+    else:
+        retry_at = f"{min(settings.eod_catch_up_hours):02d}:{settings.eod_catch_up_minute:02d}"
+        headline = "EOD scan chain blocked"
+        follow_up = (
+            f"Catch-up retries run hourly from {retry_at} IST."
+            if settings.eod_catch_up_enabled
+            else "Catch-up retries are disabled."
+        )
+    message = (
+        f"<b>{telegram_service._escape(headline)}</b> "
+        f"({telegram_service._escape(target_date.isoformat())})\n"
+        + "\n".join(f"• {telegram_service._escape(reason)}" for reason in reasons)
+        + f"\n{telegram_service._escape(follow_up)}"
+    )
+    try:
+        await telegram_service.send_message(None, message)
+    except Exception:
+        logger.warning("EOD chain-blocked Telegram alert failed", exc_info=True)
 
 
 def _token_is_expired(expires_at: datetime.datetime) -> bool:
@@ -658,13 +833,20 @@ async def run_historical_sync(
 
         if scan_ready:
             await enqueue_eod_scans(redis, progress, target_date)
-        else:
+        elif not is_nse_session(target_date):
             progress.log(
-                "Scanner jobs were not queued: "
-                f"{readiness.scoreable_instruments}/"
-                f"{readiness.active_instruments} instruments are scoreable; "
-                f"{readiness.required_scoreable_instruments} required."
+                f"Scanner jobs were not queued: {target_date.isoformat()} is "
+                "not an NSE session."
             )
+        else:
+            reasons = scan_chain_blocked_reasons(
+                progress, target_date, readiness, date_coverage_ready
+            )
+            progress.log("Scanner jobs were not queued: " + "; ".join(reasons) + ".")
+            if triggered_by in CHAIN_TRIGGERS:
+                await record_scan_chain_blocked(
+                    redis, progress, target_date, readiness, reasons
+                )
 
         await save_sync_status(redis, progress)
 

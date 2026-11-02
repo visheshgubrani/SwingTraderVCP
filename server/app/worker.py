@@ -6,7 +6,10 @@ from arq import cron, func
 from app.config import settings
 from app.redis_pool import redis_settings_from_config, tune_arq_redis_pool
 from app.services.fundamental_pass import run_fundamental_pass
-from app.services.historical_fetcher import run_historical_sync
+from app.services.historical_fetcher import (
+    run_eod_chain_catch_up,
+    run_historical_sync,
+)
 from app.services.journal_ai_coach import run_journal_ai_coach
 from app.services.journal_processor import run_journal_dispatcher
 from app.services.market_context import run_market_context
@@ -31,6 +34,7 @@ class WorkerSettings:
         run_technical_scan,
         run_fundamental_pass,
         func(run_historical_sync, timeout=7200),
+        run_eod_chain_catch_up,
         run_market_context,
         run_auth_guard,
         run_reconciliation,
@@ -56,6 +60,23 @@ class WorkerSettings:
                 minute=settings.eod_sync_minute,
                 second=0,
                 timeout=7200,
+                max_tries=1,
+            )
+        )
+
+    if settings.eod_sync_enabled and settings.eod_catch_up_enabled:
+        # Same-evening retry when the 18:30 sync left the personal scan unqueued
+        # (provider budget, partial coverage, a failed P9 enqueue). It exits
+        # immediately when the scan exists or a sync still holds the lock.
+        cron_jobs.append(
+            cron(
+                run_eod_chain_catch_up,
+                name="eod_chain_catch_up",
+                weekday={0, 1, 2, 3, 4},
+                hour=set(settings.eod_catch_up_hours),
+                minute=settings.eod_catch_up_minute,
+                second=0,
+                timeout=60,
                 max_tries=1,
             )
         )

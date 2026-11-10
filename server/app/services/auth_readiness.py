@@ -182,6 +182,10 @@ def _holiday_dates(values: tuple[str, ...]) -> frozenset[dt.date]:
     return frozenset(parsed)
 
 
+def configured_nse_holidays() -> frozenset[dt.date]:
+    return _holiday_dates(tuple(settings.nse_trading_holidays))
+
+
 def is_nse_session(day: dt.date, *, holidays: frozenset[dt.date] | None = None) -> bool:
     """Weekday and not a configured NSE holiday."""
     if day.weekday() >= 5:
@@ -189,7 +193,7 @@ def is_nse_session(day: dt.date, *, holidays: frozenset[dt.date] | None = None) 
     holiday_set = (
         holidays
         if holidays is not None
-        else _holiday_dates(tuple(settings.nse_trading_holidays))
+        else configured_nse_holidays()
     )
     return day not in holiday_set
 

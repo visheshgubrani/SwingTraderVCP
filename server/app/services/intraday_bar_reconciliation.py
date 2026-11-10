@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.database import async_session
+from app.services.auth_readiness import is_nse_session
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
 from app.services.bar_aggregator import REDIS_CHANNEL_5M_BARS
 from app.services.fyers_history import HistoryUnavailable, fetch_history
@@ -54,9 +55,10 @@ def build_volume_profile(
         if len(candle) < 6:
             continue
         timestamp = dt.datetime.fromtimestamp(int(candle[0]), tz=dt.timezone.utc).astimezone(IST_TZ)
-        if timestamp.date() >= evaluation_session_date:
+        session_date = timestamp.date()
+        if session_date >= evaluation_session_date or not is_nse_session(session_date):
             continue
-        sessions[timestamp.date()].append((timestamp, int(candle[5])))
+        sessions[session_date].append((timestamp, int(candle[5])))
     valid = {
         session: sorted(values)
         for session, values in sessions.items()

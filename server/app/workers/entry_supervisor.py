@@ -59,6 +59,7 @@ from app.domain.p10_triggers import (
 )
 from app.domain.journal_charges import FillLeg, estimate_cnc_charges
 from app.services.auth_readiness import (
+    configured_nse_holidays,
     ensure_session_ready,
     ensure_upstox_market_data_ready,
 )
@@ -433,18 +434,25 @@ async def _load_volume_profile(
                 SELECT vp.adv20_robust, vp.bucket_medians, vp.sessions_used,
                        vp.as_of_date,
                        (
-                           SELECT MAX(
-                               (fb.bar_time AT TIME ZONE 'Asia/Kolkata')::date
-                           )
+                           SELECT (fb.bar_time AT TIME ZONE 'Asia/Kolkata')::date
                            FROM five_minute_bars fb
                            WHERE fb.symbol = :symbol
                              AND fb.reconciliation_status = 'verified'
-                             AND (
-                                 fb.bar_time AT TIME ZONE 'Asia/Kolkata'
-                             )::date < :session_date
+                             AND fb.bar_time < (
+                                 (CAST(:session_date AS date) + TIME '00:00')
+                                 AT TIME ZONE 'Asia/Kolkata'
+                             )
+                             AND EXTRACT(ISODOW FROM fb.bar_time AT TIME ZONE 'Asia/Kolkata') < 6
+                             AND (fb.bar_time AT TIME ZONE 'Asia/Kolkata')::date
+                                 <> ALL(CAST(:holidays AS date[]))
+                           ORDER BY fb.bar_time DESC
+                           LIMIT 1
                        ) AS latest_verified_session
                 FROM volume_profiles vp
-                WHERE vp.symbol = :symbol AND vp.as_of_date < :session_date
+                WHERE vp.symbol = :symbol
+                  AND vp.as_of_date < :session_date
+                  AND EXTRACT(ISODOW FROM vp.as_of_date) < 6
+                  AND vp.as_of_date <> ALL(CAST(:holidays AS date[]))
                 ORDER BY vp.as_of_date DESC
                 LIMIT 1
                 """
@@ -453,6 +461,7 @@ async def _load_volume_profile(
                 "symbol": symbol,
                 "session_date": bar_time.astimezone(IST_TZ).date()
                 if bar_time.tzinfo else bar_time.date(),
+                "holidays": list(configured_nse_holidays()),
             },
         )
     ).mappings().one_or_none()

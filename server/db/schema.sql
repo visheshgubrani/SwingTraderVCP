@@ -635,6 +635,7 @@ CREATE TABLE position_events (
         trigger_source IN (
             'api',
             'execution_engine',
+            'entry_supervisor',
             'order_gateway',
             'position_monitor',
             'reconciliation',

@@ -37,11 +37,14 @@ class ProposalDecisionSubscriptionTests(unittest.IsolatedAsyncioTestCase):
         decision_result = MagicMock()
         decision_result.scalar_one.return_value = decision_id
         db = AsyncMock()
+        supersede_result = MagicMock()
+        supersede_result.mappings.return_value.all.return_value = []
         db.execute.side_effect = [
             proposal_result,
             decision_result,
             MagicMock(),
             MagicMock(),
+            supersede_result,
         ]
         redis = AsyncMock()
         request = SimpleNamespace(

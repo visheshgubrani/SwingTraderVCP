@@ -13,7 +13,7 @@ from typing import Sequence
 from zoneinfo import ZoneInfo
 
 from app.domain.p10_geometry import DEFAULT_TICK_SIZE, floor_to_tick
-from app.domain.p10_sizing import EntryTemplate
+from app.domain.p10_sizing import BALANCED_BREAKOUT_V4_BAR_RVOL, EntryTemplate
 
 
 SESSION_START_TIME = dt.time(9, 15)
@@ -30,6 +30,56 @@ ENTRY_WINDOW_CLOSE_TIME = dt.time(16, 0)
 CUMULATIVE_TWO_BAR_POLICY_V1 = "cumulative_two_bar_v1"
 BREAKOUT_BAR_SIGNAL_POLICY_V2 = "breakout_bar_signal_v2"
 BALANCED_BREAKOUT_POLICY_V3 = "balanced_breakout_v3"
+BALANCED_BREAKOUT_POLICY_V4 = "balanced_breakout_v4"
+
+# balanced_breakout_v4 (AGENTS.md §5.4/§6.1): the initial leg stays armed for
+# five NSE sessions (D1..D5), a trigger needs a completed bar closing inside
+# the buy zone (trigger < close <= chase ceiling), and volume is confirmed by
+# EITHER the signal bar's bucket RVOL OR the session's cumulative RVOL.
+V4_ENTRY_WINDOW_SESSIONS = 5
+V4_BAR_RVOL_THRESHOLD = BALANCED_BREAKOUT_V4_BAR_RVOL
+V4_SESSION_RVOL_THRESHOLD = Decimal("1.20")
+
+# Policies whose consumed trigger must see a reset bar (close <= trigger)
+# before re-arming after an eligibility rejection.
+RESET_AFTER_CONSUMED_TRIGGER_POLICIES = frozenset(
+    {"breakout_bar_signal_v2", "balanced_breakout_v3"}
+)
+
+
+def next_nse_session(day: dt.date, holidays: frozenset[dt.date] | set[dt.date]) -> dt.date:
+    """Next NSE trading session strictly after `day` (weekends + holidays skipped)."""
+    candidate = day + dt.timedelta(days=1)
+    while candidate.weekday() >= 5 or candidate in holidays:
+        candidate += dt.timedelta(days=1)
+    return candidate
+
+
+def add_nse_sessions(
+    day: dt.date, count: int, holidays: frozenset[dt.date] | set[dt.date]
+) -> dt.date:
+    """Advance `count` NSE sessions from `day` (count=0 returns `day`)."""
+    candidate = day
+    for _ in range(count):
+        candidate = next_nse_session(candidate, holidays)
+    return candidate
+
+
+def initial_entry_window_end(
+    entry_session_date: dt.date,
+    policy_version: str,
+    holidays: frozenset[dt.date] | set[dt.date],
+) -> dt.date:
+    """Final eligible session for an initial leg under its trigger policy.
+
+    v4 keeps the leg armed for V4_ENTRY_WINDOW_SESSIONS sessions starting at
+    D1; every older policy is frozen at D1 only.
+    """
+    if policy_version == BALANCED_BREAKOUT_POLICY_V4:
+        return add_nse_sessions(
+            entry_session_date, V4_ENTRY_WINDOW_SESSIONS - 1, holidays
+        )
+    return entry_session_date
 
 
 def entry_window_closed(
@@ -383,6 +433,106 @@ def evaluate_balanced_breakout_signal(
         signal_bar_valid=True,
         signal_rvol=sig_bar_rvol,
         signal_session_rvol=sig_session_rvol,
+        rejection_reason=None,
+    )
+
+
+@dataclass(frozen=True)
+class BuyZoneBreakoutEvaluation:
+    """Outcome of one completed 5-minute bar under balanced_breakout_v4.
+
+    outcome is one of: confirmed, outside_window, below_trigger,
+    extended_above_chase, volume_insufficient.
+    """
+
+    is_triggered: bool
+    outcome: str
+    bar_rvol: Decimal | None
+    session_rvol: Decimal
+    volume_branch: str | None
+    rejection_reason: str | None
+
+
+def evaluate_buy_zone_breakout_v4(
+    *,
+    signal_bar: FiveMinuteBar,
+    trigger_price: Decimal,
+    chase_ceiling: Decimal,
+    adv20_robust: int,
+    expected_bar_fraction: Decimal | None,
+    expected_cumulative_fraction: Decimal,
+    bar_rvol_threshold: Decimal = V4_BAR_RVOL_THRESHOLD,
+    session_rvol_threshold: Decimal = V4_SESSION_RVOL_THRESHOLD,
+) -> BuyZoneBreakoutEvaluation:
+    """Evaluate a single completed bar under balanced_breakout_v4.
+
+    1. Bars starting before 09:30 or at/after 15:30 IST never trigger.
+    2. The bar must close inside the buy zone: trigger < close <= chase.
+       A close above the chase ceiling is extended: it never triggers and
+       never consumes the leg (the next in-zone bar is a fresh signal).
+    3. Volume passes when the bar's bucket RVOL >= bar threshold OR the
+       session's cumulative RVOL through this bar >= session threshold. When
+       the bucket fraction is unavailable the bar branch is skipped (the
+       session branch alone decides); it never fails open.
+    """
+    signal_at = (
+        signal_bar.bar_time.replace(tzinfo=IST_TZ)
+        if signal_bar.bar_time.tzinfo is None
+        else signal_bar.bar_time.astimezone(IST_TZ)
+    )
+    session_rvol = calculate_relative_volume(
+        signal_bar.cumulative_volume, adv20_robust, expected_cumulative_fraction
+    )
+    bar_rvol = (
+        calculate_bar_relative_volume(
+            signal_bar.volume, adv20_robust, expected_bar_fraction
+        )
+        if expected_bar_fraction is not None and expected_bar_fraction > 0
+        else None
+    )
+
+    def rejected(outcome: str, reason: str) -> BuyZoneBreakoutEvaluation:
+        return BuyZoneBreakoutEvaluation(
+            is_triggered=False,
+            outcome=outcome,
+            bar_rvol=bar_rvol,
+            session_rvol=session_rvol,
+            volume_branch=None,
+            rejection_reason=reason,
+        )
+
+    if signal_at.time() < SESSION_SKIP_UNTIL or signal_at.time() >= SESSION_END_TIME:
+        return rejected(
+            "outside_window",
+            f"Signal bar at {signal_at.time()} is outside 09:30-15:30 IST",
+        )
+    if signal_bar.close <= trigger_price:
+        return rejected(
+            "below_trigger",
+            f"Close {signal_bar.close} <= trigger {trigger_price}",
+        )
+    if signal_bar.close > chase_ceiling:
+        return rejected(
+            "extended_above_chase",
+            f"Close {signal_bar.close} > chase ceiling {chase_ceiling}",
+        )
+    if bar_rvol is not None and bar_rvol >= bar_rvol_threshold:
+        branch = "bar"
+    elif session_rvol >= session_rvol_threshold:
+        branch = "session"
+    else:
+        bar_text = f"{bar_rvol:.2f}" if bar_rvol is not None else "n/a"
+        return rejected(
+            "volume_insufficient",
+            f"Bar RVOL {bar_text} < {bar_rvol_threshold} and session RVOL "
+            f"{session_rvol:.2f} < {session_rvol_threshold}",
+        )
+    return BuyZoneBreakoutEvaluation(
+        is_triggered=True,
+        outcome="confirmed",
+        bar_rvol=bar_rvol,
+        session_rvol=session_rvol,
+        volume_branch=branch,
         rejection_reason=None,
     )
 

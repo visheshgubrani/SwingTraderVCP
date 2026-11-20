@@ -46,16 +46,22 @@ from app.domain.p10_geometry import (
 )
 from app.domain.p10_triggers import (
     BALANCED_BREAKOUT_POLICY_V3,
+    BALANCED_BREAKOUT_POLICY_V4,
     BREAKOUT_BAR_SIGNAL_POLICY_V2,
     CUMULATIVE_TWO_BAR_POLICY_V1,
+    ENTRY_WINDOW_CLOSE_TIME,
+    SESSION_SKIP_UNTIL,
     DailySessionBar,
     FiveMinuteBar,
+    add_nse_sessions,
     calculate_bar_relative_volume,
     calculate_relative_volume,
     entry_window_closed,
     evaluate_add_leg_gates,
     evaluate_balanced_breakout_signal,
+    evaluate_buy_zone_breakout_v4,
     evaluate_intraday_trigger,
+    next_nse_session,
 )
 from app.domain.journal_charges import FillLeg, estimate_cnc_charges
 from app.services.auth_readiness import (
@@ -64,6 +70,7 @@ from app.services.auth_readiness import (
     ensure_upstox_market_data_ready,
 )
 from app.services.auth_service import AuthUnavailableError, get_valid_access_token
+from app.services.entry_leg_lifecycle import cancel_orphan_planned_legs
 from app.redis_pool import create_async_redis
 from app.redis_pubsub import consume_pubsub
 from app.services.bar_aggregator import REDIS_CHANNEL_5M_BARS
@@ -108,19 +115,18 @@ REDIS_LTP_PREFIX = "ltp:"
 _shutdown = asyncio.Event()
 
 
+def _configured_holidays() -> frozenset[dt.date]:
+    return frozenset(
+        dt.date.fromisoformat(value) for value in settings.nse_trading_holidays
+    )
+
+
 def _next_nse_session(day: dt.date) -> dt.date:
-    holidays = {dt.date.fromisoformat(value) for value in settings.nse_trading_holidays}
-    candidate = day + dt.timedelta(days=1)
-    while candidate.weekday() >= 5 or candidate in holidays:
-        candidate += dt.timedelta(days=1)
-    return candidate
+    return next_nse_session(day, _configured_holidays())
 
 
 def _add_nse_sessions(day: dt.date, count: int) -> dt.date:
-    candidate = day
-    for _ in range(count):
-        candidate = _next_nse_session(candidate)
-    return candidate
+    return add_nse_sessions(day, count, _configured_holidays())
 
 
 def _ema21(values: list[Decimal]) -> list[Decimal]:
@@ -426,7 +432,15 @@ async def _load_volume_profile(
     symbol: str,
     bar_time: dt.datetime,
     require_bar_fraction: bool = False,
+    bar_fraction_optional: bool = False,
 ) -> VolumeProfilePoint:
+    """Load the frozen pre-session volume profile point for `bar_time`.
+
+    With `bar_fraction_optional`, an unavailable bucket fraction (first
+    bucket, missing neighbour, or a non-positive delta) yields
+    `expected_bar_fraction=None` instead of raising, so a caller can fall back
+    to the session-cumulative branch. Missing cumulative data still raises.
+    """
     row = (
         await db.execute(
             text(
@@ -490,33 +504,174 @@ async def _load_volume_profile(
         if cumulative_fraction <= 0:
             break
         expected_bar_fraction: Decimal | None = None
-        if require_bar_fraction:
-            if index == 0:
-                raise ExecutionBlockedError(
-                    f"Volume profile has no previous bucket for {label}."
+        if require_bar_fraction or bar_fraction_optional:
+            try:
+                expected_bar_fraction = _expected_bar_fraction(
+                    points, index, label, cumulative_fraction
                 )
-            current_bucket = dt.datetime.strptime(label, "%H:%M")
-            expected_previous_label = (
-                current_bucket - dt.timedelta(minutes=5)
-            ).strftime("%H:%M")
-            if points[index - 1].get("time") != expected_previous_label:
-                raise ExecutionBlockedError(
-                    f"Volume profile has no adjacent previous bucket for {label}."
-                )
-            previous_fraction = Decimal(
-                str(points[index - 1].get("cumulative_fraction", "0"))
-            )
-            expected_bar_fraction = cumulative_fraction - previous_fraction
-            if previous_fraction < 0 or expected_bar_fraction <= 0:
-                raise ExecutionBlockedError(
-                    f"Volume profile has a non-positive bucket fraction for {label}."
-                )
+            except ExecutionBlockedError:
+                if not bar_fraction_optional:
+                    raise
+                expected_bar_fraction = None
         return VolumeProfilePoint(
             int(row["adv20_robust"]),
             cumulative_fraction,
             expected_bar_fraction,
         )
     raise ExecutionBlockedError(f"Volume profile has no cumulative fraction for {label}.")
+
+
+def _expected_bar_fraction(
+    points: list[dict[str, Any]],
+    index: int,
+    label: str,
+    cumulative_fraction: Decimal,
+) -> Decimal:
+    if index == 0:
+        raise ExecutionBlockedError(
+            f"Volume profile has no previous bucket for {label}."
+        )
+    current_bucket = dt.datetime.strptime(label, "%H:%M")
+    expected_previous_label = (
+        current_bucket - dt.timedelta(minutes=5)
+    ).strftime("%H:%M")
+    if points[index - 1].get("time") != expected_previous_label:
+        raise ExecutionBlockedError(
+            f"Volume profile has no adjacent previous bucket for {label}."
+        )
+    previous_fraction = Decimal(
+        str(points[index - 1].get("cumulative_fraction", "0"))
+    )
+    expected_bar_fraction = cumulative_fraction - previous_fraction
+    if previous_fraction < 0 or expected_bar_fraction <= 0:
+        raise ExecutionBlockedError(
+            f"Volume profile has a non-positive bucket fraction for {label}."
+        )
+    return expected_bar_fraction
+
+
+# One warning per (symbol, session, reason): a blocked profile repeats on
+# every bar of the day and must not bury real signals.
+_PROFILE_BLOCK_LOGGED: set[tuple[str, dt.date, str]] = set()
+
+
+async def _try_load_volume_profile(
+    db: AsyncSession,
+    *,
+    symbol: str,
+    bar_time: dt.datetime,
+    require_bar_fraction: bool = False,
+    bar_fraction_optional: bool = False,
+) -> VolumeProfilePoint | None:
+    """Load a profile point, isolating a block to this leg and this bar.
+
+    A blocked profile fails closed for the affected evaluation only: it never
+    aborts the rest of the bar event (other legs, already-written evidence).
+    """
+    try:
+        return await _load_volume_profile(
+            db,
+            symbol=symbol,
+            bar_time=bar_time,
+            require_bar_fraction=require_bar_fraction,
+            bar_fraction_optional=bar_fraction_optional,
+        )
+    except ExecutionBlockedError as exc:
+        session_date = (
+            bar_time.astimezone(IST_TZ).date() if bar_time.tzinfo else bar_time.date()
+        )
+        key = (symbol, session_date, str(exc))
+        if key not in _PROFILE_BLOCK_LOGGED:
+            if len(_PROFILE_BLOCK_LOGGED) > 5000:
+                _PROFILE_BLOCK_LOGGED.clear()
+            _PROFILE_BLOCK_LOGGED.add(key)
+            logger.warning(
+                "Volume profile blocks evaluation for %s at %s: %s",
+                symbol,
+                bar_time.isoformat(),
+                exc,
+            )
+        return None
+
+
+async def _emit_supervisor_event(
+    db: AsyncSession,
+    *,
+    severity: str,
+    event_type: str,
+    payload: dict[str, Any],
+    correlation_id: UUID | None = None,
+    position_id: UUID | None = None,
+    order_intent_id: UUID | None = None,
+) -> None:
+    await db.execute(
+        text(
+            """
+            INSERT INTO system_events (
+                component, severity, event_type, correlation_id,
+                position_id, order_intent_id, payload
+            ) VALUES (
+                'entry_supervisor', :severity, :event_type, :correlation_id,
+                :position_id, :order_intent_id, CAST(:payload AS jsonb)
+            )
+            """
+        ),
+        {
+            "severity": severity,
+            "event_type": event_type,
+            "correlation_id": correlation_id,
+            "position_id": position_id,
+            "order_intent_id": order_intent_id,
+            "payload": json.dumps(payload, default=str),
+        },
+    )
+
+
+async def _expire_leg_with_siblings(
+    db: AsyncSession,
+    *,
+    leg_id: UUID,
+    proposal_id: UUID,
+    leg_index: int,
+    reason: str,
+    from_statuses: tuple[str, ...] = ("armed", "trigger_observed", "waiting_for_reset"),
+) -> bool:
+    """Expire one leg (if still in `from_statuses`) and cancel later planned legs."""
+    expired = (
+        await db.execute(
+            text(
+                """
+                UPDATE entry_legs
+                SET status = 'expired', signal_bar_timestamp = NULL
+                WHERE id = :leg_id AND status = ANY(CAST(:from_statuses AS text[]))
+                RETURNING id
+                """
+            ),
+            {"leg_id": leg_id, "from_statuses": list(from_statuses)},
+        )
+    ).mappings().one_or_none()
+    if expired is None:
+        return False
+    await db.execute(
+        text(
+            """
+            UPDATE entry_legs
+            SET status = 'cancelled'
+            WHERE proposal_id = :proposal_id
+              AND leg_index > :leg_index
+              AND status = 'planned'
+            """
+        ),
+        {"proposal_id": proposal_id, "leg_index": leg_index},
+    )
+    await _emit_supervisor_event(
+        db,
+        severity="info",
+        event_type="entry_leg_expired",
+        correlation_id=proposal_id,
+        payload={"leg_id": str(leg_id), "leg_index": leg_index, "reason": reason},
+    )
+    return True
 
 
 async def _recent_base_volume_diagnostic(
@@ -782,6 +937,13 @@ async def _record_entry_eligibility(
             BREAKOUT_BAR_SIGNAL_POLICY_V2,
             BALANCED_BREAKOUT_POLICY_V3,
         }
+        if policy_version == BALANCED_BREAKOUT_POLICY_V4:
+            # v4: a chase/price-reversal/preflight rejection does not consume
+            # the setup — the next in-zone bar is its own fresh signal (the
+            # buy-zone rule already refuses closes above the chase ceiling).
+            # Lost capacity still waits for a reset bar so a blocked leg
+            # does not hammer allocation every five minutes.
+            requires_reset = outcome == "rejected_capacity"
         await db.execute(
             text(
                 """
@@ -879,6 +1041,34 @@ async def execute_confirmed_leg_allocation(
         ):
             return False
 
+        if confirmed.leg_index == 1:
+            # One live initiative per name: with multi-session entry windows a
+            # second proposal for an already-held (or pending) symbol must not
+            # open a parallel position.
+            already_held = (
+                await db.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM positions
+                        WHERE instrument_id = :instrument_id
+                          AND execution_mode = :execution_mode
+                          AND state NOT IN ('closed', 'cancelled')
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "instrument_id": leg["instrument_id"],
+                        "execution_mode": settings.execution_mode,
+                    },
+                )
+            ).scalar_one_or_none()
+            if already_held is not None:
+                raise ExecutionBlockedError(
+                    "Single-name capacity: a non-closed position for this symbol "
+                    "already exists (symbol_already_held)."
+                )
+
         stop_streak = await synchronize_stop_streak(db, settings.execution_mode)
         if stop_streak.tripped:
             generation = int(
@@ -903,6 +1093,7 @@ async def execute_confirmed_leg_allocation(
                         if leg["entry_trigger_policy_version"] in (
                             BREAKOUT_BAR_SIGNAL_POLICY_V2,
                             BALANCED_BREAKOUT_POLICY_V3,
+                            BALANCED_BREAKOUT_POLICY_V4,
                         )
                         else "armed"
                     ),
@@ -995,6 +1186,7 @@ async def execute_confirmed_leg_allocation(
                         if leg["entry_trigger_policy_version"] in (
                             BREAKOUT_BAR_SIGNAL_POLICY_V2,
                             BALANCED_BREAKOUT_POLICY_V3,
+                            BALANCED_BREAKOUT_POLICY_V4,
                         )
                         else "armed"
                     ),
@@ -1311,7 +1503,7 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                            el.risk_allocation_pct, el.status, el.trigger_price,
                            el.chase_ceiling, el.relative_volume_threshold,
                            COALESCE(p.current_stop_loss, tp.initial_stop) AS effective_stop,
-                           tp.confidence, tp.t1,
+                           tp.confidence, tp.t1, tp.initial_stop,
                            tp.entry_trigger_policy_version,
                            latest_te.bar_timestamp AS last_trigger_event_timestamp,
                            latest_te.trigger_outcome AS last_trigger_outcome,
@@ -1379,12 +1571,32 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                 # Allocation recovery (or an open capacity conflict), not a
                 # later market bar, owns this durable confirmed trigger.
                 continue
-            profile = await _load_volume_profile(
+            if policy_version == BALANCED_BREAKOUT_POLICY_V4:
+                leg_confirmed = await _evaluate_v4_leg_on_bar(
+                    db, leg=leg, bar=bar, symbol=symbol
+                )
+                if leg_confirmed is not None:
+                    confirmed.append(leg_confirmed)
+                continue
+            local_time = (
+                bar_time.astimezone(IST_TZ).time()
+                if bar_time.tzinfo
+                else bar_time.time()
+            )
+            if leg["status"] == "armed" and local_time < SESSION_SKIP_UNTIL:
+                # No policy can signal inside the first 15 minutes; skip
+                # before touching the profile (whose 09:15 bucket has no
+                # previous bucket by construction).
+                continue
+            profile = await _try_load_volume_profile(
                 db,
                 symbol=symbol,
                 bar_time=bar_time,
                 require_bar_fraction=uses_bar_rvol,
+                bar_fraction_optional=leg["status"] == "waiting_for_reset",
             )
+            if profile is None:
+                continue
             session_rvol = calculate_relative_volume(
                 bar.cumulative_volume,
                 profile.adv20_robust,
@@ -1396,13 +1608,8 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                     profile.adv20_robust,
                     profile.expected_bar_fraction or Decimal("0"),
                 )
-                if uses_bar_rvol
+                if uses_bar_rvol and profile.expected_bar_fraction is not None
                 else None
-            )
-            local_time = (
-                bar_time.astimezone(IST_TZ).time()
-                if bar_time.tzinfo
-                else bar_time.time()
             )
             if leg["status"] == "waiting_for_reset":
                 if bar.close <= trigger:
@@ -1634,12 +1841,14 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
                 continue
             if bar_time <= signal_row["bar_timestamp"]:
                 continue
-            signal_profile = await _load_volume_profile(
+            signal_profile = await _try_load_volume_profile(
                 db,
                 symbol=symbol,
                 bar_time=signal_row["bar_timestamp"],
                 require_bar_fraction=is_v2,
             )
+            if signal_profile is None:
+                continue
             evaluation = evaluate_intraday_trigger(
                 signal_bar=FiveMinuteBar(
                     bar_time=signal_row["bar_timestamp"],
@@ -1732,6 +1941,159 @@ async def handle_five_minute_bar_event(bar_data: dict[str, Any]) -> list[Confirm
             )
         await db.commit()
     return confirmed
+
+
+def _confirmed_leg_from_row(
+    leg: Any, *, symbol: str, bar_time: dt.datetime
+) -> ConfirmedLeg:
+    trigger = Decimal(leg["trigger_price"])
+    chase = Decimal(leg["chase_ceiling"])
+    worst_r = chase - Decimal(leg["effective_stop"])
+    conservative_rr = (
+        (Decimal(leg["t1"]) - chase) / worst_r if worst_r > 0 else Decimal("0")
+    )
+    return ConfirmedLeg(
+        leg_id=leg["leg_id"],
+        proposal_id=leg["proposal_id"],
+        symbol=symbol,
+        leg_index=int(leg["leg_index"]),
+        risk_allocation_pct=Decimal(leg["risk_allocation_pct"]),
+        trigger_price=trigger,
+        chase_ceiling=chase,
+        initial_stop=Decimal(leg["effective_stop"]),
+        scanner_score=Decimal(leg["technical_score"] or 0),
+        confidence=Decimal(leg["confidence"]),
+        conservative_rr=conservative_rr,
+        bar_time=bar_time,
+    )
+
+
+async def _evaluate_v4_leg_on_bar(
+    db: AsyncSession,
+    *,
+    leg: Any,
+    bar: FiveMinuteBar,
+    symbol: str,
+) -> ConfirmedLeg | None:
+    """balanced_breakout_v4 evaluation of one verified completed bar.
+
+    - Initial leg: a close below the frozen initial stop invalidates the
+      setup for the rest of its window (leg expired, planned adds cancelled).
+    - waiting_for_reset (capacity / P9 / stop-streak blocks only): a close
+      at or below the trigger re-arms the leg.
+    - armed: a 09:30+ close inside the buy zone with bar RVOL >= 1.25x OR
+      session RVOL >= 1.2x confirms the trigger. Closes above the chase
+      ceiling and low-volume closes are audited but leave the leg armed.
+    """
+    bar_time = bar.bar_time
+    trigger = Decimal(leg["trigger_price"])
+    chase = Decimal(leg["chase_ceiling"])
+    leg_index = int(leg["leg_index"])
+    if leg_index == 1 and leg["initial_stop"] is not None:
+        if bar.close < Decimal(leg["initial_stop"]):
+            await _expire_leg_with_siblings(
+                db,
+                leg_id=leg["leg_id"],
+                proposal_id=leg["proposal_id"],
+                leg_index=leg_index,
+                reason="setup_invalidated_close_below_stop",
+            )
+            return None
+
+    if leg["status"] == "waiting_for_reset":
+        if bar.close > trigger:
+            return None
+        profile = await _try_load_volume_profile(
+            db, symbol=symbol, bar_time=bar_time, bar_fraction_optional=True
+        )
+        if profile is not None:
+            await _persist_trigger_event(
+                db,
+                leg_id=leg["leg_id"],
+                bar=bar,
+                profile=profile,
+                bar_type="reset_bar",
+                bar_rvol=None,
+                session_rvol=calculate_relative_volume(
+                    bar.cumulative_volume,
+                    profile.adv20_robust,
+                    profile.expected_cumulative_fraction,
+                ),
+                price_gate_passed=True,
+                volume_gate_passed=None,
+                trigger_outcome="reset",
+                chase_valid=bar.close <= chase,
+            )
+        await db.execute(
+            text(
+                """
+                UPDATE entry_legs
+                SET status = 'armed', signal_bar_timestamp = NULL
+                WHERE id = :leg_id AND status = 'waiting_for_reset'
+                """
+            ),
+            {"leg_id": leg["leg_id"]},
+        )
+        return None
+
+    if leg["status"] != "armed":
+        return None
+    local_time = bar_time.astimezone(IST_TZ).time() if bar_time.tzinfo else bar_time.time()
+    if local_time < SESSION_SKIP_UNTIL or bar.close <= trigger:
+        return None
+    profile = await _try_load_volume_profile(
+        db, symbol=symbol, bar_time=bar_time, bar_fraction_optional=True
+    )
+    if profile is None:
+        return None
+    evaluation = evaluate_buy_zone_breakout_v4(
+        signal_bar=bar,
+        trigger_price=trigger,
+        chase_ceiling=chase,
+        adv20_robust=profile.adv20_robust,
+        expected_bar_fraction=profile.expected_bar_fraction,
+        expected_cumulative_fraction=profile.expected_cumulative_fraction,
+        bar_rvol_threshold=Decimal(leg["relative_volume_threshold"]),
+    )
+    if evaluation.outcome in {"outside_window", "below_trigger"}:
+        return None
+    recent_median, base_ratio = await _recent_base_volume_diagnostic(
+        db, symbol=symbol, bar_time=bar_time, signal_volume=bar.volume
+    )
+    await _persist_trigger_event(
+        db,
+        leg_id=leg["leg_id"],
+        bar=bar,
+        profile=profile,
+        bar_type="signal_bar",
+        bar_rvol=evaluation.bar_rvol,
+        session_rvol=evaluation.session_rvol,
+        price_gate_passed=evaluation.outcome != "extended_above_chase",
+        volume_gate_passed=(
+            None
+            if evaluation.outcome == "extended_above_chase"
+            else evaluation.is_triggered
+        ),
+        trigger_outcome="confirmed" if evaluation.is_triggered else "signal_rejected",
+        is_confirmed=evaluation.is_triggered,
+        chase_valid=bar.close <= chase,
+        recent_base_median_volume=recent_median,
+        volume_vs_recent_base=base_ratio,
+        entry_eligibility_outcome="pending" if evaluation.is_triggered else None,
+    )
+    if not evaluation.is_triggered:
+        return None
+    await db.execute(
+        text(
+            """
+            UPDATE entry_legs
+            SET status = 'trigger_observed', signal_bar_timestamp = :bar_time
+            WHERE id = :leg_id AND status = 'armed'
+            """
+        ),
+        {"leg_id": leg["leg_id"], "bar_time": bar_time},
+    )
+    return _confirmed_leg_from_row(leg, symbol=symbol, bar_time=bar_time)
 
 
 async def _leg_has_persisted_intent(leg_id: UUID) -> bool:
@@ -2426,6 +2788,245 @@ async def recheck_filled_entry_risk(redis: aioredis.Redis) -> int:
     return corrected
 
 
+_LIVE_UNRESOLVED_ALERTED: set[tuple[UUID, dt.date]] = set()
+_PAPER_RETIREABLE_STATUSES = (
+    "created",
+    "submission_pending",
+    "submitted",
+    "acknowledged",
+    "submission_unknown",
+)
+
+
+def _session_closed(created_at: dt.datetime, now_ist: dt.datetime) -> bool:
+    created_ist = created_at.astimezone(IST_TZ)
+    cutoff = dt.datetime.combine(
+        created_ist.date(), ENTRY_WINDOW_CLOSE_TIME, tzinfo=IST_TZ
+    )
+    return now_ist >= cutoff
+
+
+async def retire_unfilled_entry_intents(now_ist: dt.datetime | None = None) -> int:
+    """Retire entry intents that never filled once their session has closed.
+
+    AGENTS.md §6.8 (end-of-session retirement): an entry that did not execute
+    on the session it was created must not linger as a pending order, a
+    `pending_entry` position, or reserved risk.
+
+    - A `created` intent was never claimed for submission, so no broker can
+      hold it: cancel it in every mode.
+    - In paper mode the paper ledger is authoritative: with no paper fill,
+      cancel any open paper order and the intent.
+    - A live intent that was claimed (`submission_pending`, `submitted`,
+      `submission_unknown`, ...) is never guessed at: IOC entries terminate at
+      the exchange and the order gateway / reconciliation resolve them. It is
+      left untouched with one critical event per intent per day.
+    - Anything with a fill (partial or full) is left to the fill processors.
+
+    The leg is returned for retry; if its entry window is still open the next
+    qualifying bar creates a brand-new intent (new idempotency key), otherwise
+    the expiry sweep retires it.
+    """
+    from app.services.execution_engine import cancel_unsent_entry_intent
+
+    now_ist = now_ist or dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
+    retired = 0
+    async with async_session() as db:
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT oi.id, oi.status, oi.execution_mode, oi.created_at,
+                           oi.quantity, oi.position_id, oi.entry_leg_id,
+                           el.leg_index AS entry_leg_index, el.proposal_id,
+                           i.fyers_symbol AS symbol,
+                           COALESCE(p.open_quantity, 0) AS open_quantity,
+                           EXISTS (
+                               SELECT 1 FROM order_fills f
+                               WHERE f.order_intent_id = oi.id
+                           ) AS has_fill,
+                           EXISTS (
+                               SELECT 1 FROM paper_broker_orders pbo
+                               WHERE pbo.order_intent_id = oi.id
+                                 AND pbo.filled_quantity > 0
+                           ) AS has_paper_fill
+                    FROM order_intents oi
+                    JOIN entry_legs el ON el.id = oi.entry_leg_id
+                    LEFT JOIN positions p ON p.id = oi.position_id
+                    LEFT JOIN instruments i ON i.id = p.instrument_id
+                    WHERE oi.intent_type = 'entry'
+                      AND oi.status = ANY(CAST(:statuses AS text[]))
+                    ORDER BY oi.created_at
+                    """
+                ),
+                {"statuses": list(_PAPER_RETIREABLE_STATUSES)},
+            )
+        ).mappings().all()
+        for row in rows:
+            if not _session_closed(row["created_at"], now_ist):
+                continue
+            if row["has_fill"] or row["has_paper_fill"] or int(row["open_quantity"]) > 0:
+                continue
+            mode = row["execution_mode"]
+            status = row["status"]
+            if mode != "paper" and status != "created":
+                alert_key = (row["id"], now_ist.date())
+                if alert_key not in _LIVE_UNRESOLVED_ALERTED:
+                    _LIVE_UNRESOLVED_ALERTED.add(alert_key)
+                    await _emit_supervisor_event(
+                        db,
+                        severity="critical",
+                        event_type="entry_intent_unresolved_after_session",
+                        correlation_id=row["proposal_id"],
+                        position_id=row["position_id"],
+                        order_intent_id=row["id"],
+                        payload={
+                            "symbol": row["symbol"],
+                            "status": status,
+                            "execution_mode": mode,
+                            "action": "left for order gateway / reconciliation",
+                        },
+                    )
+                continue
+            if mode == "paper":
+                await db.execute(
+                    text(
+                        """
+                        UPDATE paper_broker_orders
+                        SET status = 'cancelled', updated_at = now()
+                        WHERE order_intent_id = :intent_id
+                          AND filled_quantity = 0
+                          AND status NOT IN ('filled', 'rejected', 'cancelled')
+                        """
+                    ),
+                    {"intent_id": row["id"]},
+                )
+            snapshot = {
+                "id": row["id"],
+                "entry_leg_id": row["entry_leg_id"],
+                "entry_leg_index": int(row["entry_leg_index"]),
+                "position_id": row["position_id"],
+                "quantity": int(row["quantity"]),
+            }
+            cancelled = await cancel_unsent_entry_intent(
+                db,
+                snapshot=snapshot,
+                reason="end_of_session_unfilled",
+                from_statuses=(
+                    _PAPER_RETIREABLE_STATUSES if mode == "paper" else ("created",)
+                ),
+            )
+            if not cancelled:
+                continue
+            retired += 1
+            if snapshot["entry_leg_index"] == 1 and row["position_id"] is not None:
+                await db.execute(
+                    text(
+                        """
+                        INSERT INTO position_events (
+                            position_id, event_type, from_state, to_state,
+                            trigger_source, details
+                        )
+                        SELECT id, 'entry_retired_end_of_session', 'pending_entry',
+                               'cancelled', 'entry_supervisor', CAST(:details AS jsonb)
+                        FROM positions
+                        WHERE id = :position_id AND state = 'cancelled'
+                        """
+                    ),
+                    {
+                        "position_id": row["position_id"],
+                        "details": json.dumps(
+                            {"order_intent_id": str(row["id"]), "intent_status": status}
+                        ),
+                    },
+                )
+            await _emit_supervisor_event(
+                db,
+                severity="warning",
+                event_type="entry_intent_retired_end_of_session",
+                correlation_id=row["proposal_id"],
+                position_id=row["position_id"],
+                order_intent_id=row["id"],
+                payload={
+                    "symbol": row["symbol"],
+                    "intent_status": status,
+                    "execution_mode": mode,
+                    "leg_index": snapshot["entry_leg_index"],
+                },
+            )
+            logger.info(
+                "Retired unfilled %s entry intent %s (%s) after its session closed",
+                mode,
+                row["id"],
+                status,
+            )
+        await db.commit()
+    return retired
+
+
+def _last_closed_session(now_ist: dt.datetime) -> dt.date:
+    """Most recent NSE session whose 16:00 IST window close has passed."""
+    holidays = _configured_holidays()
+    today = now_ist.date()
+    is_session = today.weekday() < 5 and today not in holidays
+    if is_session and now_ist.time() >= ENTRY_WINDOW_CLOSE_TIME:
+        return today
+    candidate = today - dt.timedelta(days=1)
+    while candidate.weekday() >= 5 or candidate in holidays:
+        candidate -= dt.timedelta(days=1)
+    return candidate
+
+
+async def expire_extended_v4_legs(now_ist: dt.datetime | None = None) -> int:
+    """v4: an initial leg whose last closed session finished above its chase
+    ceiling has run away from the buy zone; retire it (`extended_missed`)."""
+    now_ist = now_ist or dt.datetime.now(dt.timezone.utc).astimezone(IST_TZ)
+    session = _last_closed_session(now_ist)
+    expired = 0
+    async with async_session() as db:
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT el.id, el.proposal_id, el.leg_index, el.chase_ceiling,
+                           last_bar.close AS session_close
+                    FROM entry_legs el
+                    JOIN trade_proposals tp ON tp.id = el.proposal_id
+                    JOIN LATERAL (
+                        SELECT fb.close
+                        FROM five_minute_bars fb
+                        WHERE fb.symbol = tp.symbol
+                          AND fb.reconciliation_status = 'verified'
+                          AND (fb.bar_time AT TIME ZONE 'Asia/Kolkata')::date
+                              = CAST(:session AS date)
+                        ORDER BY fb.bar_time DESC
+                        LIMIT 1
+                    ) last_bar ON true
+                    WHERE tp.entry_trigger_policy_version = :policy
+                      AND el.leg_index = 1
+                      AND el.status IN ('armed', 'waiting_for_reset')
+                      AND el.eligible_session_start <= CAST(:session AS date)
+                      AND el.eligible_session_end >= CAST(:session AS date)
+                      AND last_bar.close > el.chase_ceiling
+                    """
+                ),
+                {"session": session, "policy": BALANCED_BREAKOUT_POLICY_V4},
+            )
+        ).mappings().all()
+        for row in rows:
+            if await _expire_leg_with_siblings(
+                db,
+                leg_id=row["id"],
+                proposal_id=row["proposal_id"],
+                leg_index=int(row["leg_index"]),
+                reason="extended_missed_close_above_chase",
+                from_statuses=("armed", "waiting_for_reset"),
+            ):
+                expired += 1
+        await db.commit()
+    return expired
+
+
 async def expire_stale_entry_legs() -> int:
     """Expire entry windows whose final eligible session has closed.
 
@@ -2734,15 +3335,22 @@ async def replay_verified_current_session(redis: aioredis.Redis) -> None:
 
     batches: dict[dt.datetime, list[ConfirmedLeg]] = {}
     for row in rows:
-        confirmed = await handle_five_minute_bar_event(
-            {
-                "symbol": row["symbol"], "bar_time": row["bar_time"].isoformat(),
-                "open": str(row["open"]), "high": str(row["high"]),
-                "low": str(row["low"]), "close": str(row["close"]),
-                "volume": int(row["volume"]),
-                "cumulative_volume": int(row["cumulative_volume"]),
-            }
-        )
+        try:
+            confirmed = await handle_five_minute_bar_event(
+                {
+                    "symbol": row["symbol"], "bar_time": row["bar_time"].isoformat(),
+                    "open": str(row["open"]), "high": str(row["high"]),
+                    "low": str(row["low"]), "close": str(row["close"]),
+                    "volume": int(row["volume"]),
+                    "cumulative_volume": int(row["cumulative_volume"]),
+                }
+            )
+        except Exception:
+            # One bad bar must not abort the rest of the day's replay.
+            logger.exception(
+                "Startup replay failed for %s at %s", row["symbol"], row["bar_time"]
+            )
+            continue
         for candidate in confirmed:
             bucket = batches.setdefault(candidate.bar_time, [])
             if all(item.leg_id != candidate.leg_id for item in bucket):
@@ -2757,7 +3365,10 @@ async def _maintenance_loop(redis: aioredis.Redis) -> None:
             await refresh_add_leg_eligibility()
             await refresh_p10_daily_atr()
             await recheck_filled_entry_risk(redis)
+            await retire_unfilled_entry_intents()
+            await expire_extended_v4_legs()
             await expire_stale_entry_legs()
+            await _cancel_orphan_planned_legs()
             await process_resolved_capacity_conflicts(redis)
         except Exception:
             logger.exception("Entry-supervisor durable maintenance failed")
@@ -2765,6 +3376,13 @@ async def _maintenance_loop(redis: aioredis.Redis) -> None:
             await asyncio.wait_for(_shutdown.wait(), timeout=60)
         except asyncio.TimeoutError:
             pass
+
+
+async def _cancel_orphan_planned_legs() -> int:
+    async with async_session() as db:
+        cancelled = await cancel_orphan_planned_legs(db)
+        await db.commit()
+    return cancelled
 
 
 async def _set_status(

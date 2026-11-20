@@ -50,6 +50,22 @@ TEMPLATE_CONFIG = {
 }
 
 
+# balanced_breakout_v4 uses one breakout-bar threshold for every template; the
+# session-cumulative alternative (1.2x) lives with the trigger policy. Older
+# policies keep the per-template ladder above, frozen on their rows.
+BALANCED_BREAKOUT_V4_POLICY = "balanced_breakout_v4"
+BALANCED_BREAKOUT_V4_BAR_RVOL = Decimal("1.25")
+
+
+def breakout_bar_rvol_threshold(
+    template: "EntryTemplate | str", policy_version: str
+) -> Decimal:
+    """Breakout-bar RVOL frozen onto a proposal for its trigger policy."""
+    if policy_version == BALANCED_BREAKOUT_V4_POLICY:
+        return BALANCED_BREAKOUT_V4_BAR_RVOL
+    return TEMPLATE_CONFIG[EntryTemplate(template)]["breakout_bar_rvol_threshold"]
+
+
 @dataclass(frozen=True)
 class TargetShareApportionment:
     t1_shares: int

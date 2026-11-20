@@ -81,14 +81,18 @@ def build_volume_profile(
             fractions[timestamp.strftime("%H:%M")].append(
                 cumulative / session_total
             )
-    points = [
-        {
-            "time": label,
-            "cumulative_fraction": str(Decimal(str(statistics.median(values))).quantize(Decimal("0.000001"))),
-        }
-        for label, values in sorted(fractions.items())
-        if len(values) >= 15
-    ]
+    points: list[dict[str, str]] = []
+    running_max = Decimal("0")
+    for label, values in sorted(fractions.items()):
+        if len(values) < 15:
+            continue
+        median = Decimal(str(statistics.median(values))).quantize(Decimal("0.000001"))
+        # Per-label medians come from slightly different session sets (a
+        # session may miss a bucket), so they are not guaranteed monotonic. A
+        # cumulative curve can never fall: clamp to the running maximum so a
+        # bucket delta is never negative.
+        running_max = max(running_max, median)
+        points.append({"time": label, "cumulative_fraction": str(running_max)})
     if not points:
         return None
     return selected_dates[-1], adv20, points, len(selected_dates)
@@ -194,7 +198,10 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
                         }
                     )
                 async with async_session() as session:
-                    previously_unverified = {
+                    session_start = dt.datetime.combine(
+                        now_ist.date(), dt.time(0, 0), tzinfo=IST_TZ
+                    )
+                    previously_verified_today = {
                         row.bar_time
                         for row in (
                             await session.execute(
@@ -202,10 +209,14 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
                                     """
                                     SELECT bar_time FROM five_minute_bars
                                     WHERE symbol = :symbol
-                                      AND reconciliation_status <> 'verified'
+                                      AND bar_time >= :session_start
+                                      AND reconciliation_status = 'verified'
                                     """
                                 ),
-                                {"symbol": item["symbol"]},
+                                {
+                                    "symbol": item["symbol"],
+                                    "session_start": session_start,
+                                },
                             )
                         ).all()
                     }
@@ -289,10 +300,13 @@ async def reconcile_intraday_bars(ctx: dict[str, Any]) -> dict[str, Any]:
                         )
                     await session.commit()
 
-                # Republish only current-session bars that just became authoritative.
+                # Publish every current-session bar that just became
+                # authoritative — upgraded from a live pending row OR inserted
+                # fresh because the tick worker never built it (e.g. a symbol
+                # armed mid-session). Bars already verified are never re-sent.
                 for row in rows:
                     if (
-                        row["bar_time"] in previously_unverified
+                        row["bar_time"] not in previously_verified_today
                         and row["bar_time"].date() == now_ist.date()
                     ):
                         await redis.publish(

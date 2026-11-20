@@ -1270,7 +1270,8 @@ CREATE TABLE trade_proposals (
         entry_trigger_policy_version IN (
             'cumulative_two_bar_v1',
             'breakout_bar_signal_v2',
-            'balanced_breakout_v3'
+            'balanced_breakout_v3',
+            'balanced_breakout_v4'
         )
     ),
     gemini_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,

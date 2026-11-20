@@ -424,6 +424,92 @@ class ProviderTaxonomyTest(unittest.TestCase):
         self.assertEqual(_classify_provider_failure(502, None, None), PROPOSAL_PROVIDER_UPSTREAM_ERROR)
         self.assertEqual(_classify_provider_failure(None, "upstream_error", "x"), PROPOSAL_PROVIDER_UPSTREAM_ERROR)
 
+    def test_credit_exhaustion_and_client_errors_are_not_invalid_json(self):
+        # Exact OpenRouter 402 seen on every 2026-11-09 attempt (34 rows).
+        from app.services.proposal_generator import (
+            PROPOSAL_INVALID_PROVIDER_JSON,
+            PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS,
+            PROPOSAL_PROVIDER_REQUEST_REJECTED,
+        )
+
+        msg = (
+            "This request requires more credits, or fewer max_tokens. You requested "
+            "up to 16384 tokens, but can only afford 6569."
+        )
+        self.assertEqual(
+            _classify_provider_failure(402, 402, msg), PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS
+        )
+        self.assertEqual(
+            _classify_provider_failure(None, 402, msg), PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS
+        )
+        self.assertEqual(
+            _classify_provider_failure(401, 401, "No auth credentials found"),
+            PROPOSAL_PROVIDER_REQUEST_REJECTED,
+        )
+        self.assertEqual(
+            _classify_provider_failure(400, 400, "Invalid request"),
+            PROPOSAL_PROVIDER_REQUEST_REJECTED,
+        )
+        self.assertEqual(_classify_provider_failure(408, None, None), PROPOSAL_PROVIDER_TIMEOUT)
+        # A genuinely unparseable 200 payload keeps the JSON bucket.
+        self.assertEqual(_classify_provider_failure(None, None, None), PROPOSAL_INVALID_PROVIDER_JSON)
+        self.assertFalse(
+            ProposalProviderError("x", error_type=PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS).retryable
+        )
+        self.assertFalse(
+            ProposalProviderError("x", error_type=PROPOSAL_PROVIDER_REQUEST_REJECTED).retryable
+        )
+        self.assertTrue(ProposalProviderError("x").retryable)
+        self.assertTrue(
+            ProposalProviderError("x", error_type=PROPOSAL_SCHEMA_INCONSISTENT).retryable
+        )
+
+    async def _call_with_http_402(self):
+        import httpx
+        from app.services import proposal_generator as pg
+
+        body = {
+            "error": {
+                "code": 402,
+                "message": "This request requires more credits, or fewer max_tokens.",
+                "metadata": {"limit_source": "openrouter_credits"},
+            }
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(402, json=body)
+
+        real_client = httpx.AsyncClient
+
+        def client_factory(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_client(*args, **kwargs)
+
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch.object(pg.httpx, "AsyncClient", side_effect=client_factory),
+            _patch.object(pg.settings, "openrouter_api_key", "test-key"),
+            _patch.object(pg.settings, "openrouter_api_url", "https://openrouter.test/v1/chat"),
+        ):
+            await pg.call_gemini_vision_for_proposal(
+                context_png=b"png",
+                detail_png=b"png",
+                model="google/gemini-3.7-flash",
+                tick_size=Decimal("0.05"),
+                candidate_summary="summary",
+            )
+
+    def test_http_402_end_to_end_classification(self):
+        import asyncio
+        from app.services.proposal_generator import PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS
+
+        with self.assertRaises(ProposalProviderError) as ctx:
+            asyncio.run(self._call_with_http_402())
+        self.assertEqual(ctx.exception.error_type, PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS)
+        self.assertFalse(ctx.exception.retryable)
+        self.assertEqual(ctx.exception.details["http_status"], 402)
+
     def _wrap(self, content: dict) -> dict:
         return {
             "id": "x",

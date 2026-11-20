@@ -741,13 +741,10 @@ async def _find_intent(
             JOIN positions p ON p.id = oi.position_id
             WHERE oi.execution_mode = :execution_mode
               AND (
-                    (:async_id IS NOT NULL AND oi.fyers_async_id = :async_id)
-                 OR (:fyers_order_id IS NOT NULL
-                     AND oi.fyers_order_id = :fyers_order_id)
-                 OR (:exchange_order_id IS NOT NULL
-                     AND oi.exchange_order_id = :exchange_order_id)
-                 OR (:tagged_intent_id IS NOT NULL
-                     AND oi.id = :tagged_intent_id)
+                    oi.fyers_async_id = CAST(:async_id AS text)
+                 OR oi.fyers_order_id = CAST(:fyers_order_id AS text)
+                 OR oi.exchange_order_id = CAST(:exchange_order_id AS text)
+                 OR oi.id = CAST(:tagged_intent_id AS uuid)
               )
             FOR UPDATE OF oi
             """

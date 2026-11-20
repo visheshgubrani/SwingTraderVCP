@@ -880,6 +880,56 @@ class TestStructuralDispositions(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertNotIn("broken_down", statuses)
 
+    async def test_insufficient_credits_is_recorded_once_without_retry(self):
+        """Regression: OpenRouter HTTP 402 (2026-11-09 batch) was stored as
+        proposal_invalid_provider_json and retried pointlessly."""
+        from app.domain.p10_geometry import StructuralGateVerdict
+        from app.services.proposal_generator import (
+            PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS,
+            ProposalProviderError,
+        )
+
+        session = self._session()
+        verdict = StructuralGateVerdict(disposition="ok", codes=(), details={})
+        provider_error = ProposalProviderError(
+            "OpenRouter HTTP 402 provider error: requires more credits (code=402)",
+            error_type=PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS,
+            details={"http_status": 402},
+        )
+        with (
+            patch("app.workers.proposal_worker.async_session", session),
+            patch("app.workers.proposal_worker.settings.proposal_max_attempts", 2),
+            patch(
+                "app.workers.proposal_worker.compute_structural_facts",
+                return_value=self._neutral_facts(),
+            ),
+            patch(
+                "app.workers.proposal_worker.evaluate_structural_gates",
+                return_value=verdict,
+            ),
+            patch(
+                "app.workers.proposal_worker.call_gemini_vision_for_proposal",
+                new=AsyncMock(side_effect=provider_error),
+            ) as mock_gemini,
+        ):
+            from app.workers.proposal_worker import process_proposal_candidate
+
+            outcome = await process_proposal_candidate(
+                automation_run_id=str(uuid4()),
+                candidate=self._candidate(),
+                as_of_date=dt.date(2026, 8, 18),
+                deadline=dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24),
+            )
+        self.assertEqual(outcome, "failed")
+        self.assertEqual(mock_gemini.await_count, 1)
+        inserts = [sql for sql, _ in session.statements if "INSERT INTO proposal_attempts" in sql]
+        self.assertEqual(len(inserts), 1)
+        finished = [
+            params.get("error_type") for sql, params in session.statements
+            if "UPDATE proposal_attempts" in sql and params.get("error_type")
+        ]
+        self.assertEqual(finished, [PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS])
+
     async def test_structural_invalid_skips_inference_and_closes_watch(self):
         from app.domain.p10_geometry import StructuralGateVerdict
 

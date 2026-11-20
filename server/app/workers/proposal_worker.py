@@ -35,6 +35,9 @@ from app.domain.p10_geometry import (
     structural_facts_to_dict,
 )
 from app.domain.p10_sizing import TEMPLATE_CONFIG, EntryTemplate
+from app.domain.p10_triggers import initial_entry_window_end
+from app.services.auth_readiness import configured_nse_holidays
+from app.services.entry_leg_lifecycle import supersede_older_initial_legs
 from app.redis_pool import redis_settings_from_config, tune_arq_redis_pool
 from app.services.distributed_lease import (
     acquire_distributed_lease,
@@ -563,6 +566,16 @@ async def _persist_proposal(
             },
         )
 
+    if auto_arm:
+        await supersede_older_initial_legs(
+            session, symbol=proposal["symbol"], proposal_id=proposal_id
+        )
+
+    initial_window_end = initial_entry_window_end(
+        proposal["entry_session_date"],
+        str(proposal.get("entry_trigger_policy_version") or ""),
+        configured_nse_holidays(),
+    )
     template = EntryTemplate(proposal["entry_template"])
     allocations = TEMPLATE_CONFIG[template]["leg_allocations"]
     for leg_index, allocation in enumerate(allocations, start=1):
@@ -599,7 +612,7 @@ async def _persist_proposal(
                 "hold_required": hold_required,
                 "base_required": base_required,
                 "eligible_start": proposal["entry_session_date"] if initial else None,
-                "eligible_end": proposal["entry_session_date"] if initial else None,
+                "eligible_end": initial_window_end if initial else None,
             },
         )
     await session.commit()
@@ -780,9 +793,10 @@ async def process_proposal_candidate(
             continue
         except ProposalProviderError as exc:
             logger.warning(
-                "Proposal attempt %s for %s returned unusable provider JSON: %s",
+                "Proposal attempt %s for %s failed at the provider (%s): %s",
                 attempt_number,
                 candidate.symbol,
+                exc.error_type,
                 exc,
             )
             async with async_session() as session:
@@ -795,7 +809,7 @@ async def process_proposal_candidate(
                     error_message=str(exc),
                     error_details=exc.details,
                 )
-            if attempt_number == settings.proposal_max_attempts:
+            if attempt_number == settings.proposal_max_attempts or not exc.retryable:
                 return "failed"
             delay = min(3.0 * attempt_number, max(0.0, (deadline - dt.datetime.now(dt.timezone.utc)).total_seconds() - 2.0))
             if delay > 0:

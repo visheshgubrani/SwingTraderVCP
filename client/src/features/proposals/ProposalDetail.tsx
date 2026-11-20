@@ -487,6 +487,15 @@ function AuditFooter({ proposal, onOpenRun }: { proposal: TradeProposalItem; onO
   )
 }
 
+/** "entry session D1" for single-session legs, "entry window D1 – D5" otherwise. */
+function entryWindowLabel(proposal: { entry_session_date: string; legs?: Array<{ leg_index: number; eligible_session_end: string | null }> }): string {
+  const end = proposal.legs?.find((leg) => leg.leg_index === 1)?.eligible_session_end
+  if (end && end !== proposal.entry_session_date) {
+    return `entry window ${fmtDate(proposal.entry_session_date)} – ${fmtDate(end)}`
+  }
+  return `entry session ${fmtDate(proposal.entry_session_date)}`
+}
+
 /** Full proposal detail: decision, levels, legs, charts, evidence, basis, audit. */
 export function ProposalDetail({
   proposalId,
@@ -531,7 +540,7 @@ export function ProposalDetail({
             )}
           </div>
           <p className="mt-1 font-mono text-2xs text-muted-text">
-            EOD {fmtDate(proposal.as_of_date)} · entry session {fmtDate(proposal.entry_session_date)} · confidence{" "}
+            EOD {fmtDate(proposal.as_of_date)} · {entryWindowLabel(proposal)} · confidence{" "}
             {fmtNum(toNum(proposal.confidence), 0)} (display only)
           </p>
         </div>

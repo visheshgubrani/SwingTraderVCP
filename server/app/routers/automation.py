@@ -24,6 +24,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import db_dep
 from app.domain.p10_triggers import IST_TZ, entry_window_closed
+from app.services.entry_leg_lifecycle import supersede_older_initial_legs
 from app.services.execution_engine import publish_tick_subscriptions
 from app.schemas.proposals import (
     ProposalDecisionRequest,
@@ -1288,6 +1289,9 @@ async def record_proposal_decision(
             SET status = 'armed', updated_at = now()
             WHERE proposal_id = :id AND leg_index = 1;
         """), {"id": proposal_id})
+        await supersede_older_initial_legs(
+            db, symbol=prop.symbol, proposal_id=proposal_id
+        )
         logger.info(f"Proposal {proposal_id} ({prop.symbol}) APPROVED and L1 ARMED")
     else:
         # Transition proposal to rejected

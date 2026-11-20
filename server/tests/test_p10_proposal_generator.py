@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import unittest
+import unittest.mock
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -165,6 +166,29 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(deadline.hour, 9)
         self.assertEqual(deadline.minute, 0)
 
+    def test_already_extended_close_is_an_audited_non_proposal(self):
+        import dataclasses
+
+        from app.services import proposal_generator as generator
+
+        original = generator.construct_python_owned_levels
+        last_close = Decimal(str(self.candles[-1].close))
+
+        def extended_geometry(**kwargs):
+            geom = original(**kwargs)
+            return dataclasses.replace(geom, chase_ceiling=last_close - Decimal("0.05"))
+
+        with unittest.mock.patch.object(
+            generator, "construct_python_owned_levels", side_effect=extended_geometry
+        ):
+            proposal = self._generate(
+                _ai_output(),
+                generated_at=dt.datetime(2026, 8, 18, 8, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+            )
+        self.assertFalse(proposal.accepted)
+        self.assertEqual(proposal.rejection_code, "proposal_already_extended")
+        self.assertEqual(proposal.rejection_details["as_of_close"], str(last_close))
+
     def test_generate_trade_proposal_valid(self):
         proposal = self._generate(
             _ai_output(),
@@ -188,9 +212,9 @@ class TestProposalGenerator(unittest.TestCase):
         self.assertEqual(locked["geometry_version"], GEOMETRY_VERSION)
         self.assertEqual(
             locked["entry_trigger_policy_version"],
-            "balanced_breakout_v3",
+            "balanced_breakout_v4",
         )
-        self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v8")
+        self.assertEqual(GEOMETRY_VERSION, "p10_python_owned_levels_v9")
         self.assertEqual(len(locked["geometry"]["target_slots"]), 3)
 
     def test_proposal_generated_after_d1_deadline_starts_expired(self):

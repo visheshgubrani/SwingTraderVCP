@@ -238,8 +238,10 @@ money-path workers into the API process.
   from rejection counters and accuracy metrics), and `failed`
   (provider/infrastructure; taxonomy separates `proposal_provider_timeout`,
   `proposal_provider_upstream_error`, `proposal_provider_rate_limited`,
-  `proposal_invalid_provider_json`, and the retryable schema violation
-  `proposal_schema_inconsistent`). Forming names are rechecked after the new
+  the non-retried request refusals `proposal_provider_insufficient_credits`
+  (HTTP 402) and `proposal_provider_request_rejected` (other 4xx),
+  `proposal_invalid_provider_json` (unusable 2xx body only), and the
+  retryable schema violation `proposal_schema_inconsistent`). Forming names are rechecked after the new
   shortlist, at most 10 per batch. Every renderer, geometry, prompt,
   input, provider attempt, and policy version is audited. The worker
   evaluates candidates with a 90-second per-attempt timeout and at most one retry.
@@ -292,7 +294,8 @@ without updating this file.
 | Position monitor worker      | positions / position_events; calls execution engine for exits   |
 | Screener / LLM jobs          | scan_runs, screening_results                                    |
 | Proposal worker              | frozen charts, vision attempts, immutable trade proposals, `p10_forming_patterns` |
-| Entry supervisor             | triggers, legs, risk snapshots, allocation ledger; calls execution engine |
+| Entry supervisor             | triggers, legs, risk snapshots, allocation ledger, end-of-session entry retirement; calls execution engine |
+| `services/entry_leg_lifecycle.py` | non-money leg transitions only: supersede older waiting initial legs, cancel unreachable planned legs (used by proposal worker, approval API, entry supervisor) |
 | Reconcile / scheduler        | job_runs, reconciliation_*, broker-auth readiness, system_events |
 | Journal processor (arq)      | journal_entries, journal_fill_outbox, market_regime_snapshots     |
 | Journal router (API)         | journal review fields, actual_charges, chart artifact uploads   |
@@ -492,7 +495,7 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
 - 52-week high is informational (`near_52w_high`, `fresh_high_breakout`,
   `level_to_watch`). It is never a rejection.
 - **Structural gates (policy `p10_structural_gates_v3`, carried by
-  `GEOMETRY_VERSION = p10_python_owned_levels_v8`)** run on the Python
+  `GEOMETRY_VERSION = p10_python_owned_levels_v9`)** run on the Python
   geometry before inference (undercut and base age on unfolded raw swings;
   tightening, pullback volume and pivot on the folded candidates) and are independent of Gemini survivor
   resolution. Dispositions: `ok` (proceed), `forming` (watch — never a
@@ -542,6 +545,9 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
     allowed between consecutive survivors (from snapped data, not Gemini)
   - `stage2_context = yes`
   - `volume_dry_up` in `{clearly, somewhat}`
+  - the as-of close is at or below the chase ceiling; a close already above
+    it is `proposal_already_extended` (no completed bar could ever close
+    inside the buy zone)
 - Python selects the template from a versioned rules table
   (`p10_template_score_v1`). Gemini does not pick a template. Static
   template configs still map to maximum approved-risk shares:
@@ -552,6 +558,11 @@ and computes no pivot/entry/target. `not_vcp` is an audited non-proposal.
 | `three_leg_front` | 50% / 30% / 20% | 2.0× |
 | `two_leg` | 60% / 40% | 1.75× |
 | `three_leg_balanced` | 40% / 30% / 30% | 1.5× |
+
+The breakout-bar RVOL column is the frozen ladder for `balanced_breakout_v3`
+and older rows. `balanced_breakout_v4` (active, §6.1) freezes **1.25×** for
+every template and also accepts session-cumulative RVOL ≥ 1.2× as the
+alternative volume proof.
 
 V1 of the scorer emits only `single`, `two_leg`, or `three_leg_front`.
 `|llm_count − python_count| > 1` forces `single` and a review-UI mismatch
@@ -579,10 +590,25 @@ proof. No template may create more than three entry legs.
   `PAPER_AUTO_ARM_PROPOSALS=true`, and `live_eligible=true`. It must never run
   in `shadow`, `reduced_live`, `full_live`, or live execution mode. Disabling
   the flag restores manual approval in paper mode.
-- Approval before that deadline arms the initial leg for **D1 only**; this is
-  the separate entry-trigger window. If it does not trigger on D1, it becomes
-  `entry_expired`. The D1 window is considered closed at **16:00 IST on D1**
-  (after the final 15:45 intraday bar-reconciliation tick): the entry
+- Approval before that deadline arms the initial leg for its **entry
+  window**, which is separate from the approval TTL and frozen on the leg
+  (`eligible_session_start`/`eligible_session_end`) at proposal persistence:
+  - `balanced_breakout_v4` (active): **five NSE sessions, D1..D5**. Each
+    session is a fresh chance: an attempt that does not fill is retired at the
+    session close (§6.8) and the leg re-arms for the next session while the
+    window is open and the setup is valid.
+  - v4 setup invalidation: any verified 5-minute close **below the frozen
+    initial stop** expires the initial leg immediately; a closed session whose
+    last verified close is **above the chase ceiling** expires it as
+    `extended_missed`.
+  - v4 supersede / single-name rule: arming a newer proposal for the same
+    symbol expires an older initial leg still waiting (`armed` /
+    `waiting_for_reset`, no intent); and an initial leg is blocked
+    (`rejected_capacity`, `symbol_already_held`) while a non-closed position
+    for that symbol exists in the same execution mode.
+  - `balanced_breakout_v3` and older rows: **D1 only** (frozen).
+  The window is considered closed at **16:00 IST on its final eligible
+  session** (after the final 15:45 intraday bar-reconciliation tick): the entry
   supervisor persists `expired` on untriggered `armed`/`trigger_observed`/
   `waiting_for_reset` legs and cancels their higher-index `planned` siblings,
   and the API derives
@@ -667,7 +693,19 @@ position monitor: SL + T1/T2/T3 + ATR runner → reconcile → journal
   Session-cumulative RVOL and signal volume divided by the median of the preceding
   12 verified same-session 5-minute bars are persisted as diagnostics.
 - Policy versions:
-  - `balanced_breakout_v3` (active production default): A single verified 5-minute close
+  - `balanced_breakout_v4` (active production default): a single verified
+    completed 5-minute bar starting at or after 09:30 triggers when it closes
+    **inside the buy zone** (`trigger < close <= chase_ceiling`) **and**
+    either its breakout-bar RVOL ≥ **1.25×** (all templates) **or** the
+    session-cumulative RVOL through that bar ≥ **1.2×**. When the bucket
+    fraction is unavailable (first bucket, non-positive profile delta) only
+    the session branch decides; it never fails open. A close above the chase
+    ceiling is audited as `signal_rejected` and leaves the leg armed. A
+    pre-submit `rejected_chase` / `rejected_price_reversal` / preflight
+    rejection returns the leg straight to `armed` (the next in-zone bar is a
+    fresh signal); capacity, P9 and stop-streak blocks still go to
+    `waiting_for_reset`. Entry window and invalidation: §5.4.
+  - `balanced_breakout_v3` (frozen historical): A single verified 5-minute close
     above pivot/base-high with template breakout-bar RVOL qualifies the trigger
     immediately. Template thresholds under `p10_template_score_v2`:
     `single: 1.75×`, `two_leg: 1.50×`, `two_leg_staged: 1.50×`, `three_leg_front: 1.50×`,
@@ -684,8 +722,15 @@ position monitor: SL + T1/T2/T3 + ATR runner → reconcile → journal
     above trigger, and transitioned volume-failed signals to `waiting_for_reset`.
   - `cumulative_two_bar_v1` (frozen historical): Required two-bar cumulative session RVOL
     and confirmation-time chase validation.
-- Chase geometry (`entry + min(2%, 0.5R)`), D1-only initial entry window, ADV20 profile
-  freshness ($\ge 15$ sessions), structural stops, and exit rules remain identical across versions.
+- Chase geometry (`entry + min(2%, 0.5R)`), ADV20 profile freshness
+  ($\ge 15$ sessions), structural stops, and exit rules remain identical across
+  versions. The initial entry window is D1-only through v3 and D1..D5 for v4.
+- Profile robustness: cumulative bucket medians are clamped non-decreasing at
+  build time; no bar before 09:30 touches the profile; a blocked profile
+  fails closed for that leg and bar only and never aborts other legs, the
+  rest of the bar event, or the startup replay. Reconciliation publishes
+  every current-session bar it newly verifies (upgraded or freshly inserted),
+  and a late live flush never downgrades a verified bar.
 
 ### 6.2 Add-leg eligibility
 
@@ -865,6 +910,24 @@ events, and fills live in Postgres. Redis events are never authoritative.
 - A lost broker response becomes `submission_unknown`; freeze the leg until
   the order gateway or reconciliation resolves it. Partial fills are managed
   from actual quantity and are never blindly topped up.
+- **End-of-session retirement.** Once 16:00 IST passes on the session an
+  entry intent was created, an intent with no fill is retired by the entry
+  supervisor: a `created` intent (never claimed, so no broker holds it) is
+  cancelled in every mode; in paper mode the paper ledger is authoritative,
+  so any claimed-but-unfilled intent and its open paper order are cancelled.
+  The `pending_entry` position is cancelled (add legs release their
+  reservation) and the leg is returned for retry — a later qualifying bar in
+  an open window creates a brand-new intent with a new idempotency key;
+  otherwise the expiry sweep retires it. A claimed **live** intent is never
+  guessed at: it stays frozen for the order gateway / reconciliation with a
+  critical event. Anything with a fill belongs to the fill processors.
+- A paper submission that fails after its claim (for example a database
+  error while booking) rolls back every paper-ledger write, rejects the
+  intent, cancels the reservation, returns the leg for retry, and emits a
+  critical event — it never strands a `submission_pending` claim.
+- Unreachable `planned` add legs (proposal not approved, preceding leg ended
+  without a fill, or the position closed/cancelled) are cancelled by the
+  supervisor's maintenance sweep.
 - Restart after a target, stop, or risk-correction trigger reconstructs the
   outstanding action from its persisted intent/fills instead of firing again.
 
@@ -1219,11 +1282,26 @@ the phase table above is authoritative going forward.
   while live still verifies it.
 - Schema consistency: contradictory `valid`/`forming`/`not_vcp` packets are
   retryable `proposal_schema_inconsistent` errors; provider taxonomy mapping
-  (timeout/upstream/rate-limited/invalid-JSON); `existing` is a no-op
+  (timeout/upstream/rate-limited/insufficient-credits/request-rejected/
+  invalid-JSON; 402 and other 4xx are never invalid-JSON and are not
+  retried); `existing` is a no-op
   outcome excluded from rejected counts; run ledger categories derived from
   attempt error types.
 - Forming watch: no `trade_proposals` row and no geometry prices; expiry at
   10 sessions or universe drop; batch cap of 10 rechecks.
+- balanced_breakout_v4: bar branch, session branch, both failing, close above
+  chase (audited, stays armed), pre-09:30 bar never loads a profile, missing
+  bucket fraction falls back to the session branch; D1..D5 window with
+  weekend/holiday skipping; close-below-stop invalidation; chase/reversal
+  rejection re-arms while capacity waits for reset; already-extended proposal
+  is an audited non-proposal.
+- End-of-session retirement matrix (paper claimed-but-unfilled cancelled,
+  live `created` cancelled, live claimed intents untouched with one critical
+  event, filled/partial untouched, nothing retired before the session close);
+  paper submission crash after claim terminalizes cleanly; monotonic volume
+  profile.
+- SQL: no bind parameter is NULL-tested without `CAST(:x AS type)` (asyncpg
+  cannot infer it); lint-enforced.
 - Five-minute replay: first-15-minute exclusion, robust profile with strict
   pre-evaluation-session inputs, bucket-delta breakout RVOL, price-only
   confirmation, stale volume, reconciliation drift, `waiting_for_reset`,

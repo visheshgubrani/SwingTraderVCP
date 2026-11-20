@@ -38,9 +38,13 @@ from app.domain.p10_geometry import (
     resolve_surviving_contractions,
     structural_facts_to_dict,
 )
-from app.domain.p10_sizing import EntryTemplate, TEMPLATE_CONFIG
+from app.domain.p10_sizing import (
+    EntryTemplate,
+    TEMPLATE_CONFIG,
+    breakout_bar_rvol_threshold,
+)
 from app.domain.p10_triggers import (
-    BALANCED_BREAKOUT_POLICY_V3,
+    BALANCED_BREAKOUT_POLICY_V4,
     BREAKOUT_BAR_SIGNAL_POLICY_V2,
 )
 from app.domain.p10_template_policy import (
@@ -63,15 +67,23 @@ logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
 PROMPT_VERSION = "p10_vcp_proposal_v9"
 SCHEMA_VERSION = "gemini_vcp_proposal_output_v9"
-GEOMETRY_VERSION = "p10_python_owned_levels_v8"
-ENTRY_TRIGGER_POLICY_VERSION = BALANCED_BREAKOUT_POLICY_V3
+GEOMETRY_VERSION = "p10_python_owned_levels_v9"
+ENTRY_TRIGGER_POLICY_VERSION = BALANCED_BREAKOUT_POLICY_V4
 PROPOSAL_INVALID_PROVIDER_JSON = "proposal_invalid_provider_json"
+PROPOSAL_ALREADY_EXTENDED = "proposal_already_extended"
 PROPOSAL_STRUCTURAL_FORMING = "proposal_structural_forming"
 PROPOSAL_STRUCTURAL_INVALID = "proposal_structural_invalid"
 PROPOSAL_SCHEMA_INCONSISTENT = "proposal_schema_inconsistent"
 PROPOSAL_PROVIDER_TIMEOUT = "proposal_provider_timeout"
 PROPOSAL_PROVIDER_UPSTREAM_ERROR = "proposal_provider_upstream_error"
 PROPOSAL_PROVIDER_RATE_LIMITED = "proposal_provider_rate_limited"
+PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS = "proposal_provider_insufficient_credits"
+PROPOSAL_PROVIDER_REQUEST_REJECTED = "proposal_provider_request_rejected"
+# Deterministic request-side refusals: retrying the identical request inside
+# the same attempt budget cannot succeed, so the worker records them once.
+NON_RETRYABLE_PROVIDER_ERRORS = frozenset(
+    {PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS, PROPOSAL_PROVIDER_REQUEST_REJECTED}
+)
 _PROVIDER_PAYLOAD_SNIPPET_LIMIT = 4000
 
 
@@ -86,7 +98,17 @@ def _classify_provider_failure(
     if http_status == 429 or "429" in code_s or "rate" in code_s or "quota" in msg_s:
         return PROPOSAL_PROVIDER_RATE_LIMITED
     if (
+        http_status == 402
+        or code_s == "402"
+        or "requires more credits" in msg_s
+        or "insufficient credits" in msg_s
+    ):
+        # OpenRouter account balance cannot cover max_tokens. Not a model
+        # output problem; it must never be counted as invalid provider JSON.
+        return PROPOSAL_PROVIDER_INSUFFICIENT_CREDITS
+    if (
         http_status == 504
+        or http_status == 408
         or "504" in code_s
         or "timeout" in code_s
         or "aborted" in code_s
@@ -103,6 +125,10 @@ def _classify_provider_failure(
         or "overloaded" in msg_s
     ):
         return PROPOSAL_PROVIDER_UPSTREAM_ERROR
+    if http_status is not None and 400 <= http_status < 500:
+        # Auth, bad request, moderation, etc.: the provider refused the
+        # request before any model output existed.
+        return PROPOSAL_PROVIDER_REQUEST_REJECTED
     return PROPOSAL_INVALID_PROVIDER_JSON
 
 
@@ -122,6 +148,10 @@ class ProposalProviderError(RuntimeError):
         if error_type is not None:
             self.error_type = error_type
         self.details = details or {}
+
+    @property
+    def retryable(self) -> bool:
+        return self.error_type not in NON_RETRYABLE_PROVIDER_ERRORS
 
 
 GEMINI_PROPOSAL_SYSTEM_PROMPT = f"""You are a strict technical analyst applying Mark Minervini's Volatility Contraction Pattern (VCP) methodology to Indian equities.
@@ -374,7 +404,7 @@ def _serialize_calculation_basis(
             "leg_count": tmpl_info["leg_count"],
             "leg_risk_allocations": [float(x) for x in tmpl_info["leg_allocations"]],
             "relative_volume_threshold": float(
-                tmpl_info["breakout_bar_rvol_threshold"]
+                breakout_bar_rvol_threshold(tmpl, ENTRY_TRIGGER_POLICY_VERSION)
             ),
             "entry_trigger_policy_version": ENTRY_TRIGGER_POLICY_VERSION,
             "risk_per_trade_pct": str(risk_per_trade_pct * Decimal("100")),
@@ -551,6 +581,29 @@ def generate_trade_proposal_from_analysis(
             },
         )
 
+    as_of_close = Decimal(str(candles[-1].close))
+    if as_of_close > geom.chase_ceiling:
+        # The breakout already ran past the buy zone before D1: no completed
+        # bar can ever close inside (trigger, chase], so arming it only wastes
+        # a slot. A later base may still produce a fresh proposal.
+        return _rejected(
+            PROPOSAL_ALREADY_EXTENDED,
+            (
+                f"As-of close {as_of_close} is already above the chase ceiling "
+                f"{geom.chase_ceiling}; the setup is extended."
+            ),
+            details={
+                "as_of_close": str(as_of_close),
+                "pivot_price": str(geom.pivot_price),
+                "chase_ceiling": str(geom.chase_ceiling),
+                "close_vs_pivot_pct": str(
+                    ((as_of_close - geom.pivot_price) / geom.pivot_price * 100).quantize(
+                        Decimal("0.01")
+                    )
+                ),
+            },
+        )
+
     if approved_risk_budget_amount is None or approved_risk_budget_amount <= 0:
         return _rejected(
             "proposal_risk_budget_missing",
@@ -629,7 +682,9 @@ def generate_trade_proposal_from_analysis(
         "approved_risk_budget_amount": approved_risk_budget_amount,
         "leg_count": tmpl_info["leg_count"],
         "leg_risk_allocations": [float(x) for x in tmpl_info["leg_allocations"]],
-        "relative_volume_threshold": tmpl_info["breakout_bar_rvol_threshold"],
+        "relative_volume_threshold": breakout_bar_rvol_threshold(
+            tmpl, ENTRY_TRIGGER_POLICY_VERSION
+        ),
         "entry_trigger_policy_version": ENTRY_TRIGGER_POLICY_VERSION,
         "gemini_evidence": {
             "classification": ai_output.classification,

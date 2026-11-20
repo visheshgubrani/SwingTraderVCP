@@ -186,9 +186,13 @@ class FiveMinuteBarAggregator:
                         low = EXCLUDED.low, close = EXCLUDED.close,
                         volume = EXCLUDED.volume,
                         cumulative_volume = EXCLUDED.cumulative_volume,
-                        reconciliation_status = 'pending', reconciled_at = NULL;
+                        reconciliation_status = 'pending', reconciled_at = NULL
+                    -- A late live flush must never downgrade a bar the
+                    -- provider history already verified.
+                    WHERE five_minute_bars.reconciliation_status <> 'verified'
+                    RETURNING id;
                 """)
-                await db.execute(stmt, {
+                written = await db.execute(stmt, {
                     "symbol": bar.symbol,
                     "bar_time": bar.bar_time,
                     "open": bar.open,
@@ -198,10 +202,14 @@ class FiveMinuteBarAggregator:
                     "volume": bar.volume,
                     "cumulative_volume": bar.cumulative_volume,
                 })
+                persisted = written.first() is not None
                 await db.commit()
         except Exception as e:
             logger.error(f"Failed to persist 5m bar for {bar.symbol}: {e}")
             raise
+        if not persisted:
+            # Already verified by reconciliation, which published it.
+            return
 
         try:
             await self.redis.publish(REDIS_CHANNEL_5M_BARS, json.dumps(bar_dict))

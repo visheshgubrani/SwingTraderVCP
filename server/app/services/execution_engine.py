@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -25,6 +26,8 @@ from app.services.staged_exit_manager import (
     StagedPositionState,
     allocate_cumulative_target_fill,
 )
+
+logger = logging.getLogger(__name__)
 
 REDIS_TICK_SUBS_CHANNEL = "tick_subs"
 
@@ -434,6 +437,7 @@ async def create_proposal_entry_intent(
                    tp.t1, tp.t2, tp.t3, tp.geometry,
                    el.id AS leg_id, el.leg_index, el.status AS leg_status,
                    el.position_id, el.trigger_price,
+                   el.eligible_session_start, el.eligible_session_end,
                    pd.expected_proposal_hash
             FROM trade_proposals tp
             JOIN entry_legs el ON el.proposal_id = tp.id
@@ -460,8 +464,14 @@ async def create_proposal_entry_intent(
         )
 
     today_ist = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Kolkata")).date()
-    if int(plan["leg_index"]) == 1 and plan["entry_session_date"] != today_ist:
-        raise ExecutionSafetyError("Initial proposal leg is outside its D1 entry session.")
+    if int(plan["leg_index"]) == 1 and not initial_leg_within_entry_window(
+        today_ist,
+        entry_session_date=plan["entry_session_date"],
+        eligible_session_end=plan.get("eligible_session_end"),
+    ):
+        raise ExecutionSafetyError(
+            "Initial proposal leg is outside its approved entry window."
+        )
 
     execution_mode = settings.execution_mode
     trigger_key = trigger_event_timestamp.astimezone(timezone.utc).isoformat()
@@ -1689,23 +1699,45 @@ async def create_paper_entry_intent(
     return await create_entry_intent(db, **kwargs)
 
 
+def initial_leg_within_entry_window(
+    today: Any,
+    *,
+    entry_session_date: Any,
+    eligible_session_end: Any,
+) -> bool:
+    """D1 through the leg's frozen eligible end (D1 only for pre-v4 legs)."""
+    end = eligible_session_end or entry_session_date
+    return entry_session_date <= today <= end
+
+
 async def _cancel_entry_before_submission(
     db: AsyncSession,
     *,
     snapshot: dict[str, Any],
     reason: str,
+    from_statuses: tuple[str, ...] = ("created",),
 ) -> bool:
-    """Release a P10 reservation when final eligibility fails pre-broker."""
+    """Release a P10 reservation when final eligibility fails pre-broker.
+
+    `from_statuses` widens the cancellable intent states only for callers that
+    have proven no broker order can exist (the paper ledger end-of-session
+    retirement); live callers keep the default `created`-only contract.
+    """
     cancel_result = await db.execute(
         text(
             """
             UPDATE order_intents
             SET status = 'cancelled', reason = :reason
-            WHERE id = :intent_id AND status = 'created'
+            WHERE id = :intent_id
+              AND status = ANY(CAST(:from_statuses AS text[]))
             RETURNING id
             """
         ),
-        {"intent_id": snapshot["id"], "reason": reason},
+        {
+            "intent_id": snapshot["id"],
+            "reason": reason,
+            "from_statuses": list(from_statuses),
+        },
     )
     cancelled = cancel_result.mappings().one_or_none()
     if cancelled is None:
@@ -1734,7 +1766,41 @@ async def _cancel_entry_before_submission(
             "quantity": snapshot["quantity"],
         },
     )
-    await db.execute(
+    await release_entry_leg_for_retry(
+        db, leg_id=snapshot["entry_leg_id"], intent_id=snapshot["id"]
+    )
+    return True
+
+
+async def cancel_unsent_entry_intent(
+    db: AsyncSession,
+    *,
+    snapshot: dict[str, Any],
+    reason: str,
+    from_statuses: tuple[str, ...] = ("created",),
+) -> bool:
+    """Public wrapper: cancel an entry intent no broker holds and free its leg."""
+    return await _cancel_entry_before_submission(
+        db, snapshot=snapshot, reason=reason, from_statuses=from_statuses
+    )
+
+
+async def release_entry_leg_for_retry(
+    db: AsyncSession,
+    *,
+    leg_id: UUID,
+    intent_id: UUID,
+) -> bool:
+    """Return an entry leg whose attempt never reached a fill to its trigger state.
+
+    v2/v3 legs consumed their trigger and must see a reset bar first; every
+    other policy (v1, v4) re-arms directly so the next qualifying bar can
+    create a fresh intent with a fresh idempotency key. The leg's link to the
+    abandoned intent (and, for the initial leg, its cancelled position) is
+    cleared so a new attempt never reuses them. If the leg's entry window has
+    already closed, the expiry sweep retires the re-armed leg on its next tick.
+    """
+    result = await db.execute(
         text(
             """
             UPDATE entry_legs el
@@ -1757,14 +1823,12 @@ async def _cancel_entry_before_submission(
               AND el.id = :leg_id
               AND el.order_intent_id = :intent_id
               AND el.status = 'intent_created'
+            RETURNING el.id
             """
         ),
-        {
-            "leg_id": snapshot["entry_leg_id"],
-            "intent_id": snapshot["id"],
-        },
+        {"leg_id": leg_id, "intent_id": intent_id},
     )
-    return True
+    return result.mappings().one_or_none() is not None
 
 
 async def submit_live_entry_intent(
@@ -2064,13 +2128,103 @@ async def _complete_paper_submission(
             payload={"s": "error", "message": str(exc)},
             message=str(exc),
         )
+        await _release_paper_entry_leg(db, snapshot=snapshot)
         await db.commit()
         return SubmissionResult(
             broker_call_made=True,
             outcome="rejected",
             message=str(exc),
         )
+    except Exception as exc:
+        return await _fail_claimed_paper_submission(db, snapshot=snapshot, exc=exc)
 
+    try:
+        return await _book_paper_acceptance(
+            db,
+            redis,
+            snapshot=snapshot,
+            paper_result=paper_result,
+            process_order_message=process_order_message,
+            process_trade_message=process_trade_message,
+            publish_paper_fill_events=publish_paper_fill_events,
+        )
+    except ExecutionSafetyError:
+        raise
+    except Exception as exc:
+        return await _fail_claimed_paper_submission(db, snapshot=snapshot, exc=exc)
+
+
+async def _release_paper_entry_leg(
+    db: AsyncSession, *, snapshot: dict[str, Any]
+) -> None:
+    if snapshot.get("intent_type") == "entry" and snapshot.get("entry_leg_id"):
+        await release_entry_leg_for_retry(
+            db, leg_id=snapshot["entry_leg_id"], intent_id=snapshot["id"]
+        )
+
+
+async def _fail_claimed_paper_submission(
+    db: AsyncSession,
+    *,
+    snapshot: dict[str, Any],
+    exc: Exception,
+) -> SubmissionResult:
+    """Terminalize a claimed paper intent whose booking crashed mid-transaction.
+
+    The paper ledger is authoritative and every paper-broker write shares the
+    failed transaction, so after rollback nothing was booked anywhere. Leaving
+    the committed claim in `submission_pending` would strand the leg, the
+    pending position and its reserved risk forever; instead the intent is
+    rejected, the reservation released, and the leg returned for retry.
+    """
+    message = f"Paper submission failed before booking: {type(exc).__name__}: {exc}"[:500]
+    logger.exception("Paper submission failed for intent %s", snapshot.get("id"))
+    try:
+        await db.rollback()
+        await _record_definite_rejection(
+            db,
+            snapshot=snapshot,
+            payload={"s": "error", "message": message},
+            message=message,
+        )
+        await _release_paper_entry_leg(db, snapshot=snapshot)
+        await _emit_system_event(
+            db,
+            severity="critical",
+            event_type="paper_submission_failed",
+            correlation_id=snapshot["id"],
+            position_id=snapshot.get("position_id"),
+            order_intent_id=snapshot["id"],
+            payload={
+                "symbol": snapshot.get("symbol"),
+                "intent_type": snapshot.get("intent_type"),
+                "error_type": type(exc).__name__,
+                "message": message,
+            },
+        )
+        await db.commit()
+    except Exception:
+        logger.exception(
+            "Could not terminalize failed paper intent %s", snapshot.get("id")
+        )
+        raise exc
+    return SubmissionResult(
+        broker_call_made=True,
+        outcome="rejected",
+        message=message,
+    )
+
+
+async def _book_paper_acceptance(
+    db: AsyncSession,
+    redis,
+    *,
+    snapshot: dict[str, Any],
+    paper_result,
+    process_order_message,
+    process_trade_message,
+    publish_paper_fill_events,
+) -> SubmissionResult:
     recorded = await db.execute(
         text(
             """
@@ -2199,8 +2353,14 @@ async def _load_live_intent_for_submission(
                 ZoneInfo("Asia/Kolkata")
             ).date()
             if int(snapshot.get("entry_leg_index") or 0) == 1:
-                if snapshot["entry_session_date"] != today_ist:
-                    raise ExecutionSafetyError("Approved initial proposal entry is outside D1.")
+                if not initial_leg_within_entry_window(
+                    today_ist,
+                    entry_session_date=snapshot["entry_session_date"],
+                    eligible_session_end=snapshot.get("eligible_session_end"),
+                ):
+                    raise ExecutionSafetyError(
+                        "Approved initial proposal entry is outside its entry window."
+                    )
             elif not (
                 snapshot.get("eligible_session_start")
                 and snapshot.get("eligible_session_end")

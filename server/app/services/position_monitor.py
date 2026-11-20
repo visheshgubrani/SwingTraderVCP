@@ -509,7 +509,18 @@ async def _process_p10_position_tick(
                 """
                 UPDATE entry_legs
                 SET status = 'cancelled', updated_at = now()
-                WHERE position_id = :position_id
+                WHERE (
+                        position_id = :position_id
+                        -- Planned add legs carry no position_id until they arm;
+                        -- match them through the position's proposal.
+                     OR (
+                            position_id IS NULL
+                        AND leg_index > 1
+                        AND proposal_id = (
+                            SELECT proposal_id FROM positions WHERE id = :position_id
+                        )
+                     )
+                  )
                   AND status IN (
                       'planned', 'armed', 'trigger_observed',
                       'waiting_for_reset'
